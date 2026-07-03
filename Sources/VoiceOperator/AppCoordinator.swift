@@ -20,6 +20,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching")
+        LaunchAtLogin.enableByDefaultOnce()   // start at login (first run only)
         // Explicitly request microphone access so the TCC prompt reliably
         // appears (AVAudioEngine alone doesn't always trigger it).
         AVCaptureDevice.requestAccess(for: .audio) { granted in

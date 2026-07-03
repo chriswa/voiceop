@@ -56,10 +56,13 @@ final class AudioArbiter {
 
     private(set) var ttsHistory: [TTSHistoryEntry] = []
     private(set) var sttHistory: [STTHistoryEntry] = []
+    private(set) var commandHistory: [CommandHistoryEntry] = []
     private let historyLimit = 10
     private let historyStore = HistoryStore()
-    // STT clips live in Application Support so "Retry" survives restarts and
-    // Cache purges (unlike the regenerable TTS audio cache, which stays in Caches).
+    /// Which mode the in-progress dictation is in (set at begin, used at finish).
+    private var dictationMode: DictationMode = .paste
+    // Dictation clips (STT + command) live in Application Support so "Retry"
+    // survives restarts and Cache purges (unlike the regenerable TTS audio cache).
     private let sttDir: URL = {
         let dir = HistoryStore.supportDir.appendingPathComponent("stt-history", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -71,11 +74,12 @@ final class AudioArbiter {
         let loaded = historyStore.load()
         ttsHistory = loaded.tts
         sttHistory = loaded.stt
+        commandHistory = loaded.commands
     }
 
-    /// Persist + notify whenever either history list changes.
+    /// Persist + notify whenever any history list changes.
     private func historyChanged() {
-        historyStore.save(tts: ttsHistory, stt: sttHistory)
+        historyStore.save(.init(tts: ttsHistory, stt: sttHistory, commands: commandHistory))
         onHistoryChanged?()
     }
 
@@ -102,18 +106,19 @@ final class AudioArbiter {
 
     // MARK: - Dictation
 
-    func beginDictation() {
+    func beginDictation(mode: DictationMode) {
         guard !dictationPaused, !recorder.isRecording else { return }
+        dictationMode = mode
         isDictating = true
         if let interrupted = current {           // barge-in: re-cue from the start
             queue.insert(interrupted, at: 0)
             current = nil
         }
         tts.halt()
-        SoundEffect.listeningStarted.play()
+        (mode == .command ? SoundEffect.commandListeningStarted : .listeningStarted).play()
         do {
             try recorder.start()
-            onStatus?(.listening)
+            onStatus?(mode == .command ? .commandListening : .listening)
             // Mute background media just after the start chirp, so the chirp
             // itself isn't swallowed by the system-output mute.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -142,7 +147,7 @@ final class AudioArbiter {
         let peak = recorder.lastPeak
         let rms = recorder.lastRMS
         muter.restore()                    // listening done → unmute immediately
-        SoundEffect.listeningFinished.play()
+        (dictationMode == .command ? SoundEffect.commandListeningFinished : .listeningFinished).play()
 
         // Silence gate: if the mic never crossed a voice-energy threshold, the
         // user said nothing — skip transcription entirely rather than let Whisper
@@ -156,27 +161,34 @@ final class AudioArbiter {
         }
 
         onStatus?(.transcribing)
-        Task { await self.finish(wav: wav, duration: duration) }
+        Task { await self.finish(wav: wav, duration: duration, mode: dictationMode) }
     }
 
-    private func finish(wav: URL, duration: TimeInterval) async {
+    private func finish(wav: URL, duration: TimeInterval, mode: DictationMode) async {
         var transcript = ""
-        do {
-            transcript = try await transcriber.transcribe(wavURL: wav, language: "en")
-            if !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // If the user said only a call-sign, raise that surface instead
-                // of pasting the word.
-                if let handler = directedReplyHandler, await handler(transcript) {
-                    SoundEffect.surfaceRaised.play()
-                } else {
-                    onStatus?(.pasting)
-                    pasteAndRemember(transcript)
-                }
+        do { transcript = try await transcriber.transcribe(wavURL: wav, language: "en") }
+        catch { NSLog("transcribe failed: \(error)") }
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch mode {
+        case .paste:
+            if !trimmed.isEmpty {
+                onStatus?(.pasting)
+                pasteAndRemember(transcript)
             }
-        } catch {
-            NSLog("transcribe failed: \(error)")
+            recordSTT(wav: wav, duration: duration, transcript: transcript)   // Recent Dictations
+
+        case .command:
+            // Run the transcript through the voice-tool router only — never paste.
+            var recognized = false
+            if !trimmed.isEmpty, let handler = directedReplyHandler {
+                recognized = await handler(transcript)
+            }
+            recordCommand(wav: wav, duration: duration, transcript: transcript, recognized: recognized)
+            if !trimmed.isEmpty {
+                (recognized ? SoundEffect.surfaceRaised : SoundEffect.unrecognized).play()
+            }
         }
-        recordSTT(wav: wav, duration: duration, transcript: transcript)
         finishDictation()
     }
 
@@ -241,19 +253,37 @@ final class AudioArbiter {
         historyChanged()
     }
 
-    private func recordSTT(wav: URL, duration: TimeInterval, transcript: String) {
-        let entry = STTHistoryEntry(date: Date(), duration: duration, transcript: transcript, wavURL: {
-            let dst = sttDir.appendingPathComponent("\(UUID().uuidString).wav")
-            try? FileManager.default.copyItem(at: wav, to: dst)
-            return FileManager.default.fileExists(atPath: dst.path) ? dst : nil
-        }())
+    /// Move a temp recording into the persistent clip store; returns its URL.
+    private func persistClip(_ wav: URL) -> URL? {
+        let dst = sttDir.appendingPathComponent("\(UUID().uuidString).wav")
+        try? FileManager.default.copyItem(at: wav, to: dst)
+        let ok = FileManager.default.fileExists(atPath: dst.path)
         try? FileManager.default.removeItem(at: wav)
+        return ok ? dst : nil
+    }
+
+    private func recordSTT(wav: URL, duration: TimeInterval, transcript: String) {
+        let entry = STTHistoryEntry(date: Date(), duration: duration, transcript: transcript,
+                                    wavURL: persistClip(wav))
         sttHistory.insert(entry, at: 0)
         if sttHistory.count > historyLimit {
             for evicted in sttHistory[historyLimit...] {
                 if let u = evicted.wavURL { try? FileManager.default.removeItem(at: u) }
             }
             sttHistory.removeLast(sttHistory.count - historyLimit)
+        }
+        historyChanged()
+    }
+
+    private func recordCommand(wav: URL, duration: TimeInterval, transcript: String, recognized: Bool) {
+        let entry = CommandHistoryEntry(date: Date(), duration: duration, transcript: transcript,
+                                        recognized: recognized, wavURL: persistClip(wav))
+        commandHistory.insert(entry, at: 0)
+        if commandHistory.count > historyLimit {
+            for evicted in commandHistory[historyLimit...] {
+                if let u = evicted.wavURL { try? FileManager.default.removeItem(at: u) }
+            }
+            commandHistory.removeLast(commandHistory.count - historyLimit)
         }
         historyChanged()
     }
@@ -340,8 +370,39 @@ final class AudioArbiter {
     /// Copy a past dictation's transcript to the clipboard.
     func copySTT(id: UUID) {
         guard let entry = sttHistory.first(where: { $0.id == id }) else { return }
+        copyToClipboard(entry.transcript)
+    }
+
+    /// Re-transcribe a stored command clip and re-run it through the voice-tool
+    /// router, updating the history entry and cueing the outcome.
+    func retryCommand(id: UUID) {
+        guard let entry = commandHistory.first(where: { $0.id == id }), let wav = entry.wavURL else { return }
+        Task {
+            do {
+                let text = try await transcriber.transcribe(wavURL: wav, language: "en")
+                var recognized = false
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let handler = directedReplyHandler {
+                    recognized = await handler(text)
+                }
+                if let i = commandHistory.firstIndex(where: { $0.id == id }) {
+                    commandHistory[i].transcript = text
+                    commandHistory[i].recognized = recognized
+                    historyChanged()
+                }
+                (recognized ? SoundEffect.surfaceRaised : SoundEffect.unrecognized).play()
+            } catch { NSLog("retry command failed: \(error)") }
+        }
+    }
+
+    /// Copy a past command's transcript to the clipboard.
+    func copyCommand(id: UUID) {
+        guard let entry = commandHistory.first(where: { $0.id == id }) else { return }
+        copyToClipboard(entry.transcript)
+    }
+
+    private func copyToClipboard(_ text: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(entry.transcript, forType: .string)
+        pb.setString(text, forType: .string)
     }
 }

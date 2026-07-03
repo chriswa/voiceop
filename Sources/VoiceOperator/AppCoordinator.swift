@@ -58,8 +58,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onMoreDetailsTTS = { [weak self] id in self?.arbiter.moreDetails(id: id) }
         menuBar.onRetrySTT = { [weak self] id in self?.arbiter.retrySTT(id: id) }
         menuBar.onCopySTT = { [weak self] id in self?.arbiter.copySTT(id: id) }
+        menuBar.commandHistoryProvider = { [weak self] in self?.arbiter.commandHistory ?? [] }
+        menuBar.onRetryCommand = { [weak self] id in self?.arbiter.retryCommand(id: id) }
+        menuBar.onCopyCommand = { [weak self] id in self?.arbiter.copyCommand(id: id) }
 
-        hotkey.onStart = { [weak self] in self?.arbiter.beginDictation() }
+        hotkey.onStart = { [weak self] mode in self?.arbiter.beginDictation(mode: mode) }
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
         installHotkeyWhenTrusted()

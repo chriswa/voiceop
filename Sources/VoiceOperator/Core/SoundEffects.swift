@@ -9,10 +9,13 @@ import AVFoundation
 /// These must play *outside* the dictation output-mute window (see AudioArbiter),
 /// otherwise the system-output mute would swallow them.
 enum SoundEffect {
-    case listeningStarted
-    case listeningFinished
+    case listeningStarted           // Fn (paste) capture began
+    case listeningFinished          // Fn (paste) capture ended
+    case commandListeningStarted    // Ctrl+Fn (command) capture began
+    case commandListeningFinished   // Ctrl+Fn (command) capture ended
     case pasted
-    case surfaceRaised   // directed reply: raised a spaceterm surface
+    case surfaceRaised              // a voice tool matched + ran
+    case unrecognized               // command matched no tool ("sad")
 
     @MainActor func play() { SoundBank.shared.play(self) }
 }
@@ -26,11 +29,18 @@ final class SoundBank {
 
     private init() {
         wavs = [
+            // Paste mode: low-ish rising/falling two-tone.
             .listeningStarted:  Self.chirp([(660, 0.09), (990, 0.11)]),
             .listeningFinished: Self.chirp([(990, 0.09), (660, 0.11)]),
+            // Command mode: brighter, higher-pitched rising/falling — clearly
+            // distinct from paste so you can hear which mode you're in.
+            .commandListeningStarted:  Self.chirp([(988, 0.08), (1319, 0.11)]),
+            .commandListeningFinished: Self.chirp([(1319, 0.08), (988, 0.11)]),
             .pasted:            Self.chirp([(1320, 0.06), (0, 0.04), (1320, 0.07)]),
-            // Rising three-tone "swoop" — distinct from paste; signals a raise.
+            // Rising three-tone "swoop" — a voice tool matched + ran.
             .surfaceRaised:     Self.chirp([(700, 0.06), (950, 0.06), (1300, 0.11)]),
+            // Descending low two-tone — "sad": command matched no tool.
+            .unrecognized:      Self.chirp([(415, 0.13), (311, 0.22)]),
         ]
     }
 

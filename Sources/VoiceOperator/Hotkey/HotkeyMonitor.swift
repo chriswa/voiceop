@@ -30,10 +30,17 @@ final class HotkeyMonitor {
     static func requestInputMonitoring() -> Bool {
         IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
     }
-    var onStart: (() -> Void)?
+    /// Dictation started. The mode is decided by whether **Control** is held when
+    /// dictation begins (Ctrl+Fn = command, Fn = paste). Read at start time — the
+    /// hold threshold naturally debounces the Ctrl/Fn key-order skew.
+    var onStart: ((DictationMode) -> Void)?
     var onStop: (() -> Void)?
     /// Fired on ⌘⌃V — re-paste the last pasted text.
     var onRepaste: (() -> Void)?
+
+    /// Live Control-key state, updated from every flagsChanged event.
+    private var controlDown = false
+    private var currentMode: DictationMode { controlDown ? .command : .paste }
 
     // ⌘⌃V: V is keycode 9 (kVK_ANSI_V); requires Command + Control.
     private static let vKeycode: Int64 = 9
@@ -94,13 +101,11 @@ final class HotkeyMonitor {
             return
         }
         guard type == .flagsChanged else { return }
+        // Track Control from every modifier change, so we know at dictation-start
+        // whether this is a Ctrl+Fn (command) or plain Fn (paste) trigger.
+        controlDown = event.flags.contains(.maskControl)
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
-        // Diagnostic (Fn-only, low volume): confirms what the Fn key emits on this
-        // machine while we validate the migration. Remove once Fn is proven.
-        if keycode == Self.triggerKeycode || (flags & Self.triggerBit) != 0 {
-            Log.log(String(format: "hotkey: flagsChanged keycode=%lld flags=0x%llx", keycode, flags))
-        }
         guard keycode == Self.triggerKeycode else { return }
         let down = (flags & Self.triggerBit) != 0
         if down == isDown { return }   // ignore duplicates / confounding modifiers
@@ -122,7 +127,7 @@ final class HotkeyMonitor {
             MainActor.assumeIsolated {
                 guard let self, self.isDown, self.mode == .idle else { return }
                 self.mode = .pushToTalk
-                self.onStart?()
+                self.onStart?(self.currentMode)
             }
         }
     }
@@ -139,7 +144,7 @@ final class HotkeyMonitor {
             if now.timeIntervalSince(lastTapTime) <= doubleTapWindow {
                 lastTapTime = .distantPast
                 mode = .toggled
-                onStart?()
+                onStart?(currentMode)
             } else {
                 lastTapTime = now
             }

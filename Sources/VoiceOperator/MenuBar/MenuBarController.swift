@@ -19,6 +19,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         title: "Open at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let ttsHistoryItem = NSMenuItem(title: "Recent Updates", action: nil, keyEquivalent: "")
     private let sttHistoryItem = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
+    private let cmdHistoryItem = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
 
     var onTogglePause: ((Bool) -> Void)?
     var onToggleNarration: ((Bool) -> Void)?
@@ -37,6 +38,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onMoreDetailsTTS: ((UUID) -> Void)?
     var onRetrySTT: ((UUID) -> Void)?
     var onCopySTT: ((UUID) -> Void)?
+    var commandHistoryProvider: (() -> [CommandHistoryEntry])?
+    var onRetryCommand: ((UUID) -> Void)?
+    var onCopyCommand: ((UUID) -> Void)?
 
     private(set) var isPaused = false
     private(set) var isNarrationMuted = false
@@ -64,6 +68,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(ttsHistoryItem)
         sttHistoryItem.submenu = NSMenu()
         menu.addItem(sttHistoryItem)
+        cmdHistoryItem.submenu = NSMenu()
+        menu.addItem(cmdHistoryItem)
         menu.addItem(.separator())
         let restart = NSMenuItem(title: "Restart Voice Operator", action: #selector(restartApp), keyEquivalent: "r")
         restart.target = self
@@ -78,6 +84,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         rebuildTTSHistory()
         rebuildSTTHistory()
+        rebuildCommandHistory()
         loginMenuItem.state = (launchAtLoginState?() ?? false) ? .on : .off
     }
 
@@ -139,6 +146,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         sttHistoryItem.submenu = sub
     }
 
+    private func rebuildCommandHistory() {
+        let entries = commandHistoryProvider?() ?? []
+        let sub = NSMenu()
+        if entries.isEmpty {
+            sub.addItem(disabledItem("No commands yet"))
+        } else {
+            for e in entries {
+                let item = NSMenuItem(title: e.menuTitle, action: nil, keyEquivalent: "")
+                item.toolTip = e.recognized ? e.transcript : "\(e.transcript)  (no matching tool)"
+                let actions = NSMenu()
+                let retry = NSMenuItem(title: "Retry", action: #selector(retryCommand(_:)), keyEquivalent: "")
+                retry.target = self; retry.representedObject = e.id
+                let copy = NSMenuItem(title: "Copy transcription", action: #selector(copyCommand(_:)), keyEquivalent: "")
+                copy.target = self; copy.representedObject = e.id
+                copy.isEnabled = !e.transcript.isEmpty
+                actions.addItem(retry)
+                actions.addItem(copy)
+                item.submenu = actions
+                sub.addItem(item)
+            }
+        }
+        cmdHistoryItem.submenu = sub
+    }
+
     private func disabledItem(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
@@ -155,6 +186,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
     @objc private func moreDetailsTTS(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? UUID { onMoreDetailsTTS?(id) }
+    }
+    @objc private func retryCommand(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? UUID { onRetryCommand?(id) }
+    }
+    @objc private func copyCommand(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? UUID { onCopyCommand?(id) }
     }
     @objc private func retrySTT(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? UUID { onRetrySTT?(id) }

@@ -23,35 +23,55 @@ struct HistoryStore {
 
     private var fileURL: URL { Self.supportDir.appendingPathComponent("history.json") }
 
+    struct Contents {
+        var tts: [TTSHistoryEntry] = []
+        var stt: [STTHistoryEntry] = []
+        var commands: [CommandHistoryEntry] = []
+    }
+
     private struct Payload: Codable {
         var version: Int
         var tts: [TTSHistoryEntry]
         var stt: [STTHistoryEntry]
+        var commands: [CommandHistoryEntry]
+
+        // Lenient: every list defaults to empty if absent, so adding a new list
+        // (or reading an older file) never fails the whole decode.
+        init(version: Int, tts: [TTSHistoryEntry], stt: [STTHistoryEntry], commands: [CommandHistoryEntry]) {
+            self.version = version; self.tts = tts; self.stt = stt; self.commands = commands
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            version = try c.decode(Int.self, forKey: .version)
+            tts = try c.decodeIfPresent([TTSHistoryEntry].self, forKey: .tts) ?? []
+            stt = try c.decodeIfPresent([STTHistoryEntry].self, forKey: .stt) ?? []
+            commands = try c.decodeIfPresent([CommandHistoryEntry].self, forKey: .commands) ?? []
+        }
     }
 
-    func load() -> (tts: [TTSHistoryEntry], stt: [STTHistoryEntry]) {
-        guard let data = try? Data(contentsOf: fileURL) else { return ([], []) }
+    func load() -> Contents {
+        guard let data = try? Data(contentsOf: fileURL) else { return Contents() }
         return Self.decode(data)
     }
 
-    /// Failure-tolerant decode (also used by tests): any malformed/old/incompatible
+    /// Failure-tolerant decode (also used by tests): any malformed/incompatible
     /// payload yields empty history instead of throwing.
-    static func decode(_ data: Data) -> (tts: [TTSHistoryEntry], stt: [STTHistoryEntry]) {
+    static func decode(_ data: Data) -> Contents {
         do {
             let p = try JSONDecoder().decode(Payload.self, from: data)
             guard p.version == version else {
                 Log.log("history: ignoring incompatible version \(p.version) (expected \(version))")
-                return ([], [])
+                return Contents()
             }
-            return (p.tts, p.stt)
+            return Contents(tts: p.tts, stt: p.stt, commands: p.commands)
         } catch {
             Log.log("history: could not decode (\(error)); starting empty")
-            return ([], [])
+            return Contents()
         }
     }
 
-    func save(tts: [TTSHistoryEntry], stt: [STTHistoryEntry]) {
-        let payload = Payload(version: Self.version, tts: tts, stt: stt)
+    func save(_ c: Contents) {
+        let payload = Payload(version: Self.version, tts: c.tts, stt: c.stt, commands: c.commands)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }

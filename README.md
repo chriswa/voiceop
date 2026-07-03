@@ -49,17 +49,26 @@ grants land (no relaunch needed).
 
 ## Dictation
 
-- **Hold Fn (🌐)** → dictate while held (push-to-talk).
-- **Double-tap Fn** → hands-free; the next Fn press stops.
+Two modes, chosen by whether **Control** is held when you start:
+
+- **Fn (🌐)** → **paste** mode (icon turns **red**). The transcript is pasted
+  verbatim — no voice-tool interpretation.
+- **Ctrl+Fn** → **command** mode (icon turns **magenta**). The transcript is run
+  through the voice-tool router *only* (never pasted). A distinct start/stop
+  chirp signals command mode; a "sad" chirp means no tool matched (transcript
+  dropped).
+
+Each mode supports **hold** (push-to-talk) and **double-tap** (hands-free; next
+press stops).
 
 Set System Settings → Keyboard → "Press 🌐 key to" = **Do Nothing** so Fn doesn't
 also trigger emoji/dictation/input-switching.
 
-## Voice commands
+## Voice commands (command mode — Ctrl+Fn)
 
-Dictate one of these (instead of it being pasted). A verb with **no name**
-targets the **last-referenced** agent — the last one that spoke *or* that any
-tool (repeat / more details / surface) last acted on:
+In command mode, dictate one of these. A verb with **no name** targets the
+**last-referenced** agent — the last one that spoke *or* that any tool
+(repeat / more details / focus) last acted on:
 
 - **"Focus ⟨name⟩"** — raise that Claude surface in spaceterm. Name homophones
   resolve (e.g. "Focus Amber" → Ember).

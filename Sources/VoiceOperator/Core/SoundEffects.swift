@@ -16,6 +16,10 @@ enum SoundEffect {
     case pasted
     case surfaceRaised              // a voice tool matched + ran
     case unrecognized               // command matched no tool ("sad")
+    case transcriptionFailed        // transcription request errored
+    case clipRequested              // started fetching a TTS clip (very short)
+    case clipStarted                // TTS playback began (very short)
+    case clipFinished               // TTS playback finished (very short)
 
     @MainActor func play() { SoundBank.shared.play(self) }
 }
@@ -41,6 +45,14 @@ final class SoundBank {
             .surfaceRaised:     Self.chirp([(700, 0.06), (950, 0.06), (1300, 0.11)]),
             // Descending low two-tone — "sad": command matched no tool.
             .unrecognized:      Self.chirp([(415, 0.13), (311, 0.22)]),
+            // Descending minor three-tone — something went wrong (e.g. the
+            // transcription request failed). Longer/lower than "unrecognized"
+            // so an error is audibly distinct from a mere no-match.
+            .transcriptionFailed: Self.chirp([(523, 0.10), (392, 0.10), (262, 0.22)]),
+            // Very short single blips around each TTS clip's lifecycle.
+            .clipRequested:     Self.chirp([(1200, 0.04)], volume: 0.5),
+            .clipStarted:       Self.chirp([(1600, 0.04)], volume: 0.5),
+            .clipFinished:      Self.chirp([(900, 0.05)], volume: 0.5),
         ]
     }
 
@@ -58,7 +70,7 @@ final class SoundBank {
     /// Build a 16-bit mono 44.1 kHz WAV from a sequence of (frequency, seconds)
     /// segments. A frequency of 0 is silence. Each tone gets a short fade to
     /// avoid clicks.
-    private static func chirp(_ segments: [(freq: Double, dur: Double)]) -> Data {
+    private static func chirp(_ segments: [(freq: Double, dur: Double)], volume: Double = 1.0) -> Data {
         let sampleRate = 44_100.0
         var samples: [Int16] = []
         for seg in segments {
@@ -70,23 +82,10 @@ final class SoundBank {
                 else if i > n - fade { env = Double(n - i) / Double(fade) }
                 let value: Double = seg.freq == 0 ? 0
                     : env * sin(2 * .pi * seg.freq * Double(i) / sampleRate)
-                samples.append(Int16(max(-1, min(1, value)) * 32000))
+                samples.append(Int16(max(-1, min(1, value)) * volume * 32000))
             }
         }
-        return wav(samples, sampleRate: Int(sampleRate))
-    }
-
-    private static func wav(_ samples: [Int16], sampleRate: Int) -> Data {
-        let dataBytes = samples.count * 2
-        var d = Data()
-        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
-        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
-        d.append(contentsOf: Array("RIFF".utf8)); u32(UInt32(36 + dataBytes))
-        d.append(contentsOf: Array("WAVE".utf8))
-        d.append(contentsOf: Array("fmt ".utf8)); u32(16); u16(1); u16(1)
-        u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 2)); u16(2); u16(16)
-        d.append(contentsOf: Array("data".utf8)); u32(UInt32(dataBytes))
-        for s in samples { u16(UInt16(bitPattern: s)) }
-        return d
+        let bytes = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        return WAVFile(sampleRate: Int(sampleRate), samples: bytes).data
     }
 }

@@ -61,6 +61,18 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   (`opusEncoder.worker.js`), ~16 kHz mono (`sample_rate`).
 - **Fallback (simplest to replicate first)**: `POST /llm/asr` and `POST /llm/asr_audio_chunks`
   (`transcribeOpenAIAudio` / `transcribeOpenAIAudioChunks`, 20 s timeout) — Whisper-based.
+- **Chunking (confirmed from Flow 1.5.1095)**: `/llm/asr` enforces a hard ~20 s server-side
+  budget — it answers `408 {"detail":"Request timed out"}` beyond it — so it can only handle a
+  short clip per request. Flow never sends long audio in one call: it cuts dictations into
+  **28-second chunks** (`basetenChunkSizeSeconds = 28`), transcribes each chunk as it
+  accumulates mid-dictation (sequentially, one in flight), and joins per-chunk transcripts
+  with a single space (`prevAsrText()`, empty chunks dropped). Cuts are fixed-length — no
+  silence detection. Flow also caps a dictation at 20 min (warning at 19). We replicate the
+  full model: the recorder converts to 16 kHz s16le live in the tap, the arbiter transcribes
+  each full 28 s chunk *while recording continues* (sequential, one in flight — see
+  `AudioArbiter.pumpLiveChunks`), and only the short tail is transcribed at stop, so paste
+  latency is flat regardless of dictation length. `WisprTranscriber.transcribe` also chunks
+  any >28 s WAV it's handed (retries of stored clips take that path).
 - **Formatting / cleanup**: other `/llm/*` REST endpoints, e.g. `/llm/extract_asr_words`,
   `/llm/flow_state_2025`. Proper-noun/punctuation/formatting live here (client dictionary +
   server LLM). Exact request bodies still to be decoded in the spike.

@@ -11,19 +11,23 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private let statusMenuItem = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
-    private let pauseMenuItem = NSMenuItem(
-        title: "Pause Dictation", action: #selector(togglePause), keyEquivalent: "d")
+    private let focusAgentItem = NSMenuItem(title: "Focus", action: #selector(focusAgent), keyEquivalent: "")
+    // No key equivalents anywhere: a menu-bar accessory never holds keyboard
+    // focus, so shortcuts would never fire.
     private let narrationMenuItem = NSMenuItem(
-        title: "Mute Claude Updates", action: #selector(toggleNarration), keyEquivalent: "m")
+        title: "Mute", action: #selector(toggleNarration), keyEquivalent: "")
     private let loginMenuItem = NSMenuItem(
         title: "Open at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let ttsHistoryItem = NSMenuItem(title: "Recent Updates", action: nil, keyEquivalent: "")
     private let sttHistoryItem = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let cmdHistoryItem = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
 
-    var onTogglePause: ((Bool) -> Void)?
     var onToggleNarration: ((Bool) -> Void)?
     var onRestart: (() -> Void)?
+    /// The agent to offer under "Focus <name>" (current/most-recent), or nil.
+    var focusAgentProvider: (() -> (name: String, sessionKey: String)?)?
+    /// Focus the given session's surface.
+    var onFocusAgent: ((String) -> Void)?
     /// Returns the current launch-at-login state (for the checkmark).
     var launchAtLoginState: (() -> Bool)?
     /// Toggle launch-at-login; return the new effective state for the checkmark.
@@ -42,27 +46,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onRetryCommand: ((UUID) -> Void)?
     var onCopyCommand: ((UUID) -> Void)?
 
-    private(set) var isPaused = false
     private(set) var isNarrationMuted = false
+    private var currentStatus: OperatorStatus = .idle
+    private var unreadCount = 0
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         buildMenu()
-        apply(.idle)
+        refreshIcon()
     }
 
     private func buildMenu() {
         menu.delegate = self
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        focusAgentItem.target = self
+        menu.addItem(focusAgentItem)
         menu.addItem(.separator())
-        pauseMenuItem.target = self
-        menu.addItem(pauseMenuItem)
         narrationMenuItem.target = self
         menu.addItem(narrationMenuItem)
-        loginMenuItem.target = self
-        menu.addItem(loginMenuItem)
         menu.addItem(.separator())
         ttsHistoryItem.submenu = NSMenu()
         menu.addItem(ttsHistoryItem)
@@ -71,11 +74,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         cmdHistoryItem.submenu = NSMenu()
         menu.addItem(cmdHistoryItem)
         menu.addItem(.separator())
-        let restart = NSMenuItem(title: "Restart Voice Operator", action: #selector(restartApp), keyEquivalent: "r")
+        loginMenuItem.target = self
+        menu.addItem(loginMenuItem)   // moved to the bottom, above Restart
+        let restart = NSMenuItem(title: "Restart Voice Operator", action: #selector(restartApp), keyEquivalent: "")
         restart.target = self
         menu.addItem(restart)
         let quit = NSMenuItem(title: "Quit Voice Operator",
-                              action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+                              action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         menu.addItem(quit)
         statusItem.menu = menu
     }
@@ -86,6 +91,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         rebuildSTTHistory()
         rebuildCommandHistory()
         loginMenuItem.state = (launchAtLoginState?() ?? false) ? .on : .off
+        if let agent = focusAgentProvider?() {
+            focusAgentItem.title = "Focus \(agent.name)"
+            focusAgentItem.representedObject = agent.sessionKey
+            focusAgentItem.isEnabled = true
+        } else {
+            focusAgentItem.title = "Focus (no agent yet)"
+            focusAgentItem.representedObject = nil
+            focusAgentItem.isEnabled = false
+        }
     }
 
     private func rebuildTTSHistory() {
@@ -200,16 +214,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if let id = sender.representedObject as? UUID { onCopySTT?(id) }
     }
 
-    @objc private func togglePause() {
-        isPaused.toggle()
-        pauseMenuItem.title = isPaused ? "Resume Dictation" : "Pause Dictation"
-        onTogglePause?(isPaused)
-    }
-
     @objc private func toggleNarration() {
         isNarrationMuted.toggle()
-        narrationMenuItem.title = isNarrationMuted ? "Unmute Claude Updates" : "Mute Claude Updates"
+        narrationMenuItem.title = isNarrationMuted ? "Unmute" : "Mute"
         onToggleNarration?(isNarrationMuted)
+        refreshIcon()   // show/hide the prohibition overlay immediately
+    }
+
+    @objc private func focusAgent(_ sender: NSMenuItem) {
+        if let key = sender.representedObject as? String { onFocusAgent?(key) }
     }
 
     @objc private func restartApp() { onRestart?() }
@@ -222,37 +235,90 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Status icon
 
     func update(status: OperatorStatus) {
-        if Thread.isMainThread { apply(status) }
-        else { DispatchQueue.main.async { self.apply(status) } }
+        onMain { self.currentStatus = status; self.refreshIcon() }
     }
 
-    private func apply(_ status: OperatorStatus) {
+    /// Update the unread badge count.
+    func setUnread(_ count: Int) {
+        onMain { self.unreadCount = count; self.refreshIcon() }
+    }
+
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
+    }
+
+    private func refreshIcon() {
         guard let button = statusItem.button else { return }
-        button.image = Self.bullhorn(tinted: status.tint)
-        button.image?.accessibilityDescription = status.accessibilityLabel
-        statusMenuItem.title = status.accessibilityLabel
+        button.image = Self.icon(status: currentStatus, muted: isNarrationMuted, unread: unreadCount)
+        button.image?.accessibilityDescription = currentStatus.accessibilityLabel
+        statusMenuItem.title = currentStatus.accessibilityLabel
     }
 
-    /// A bullhorn (megaphone) silhouette. Template (adapts to menu bar) when
-    /// untinted; solid red (recording) or green (playing) otherwise.
-    private static func bullhorn(tinted tint: NSColor?) -> NSImage {
-        let symbol = NSImage(systemSymbolName: "megaphone.fill",
-                             accessibilityDescription: "Voice Operator")
-            ?? NSImage(size: NSSize(width: 18, height: 18))
-        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        let base = symbol.withSymbolConfiguration(config) ?? symbol
+    // MARK: - Icon rendering
 
-        guard let tint else {
+    /// Bullhorn (megaphone) composited with: a tint (red recording / magenta
+    /// command / cyan fetching / green playing), a prohibition overlay when muted,
+    /// and an unread-count badge. Pure idle renders as an adaptive template.
+    private static func icon(status: OperatorStatus, muted: Bool, unread: Int) -> NSImage {
+        let base = bullhornBase()
+        let hasBadge = unread > 0
+
+        // Pure idle, unmuted, no badge → template (adapts to light/dark menu bar).
+        if status.tint == nil, !muted, !hasBadge {
             base.isTemplate = true
             return base
         }
-        let tinted = NSImage(size: base.size, flipped: false) { rect in
-            base.draw(in: rect)
-            tint.set()
-            rect.fill(using: .sourceAtop)
+
+        let color = status.tint ?? .labelColor
+        let w: CGFloat = hasBadge ? 24 : 18
+        let bullRect = NSRect(x: 0, y: 0, width: 18, height: 18)
+        let img = NSImage(size: NSSize(width: w, height: 18), flipped: false) { _ in
+            // Colorized bullhorn.
+            base.draw(in: bullRect)
+            color.set()
+            bullRect.fill(using: .sourceAtop)
+            if muted { drawProhibition(in: bullRect.insetBy(dx: 0.75, dy: 0.75), color: color) }
+            if hasBadge { drawBadge(unread, in: NSRect(x: w - 12, y: 0, width: 12, height: 12)) }
             return true
         }
-        tinted.isTemplate = false
-        return tinted
+        img.isTemplate = false
+        return img
+    }
+
+    private static func bullhornBase() -> NSImage {
+        let symbol = NSImage(systemSymbolName: "megaphone.fill", accessibilityDescription: "Voice Operator")
+            ?? NSImage(size: NSSize(width: 18, height: 18))
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        return symbol.withSymbolConfiguration(config) ?? symbol
+    }
+
+    /// A circle with a diagonal slash (the "international no" sign).
+    private static func drawProhibition(in rect: NSRect, color: NSColor) {
+        color.setStroke()
+        let circle = NSBezierPath(ovalIn: rect)
+        circle.lineWidth = 1.6
+        circle.stroke()
+        let c = NSPoint(x: rect.midX, y: rect.midY)
+        let r = rect.width / 2
+        let k = 0.707 * r
+        let line = NSBezierPath()
+        line.move(to: NSPoint(x: c.x - k, y: c.y + k))
+        line.line(to: NSPoint(x: c.x + k, y: c.y - k))
+        line.lineWidth = 1.6
+        line.stroke()
+    }
+
+    /// A small red badge with the unread count in the bottom-right corner.
+    private static func drawBadge(_ count: Int, in rect: NSRect) {
+        NSColor.systemRed.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+        let text = count > 9 ? "9+" : "\(count)"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+            .foregroundColor: NSColor.white,
+        ]
+        let size = (text as NSString).size(withAttributes: attrs)
+        let origin = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
+        (text as NSString).draw(at: origin, withAttributes: attrs)
     }
 }

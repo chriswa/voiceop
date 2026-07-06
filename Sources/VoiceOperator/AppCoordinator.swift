@@ -27,6 +27,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             Log.log("mic access request → granted=\(granted)")
         }
         arbiter.onStatus = { [weak self] status in self?.menuBar.update(status: status) }
+        arbiter.onUnreadChanged = { [weak self] count in self?.menuBar.setUnread(count) }
+        menuBar.focusAgentProvider = { [weak self] in self?.arbiter.currentOrLastAgent() }
+        menuBar.onFocusAgent = { [weak self] key in
+            guard let self else { return }
+            self.arbiter.referenceSession(key)
+            if let surface = SpacetermSurfaceResolver.surfaceId(forClaudeSession: key) {
+                SpacetermSocket.focusSurface(surfaceId: surface)
+            }
+        }
         arbiter.onSpeaking = { [weak self] utterance in
             if let utterance {
                 self?.lastSpeaking = utterance
@@ -36,7 +45,6 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 self?.lastSpeaking = nil
             }
         }
-        menuBar.onTogglePause = { [weak self] paused in self?.arbiter.setDictationPaused(paused) }
         menuBar.onToggleNarration = { [weak self] muted in self?.arbiter.setNarrationMuted(muted) }
         menuBar.onRestart = { Relauncher.restartAfterTermination() }
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }

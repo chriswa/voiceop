@@ -10,6 +10,14 @@ if CommandLine.arguments.contains("--asr-test") {
             ?? "The quick brown fox jumps over the lazy dog.")
     exit(0)
 }
+// Transcribe an existing WAV (e.g. a stored dictation clip from
+// ~/Library/Application Support/VoiceOperator/stt-history) through the real
+// chunked WisprTranscriber path and print the transcript.
+if let i = CommandLine.arguments.firstIndex(of: "--transcribe-file"),
+   let path = CommandLine.arguments.dropFirst(i + 1).first {
+    await DebugCLI.runTranscribeFile(path: path)
+    exit(0)
+}
 if CommandLine.arguments.contains("--chirp-test") {
     await DebugCLI.runChirpTest()
     exit(0)

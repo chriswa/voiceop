@@ -30,6 +30,22 @@ enum DebugCLI {
         }
     }
 
+    /// Transcribe an existing WAV file through the real chunked transcriber
+    /// path (one network request per 28 s chunk). Prints the transcript.
+    static func runTranscribeFile(path: String) async {
+        do {
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            let wav = try WAVFile(contentsOf: url)
+            FileHandle.standardError.write(Data(String(format: "clip: %.1fs @ %d Hz\n",
+                                                       wav.duration, wav.sampleRate).utf8))
+            let transcript = try await WisprTranscriber().transcribe(wavURL: url, language: "en")
+            print(transcript)
+        } catch {
+            FileHandle.standardError.write(Data("transcribe-file failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
     /// Play the three dictation chirps in sequence (no network).
     @MainActor
     static func runChirpTest() async {

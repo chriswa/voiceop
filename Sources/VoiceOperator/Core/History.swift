@@ -48,11 +48,16 @@ struct STTHistoryEntry: Identifiable, Sendable, Codable {
     let date: Date
     let duration: TimeInterval
     var transcript: String
+    /// Why the last transcription attempt failed (nil on success) — shown in
+    /// the menu so a failure isn't silently indistinguishable from "(empty)".
+    var error: String? = nil
     let wavURL: URL?
 
     var menuTitle: String {
         let secs = String(format: "%.1fs", duration)
-        let text = transcript.isEmpty ? "(empty)" : transcript.vo_truncated(50)
+        let text = if let error { "⚠️ \(error.vo_truncated(44))" }
+                   else if transcript.isEmpty { "(empty)" }
+                   else { transcript.vo_truncated(50) }
         return "\(date.vo_relativeAge) · \(secs) · \(text)"
     }
 }
@@ -65,10 +70,15 @@ struct CommandHistoryEntry: Identifiable, Sendable, Codable {
     let duration: TimeInterval
     var transcript: String
     var recognized: Bool
+    /// Why the last transcription attempt failed (nil on success).
+    var error: String? = nil
     let wavURL: URL?
 
     var menuTitle: String {
         let secs = String(format: "%.1fs", duration)
+        if let error {
+            return "\(date.vo_relativeAge) · \(secs) · ⚠️ \(error.vo_truncated(40))"
+        }
         let text = transcript.isEmpty ? "(empty)" : transcript.vo_truncated(46)
         return "\(date.vo_relativeAge) · \(secs) · \(recognized ? "" : "✗ ")\(text)"
     }

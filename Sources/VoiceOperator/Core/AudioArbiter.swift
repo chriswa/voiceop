@@ -26,8 +26,11 @@ final class AudioArbiter {
     var directedReplyHandler: ((String) async -> Bool)?
     /// Fired when either history list changes, so the menu can refresh.
     var onHistoryChanged: (() -> Void)?
+    /// Fired with the unread-update count (for the menu-bar badge).
+    var onUnreadChanged: ((Int) -> Void)?
+    /// Fired when mute state changes (for the icon's prohibition overlay).
+    var onMutedChanged: ((Bool) -> Void)?
 
-    private(set) var dictationPaused = false
     private(set) var narrationMuted = false
     private var isDictating = false
     /// The most recently pasted text, for the ⌘⌃V re-paste shortcut.
@@ -38,12 +41,20 @@ final class AudioArbiter {
     private static let silencePeak: Float = 0.03
     private static let silenceRMS: Float = 0.006
 
-    // `bypassMute`: play even when narration is muted (explicit user actions —
-    // replay, more-details). Recording history is the enqueuer's job, not pump's.
-    private struct QueuedUtterance { let utterance: Utterance; let bypassMute: Bool }
-    private var queue: [QueuedUtterance] = []
+    // Narration updates not fully heard yet (oldest→newest) — the "unread" list
+    // and badge source. Muting halts and leaves them here; unmuting replays oldest
+    // first. `oneOff` is explicit playback (replay / more-details / escape) that
+    // bypasses mute and isn't counted as unread.
+    private var unread: [Utterance] = []
+    private var oneOff: [Utterance] = []
+    private var current: Utterance?
+    private var currentIsNarration = false
     private var pumping = false
-    private var current: QueuedUtterance?
+    private var halted = false      // set when we deliberately stop playback
+
+    var unreadCount: Int { unread.count }
+    private func notifyUnread() { onUnreadChanged?(unread.count) }
+    private func haltPlayback() { halted = true; tts.halt() }
 
     /// The session most recently *referenced* — by narration OR by any tool
     /// (repeat / more-details / surface, with or without a name). A name-less
@@ -85,39 +96,56 @@ final class AudioArbiter {
 
     // MARK: - Toggles
 
-    func setDictationPaused(_ paused: Bool) {
-        dictationPaused = paused
-        onStatus?(paused ? .paused : .idle)
-    }
-
-    /// Mute/unmute Claude narration. Muting halts current speech and drops queued
-    /// updates; new turns while muted are skipped (the watcher still advances, so
-    /// unmuting doesn't replay a backlog). Explicit replays still play.
+    /// Mute/unmute Claude narration. Muting stops playback immediately; any update
+    /// not fully heard stays in the unread list. Unmuting replays the unread
+    /// updates oldest→newest. Explicit one-off plays (replay/more-details) ignore
+    /// mute.
     func setNarrationMuted(_ muted: Bool) {
         narrationMuted = muted
-        if muted {
-            queue.removeAll()
-            current = nil
-            tts.halt()
-        } else {
-            pump()
+        onMutedChanged?(muted)
+        if muted { haltPlayback() } else { pump() }
+    }
+
+    /// The agent currently speaking, or the most-recently referenced — for the
+    /// menu's "Focus <name>" shortcut.
+    func currentOrLastAgent() -> (name: String, sessionKey: String)? {
+        if currentIsNarration, let c = current, let key = c.sessionKey { return (c.name, key) }
+        if let key = lastReferencedSessionKey, let e = lastTTSEntry(forSessionKey: key) {
+            return (e.name, key)
         }
+        return nil
     }
 
     // MARK: - Dictation
 
+    // Live chunking (Wispr Flow's model): while recording, every full
+    // `liveChunkSeconds` of captured audio is transcribed immediately —
+    // sequentially, one request in flight — so when the user stops talking only
+    // a short tail is left to transcribe, regardless of dictation length.
+
+    /// Per-dictation live-chunking state. A class (not properties on the
+    /// arbiter) so an in-flight chunk request and a still-running `finish()`
+    /// keep operating on *their* dictation's state even if the user has
+    /// already started the next dictation.
+    @MainActor
+    private final class LiveChunkSession {
+        var texts: [String] = []          // per-chunk transcripts, in order
+        var offset = 0                    // captured bytes already dispatched
+        var task: Task<Void, Never>?      // the one chunk request in flight
+        var failure: String?              // first failure; stops further sends
+    }
+    private var liveSession: LiveChunkSession?
+    private var liveChunkTimer: Timer?
+
     func beginDictation(mode: DictationMode) {
-        guard !dictationPaused, !recorder.isRecording else { return }
+        guard !recorder.isRecording else { return }
         dictationMode = mode
         isDictating = true
-        if let interrupted = current {           // barge-in: re-cue from the start
-            queue.insert(interrupted, at: 0)
-            current = nil
-        }
-        tts.halt()
+        haltPlayback()   // barge-in: a narration update in progress returns to unread
         (mode == .command ? SoundEffect.commandListeningStarted : .listeningStarted).play()
         do {
             try recorder.start()
+            startLiveChunking()
             onStatus?(mode == .command ? .commandListening : .listening)
             // Mute background media just after the start chirp, so the chirp
             // itself isn't swallowed by the system-output mute.
@@ -126,19 +154,86 @@ final class AudioArbiter {
                 self.muter.mute()
             }
         } catch {
-            NSLog("recorder start failed: \(error)")
+            Log.log("recorder start failed: \(error)")
             isDictating = false
             onStatus?(.idle)
         }
     }
 
+    private func startLiveChunking() {
+        liveSession = LiveChunkSession()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pumpLiveChunks() }
+        }
+        // .common so the pump keeps firing while the menu is open (menu
+        // tracking parks the run loop outside the default mode).
+        RunLoop.main.add(timer, forMode: .common)
+        liveChunkTimer = timer
+    }
+
+    /// If a full chunk of un-dispatched audio has accumulated and nothing is in
+    /// flight, transcribe it. Chains itself on completion so a backlog drains.
+    private func pumpLiveChunks() {
+        guard recorder.isRecording, let session = liveSession,
+              session.task == nil, session.failure == nil else { return }
+        let chunkBytes = Int(transcriber.liveChunkSeconds * Double(AudioRecorder.asrSampleRate)) * 2
+        guard recorder.capturedByteCount - session.offset >= chunkBytes else { return }
+        let slice = recorder.capturedData(offset: session.offset, maxCount: chunkBytes)
+        session.offset += slice.count
+        let index = session.texts.count + 1
+
+        // Per-chunk silence gate (same idea as the whole-clip gate below):
+        // don't pay a request — or risk a Whisper hallucination — for a chunk
+        // with no voice energy in it.
+        if Self.isSilent(pcm16: slice) {
+            Log.log("dictation: live chunk \(index) is silent — skipping request")
+            session.texts.append("")
+            return
+        }
+
+        Log.log("dictation: transcribing live chunk \(index) mid-recording")
+        session.task = Task { [weak self, transcriber] in
+            do {
+                let wavData = WAVFile(sampleRate: AudioRecorder.asrSampleRate, samples: slice).data
+                let text = try await transcriber.transcribe(wavData: wavData, language: "en")
+                session.texts.append(text)
+            } catch {
+                Log.log("dictation: live chunk \(index) failed: \(error)")
+                session.failure = TranscriberError.userMessage(for: error)
+            }
+            session.task = nil
+            self?.pumpLiveChunks()   // a further chunk may already be waiting
+        }
+    }
+
+    /// Whole-clip silence thresholds applied to a single s16le chunk.
+    private static func isSilent(pcm16: Data) -> Bool {
+        var peak: Float = 0
+        var sumSquares: Double = 0
+        let n = pcm16.count / 2
+        guard n > 0 else { return true }
+        pcm16.withUnsafeBytes { raw in
+            for s in raw.bindMemory(to: Int16.self) {
+                let v = Float(s) / 32768
+                peak = max(peak, abs(v))
+                sumSquares += Double(v) * Double(v)
+            }
+        }
+        let rms = Float((sumSquares / Double(n)).squareRoot())
+        return peak < silencePeak && rms < silenceRMS
+    }
+
     func endDictation() {
         guard recorder.isRecording else { return }
+        liveChunkTimer?.invalidate()
+        liveChunkTimer = nil
+        let session = liveSession
+        liveSession = nil
         let wav: URL
         do {
             wav = try recorder.stop()
         } catch {
-            NSLog("recorder stop failed: \(error)")
+            Log.log("recorder stop failed: \(error)")
             muter.restore()
             finishDictation()
             return
@@ -161,13 +256,42 @@ final class AudioArbiter {
         }
 
         onStatus?(.transcribing)
-        Task { await self.finish(wav: wav, duration: duration, mode: dictationMode) }
+        Task { await self.finish(wav: wav, duration: duration, mode: dictationMode, session: session) }
     }
 
-    private func finish(wav: URL, duration: TimeInterval, mode: DictationMode) async {
+    private func finish(wav: URL, duration: TimeInterval, mode: DictationMode,
+                        session: LiveChunkSession?) async {
+        // Wait out any live chunk request still in flight when recording stopped.
+        while let task = session?.task { await task.value }
+
         var transcript = ""
-        do { transcript = try await transcriber.transcribe(wavURL: wav, language: "en") }
-        catch { NSLog("transcribe failed: \(error)") }
+        var failure = session?.failure
+        if failure == nil {
+            do {
+                var texts = session?.texts ?? []
+                let tailOffset = session?.offset ?? 0
+                // Transcribe the tail: whatever was captured after the last full
+                // live chunk. transcribe(wavData:) re-chunks internally if the
+                // tail itself is over one chunk long (e.g. chunks backed up).
+                let samples = try WAVFile(contentsOf: wav).samples
+                if tailOffset < samples.count {
+                    let tail = WAVFile(sampleRate: AudioRecorder.asrSampleRate,
+                                       samples: samples.subdata(in: tailOffset..<samples.count))
+                    texts.append(try await transcriber.transcribe(wavData: tail.data, language: "en"))
+                }
+                if texts.count > 1 {
+                    Log.log("dictation: merged \(texts.count) chunk transcripts")
+                }
+                // Same joining rule as Wispr Flow: drop empties, one space between.
+                transcript = texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+            } catch {
+                failure = TranscriberError.userMessage(for: error)
+                Log.log("transcribe failed: \(error)")
+            }
+        }
+        if failure != nil { SoundEffect.transcriptionFailed.play() }
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch mode {
@@ -176,7 +300,7 @@ final class AudioArbiter {
                 onStatus?(.pasting)
                 pasteAndRemember(transcript)
             }
-            recordSTT(wav: wav, duration: duration, transcript: transcript)   // Recent Dictations
+            recordSTT(wav: wav, duration: duration, transcript: transcript, error: failure)   // Recent Dictations
 
         case .command:
             // Run the transcript through the voice-tool router only — never paste.
@@ -184,7 +308,8 @@ final class AudioArbiter {
             if !trimmed.isEmpty, let handler = directedReplyHandler {
                 recognized = await handler(transcript)
             }
-            recordCommand(wav: wav, duration: duration, transcript: transcript, recognized: recognized)
+            recordCommand(wav: wav, duration: duration, transcript: transcript,
+                          recognized: recognized, error: failure)
             if !trimmed.isEmpty {
                 (recognized ? SoundEffect.surfaceRaised : SoundEffect.unrecognized).play()
             }
@@ -205,43 +330,67 @@ final class AudioArbiter {
 
     // MARK: - TTS queue
 
-    /// New narration from the watcher: create a depth-able history entry (keeping
-    /// the original context for "More details"), then play it.
+    /// New narration from the watcher: record a depth-able history entry (keeping
+    /// the original context for "More details") and add it to the unread list.
+    /// Plays now if unmuted, otherwise becomes backlog.
     func narrate(_ utterance: Utterance, context: [Turn]) {
-        guard !narrationMuted else { return }
         let entry = TTSHistoryEntry(name: utterance.name, body: utterance.body,
                                     voiceID: utterance.voiceID, sessionKey: utterance.sessionKey,
                                     date: Date(), context: context, priorSummaries: [utterance.body])
         insertTTS(entry)
-        referenceSession(utterance.sessionKey)   // the agent that just spoke
-        enqueue(utterance, bypassMute: false)
+        unread.append(utterance)
+        notifyUnread()
+        pump()
     }
 
-    /// Low-level enqueue. History recording is the caller's responsibility (so
-    /// replays and barge-in re-cues don't duplicate entries).
-    private func enqueue(_ utterance: Utterance, bypassMute: Bool) {
-        guard bypassMute || !narrationMuted else { return }
-        queue.append(QueuedUtterance(utterance: utterance, bypassMute: bypassMute))
+    /// Explicit playback (replay / more-details / escape) — plays even when muted,
+    /// not counted as unread.
+    private func playOneOff(_ utterance: Utterance) {
+        oneOff.append(utterance)
         pump()
     }
 
     private func pump() {
-        guard !pumping, !isDictating, !queue.isEmpty else { return }
+        guard !pumping, !isDictating else { return }
+        let item: Utterance
+        let isNarration: Bool
+        if !oneOff.isEmpty {
+            item = oneOff.removeFirst(); isNarration = false
+        } else if !narrationMuted, let next = unread.first {
+            item = next; isNarration = true          // peek; removed on natural finish
+        } else {
+            onStatus?(.idle); return
+        }
         pumping = true
-        let item = queue.removeFirst()
         current = item
+        currentIsNarration = isNarration
+        halted = false
+        if isNarration { referenceSession(item.sessionKey) }
+        let requesting = tts.audioState(for: item) != .ready   // not cached → will fetch
         Task {
-            onSpeaking?(item.utterance)
-            onStatus?(.speaking)
-            let finished = await tts.play(item.utterance)
-            onSpeaking?(nil)
-            if finished, current?.utterance == item.utterance { current = nil }
-            pumping = false
-            if !isDictating && !queue.isEmpty {
-                pump()
-            } else if current == nil {
-                onStatus?(.idle)
+            if requesting {
+                onStatus?(.requestingTTS)          // cyan: fetching the clip
+                SoundEffect.clipRequested.play()
             }
+            onSpeaking?(item)
+            let finished = await tts.play(item, onStart: { [weak self] in
+                self?.onStatus?(.speaking)          // green: audio is playing
+                SoundEffect.clipStarted.play()
+            })
+            let wasHalted = halted
+            onSpeaking?(nil)
+            pumping = false
+            current = nil
+            currentIsNarration = false
+            if finished {
+                SoundEffect.clipFinished.play()
+                if isNarration, unread.first == item { unread.removeFirst(); notifyUnread() }
+            } else if isNarration, !wasHalted {
+                // Synth failed (not an interruption) → drop so we don't retry-loop.
+                if unread.first == item { unread.removeFirst(); notifyUnread() }
+            }
+            // Interrupted narration (wasHalted) stays at unread front to replay in full.
+            if !isDictating { pump() } else { onStatus?(.idle) }
         }
     }
 
@@ -262,9 +411,9 @@ final class AudioArbiter {
         return ok ? dst : nil
     }
 
-    private func recordSTT(wav: URL, duration: TimeInterval, transcript: String) {
+    private func recordSTT(wav: URL, duration: TimeInterval, transcript: String, error: String? = nil) {
         let entry = STTHistoryEntry(date: Date(), duration: duration, transcript: transcript,
-                                    wavURL: persistClip(wav))
+                                    error: error, wavURL: persistClip(wav))
         sttHistory.insert(entry, at: 0)
         if sttHistory.count > historyLimit {
             for evicted in sttHistory[historyLimit...] {
@@ -275,9 +424,10 @@ final class AudioArbiter {
         historyChanged()
     }
 
-    private func recordCommand(wav: URL, duration: TimeInterval, transcript: String, recognized: Bool) {
+    private func recordCommand(wav: URL, duration: TimeInterval, transcript: String,
+                               recognized: Bool, error: String? = nil) {
         let entry = CommandHistoryEntry(date: Date(), duration: duration, transcript: transcript,
-                                        recognized: recognized, wavURL: persistClip(wav))
+                                        recognized: recognized, error: error, wavURL: persistClip(wav))
         commandHistory.insert(entry, at: 0)
         if commandHistory.count > historyLimit {
             for evicted in commandHistory[historyLimit...] {
@@ -299,7 +449,7 @@ final class AudioArbiter {
     func replayTTS(id: UUID) {
         guard let entry = ttsHistory.first(where: { $0.id == id }) else { return }
         referenceSession(entry.sessionKey)
-        enqueue(entry.utterance, bypassMute: true)
+        playOneOff(entry.utterance)
     }
 
     /// Ask for more depth on an update. With an explicit id, targets that entry;
@@ -317,15 +467,15 @@ final class AudioArbiter {
             if ClaudeSummarizer.isNoMoreInfo(detail) {
                 Log.log("more-details: chain exhausted for \(entry.name)")
                 // Speak the escape-hatch once; don't create a depth-able entry.
-                enqueue(Utterance(name: entry.name, body: detail, voiceID: entry.voiceID,
-                                  sessionKey: entry.sessionKey), bypassMute: true)
+                playOneOff(Utterance(name: entry.name, body: detail, voiceID: entry.voiceID,
+                                     sessionKey: entry.sessionKey))
                 return
             }
             let next = TTSHistoryEntry(name: entry.name, body: detail, voiceID: entry.voiceID,
                                        sessionKey: entry.sessionKey, date: Date(),
                                        context: entry.context, priorSummaries: entry.priorSummaries + [detail])
             insertTTS(next)
-            enqueue(next.utterance, bypassMute: true)
+            playOneOff(next.utterance)
         }
     }
 
@@ -343,12 +493,20 @@ final class AudioArbiter {
                 let text = try await transcriber.transcribe(wavURL: wav, language: "en")
                 if let i = sttHistory.firstIndex(where: { $0.id == id }) {
                     sttHistory[i].transcript = text
+                    sttHistory[i].error = nil
                     historyChanged()
                 }
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     pasteAndRemember(text)
                 }
-            } catch { NSLog("retry transcribe failed: \(error)") }
+            } catch {
+                Log.log("retry transcribe failed: \(error)")
+                SoundEffect.transcriptionFailed.play()
+                if let i = sttHistory.firstIndex(where: { $0.id == id }) {
+                    sttHistory[i].error = TranscriberError.userMessage(for: error)
+                    historyChanged()
+                }
+            }
         }
     }
 
@@ -387,10 +545,18 @@ final class AudioArbiter {
                 if let i = commandHistory.firstIndex(where: { $0.id == id }) {
                     commandHistory[i].transcript = text
                     commandHistory[i].recognized = recognized
+                    commandHistory[i].error = nil
                     historyChanged()
                 }
                 (recognized ? SoundEffect.surfaceRaised : SoundEffect.unrecognized).play()
-            } catch { NSLog("retry command failed: \(error)") }
+            } catch {
+                Log.log("retry command failed: \(error)")
+                SoundEffect.transcriptionFailed.play()
+                if let i = commandHistory.firstIndex(where: { $0.id == id }) {
+                    commandHistory[i].error = TranscriberError.userMessage(for: error)
+                    historyChanged()
+                }
+            }
         }
     }
 

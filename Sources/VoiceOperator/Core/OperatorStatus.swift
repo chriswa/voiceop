@@ -11,11 +11,11 @@ enum DictationMode { case paste, command }
 
 enum OperatorStatus: Equatable {
     case idle
-    case paused           // user muted the operator (e.g. in a meeting)
     case listening        // paste dictation capturing the mic    -> RED
     case commandListening // Ctrl+Fn command dictation capturing   -> MAGENTA
     case transcribing     // audio sent, awaiting text
     case pasting          // inserting text into the focused app
+    case requestingTTS    // fetching/synthesizing a clip          -> CYAN
     case speaking         // TTS is playing                        -> GREEN
 
     /// Tint for the bullhorn silhouette, or nil for the default monochrome
@@ -24,19 +24,20 @@ enum OperatorStatus: Equatable {
         switch self {
         case .listening:        return .systemRed
         case .commandListening: return .magenta
+        case .requestingTTS:    return .systemCyan
         case .speaking:         return .systemGreen
-        case .idle, .paused, .transcribing, .pasting: return nil
+        case .idle, .transcribing, .pasting: return nil
         }
     }
 
     var accessibilityLabel: String {
         switch self {
         case .idle:             return "Voice Operator — idle"
-        case .paused:           return "Voice Operator — paused"
         case .listening:        return "Voice Operator — listening"
         case .commandListening: return "Voice Operator — listening (command)"
         case .transcribing:     return "Voice Operator — transcribing"
         case .pasting:          return "Voice Operator — pasting"
+        case .requestingTTS:    return "Voice Operator — fetching audio"
         case .speaking:         return "Voice Operator — speaking"
         }
     }

@@ -15,18 +15,29 @@ final class TTSEngine {
     /// audio) into a single provider call whose result everyone reuses.
     private var inFlight: [String: Task<URL, Error>] = [:]
 
+    /// Bumped by `halt()`. A `play` that was still synthesizing when halted has
+    /// no playback for `player.halt()` to stop, so it re-checks this counter
+    /// once synthesis resolves and skips playback if a halt happened meanwhile.
+    /// Synthesis itself always runs to completion so the clip lands in cache.
+    private var haltCount = 0
+
     init(synth: SpeechSynthesizer = CartesiaSynthesizer(), cache: AudioCache = AudioCache()) {
         self.synth = synth
         self.cache = cache
         let reaped = cache.reap()
-        if reaped > 0 { NSLog("audio cache: reaped \(reaped) stale entr\(reaped == 1 ? "y" : "ies")") }
+        if reaped > 0 { Log.log("audio cache: reaped \(reaped) stale entr\(reaped == 1 ? "y" : "ies")") }
     }
 
-    /// Play an utterance. Returns true if it finished, false if halted or failed.
-    func play(_ u: Utterance) async -> Bool {
+    /// Play an utterance. `onStart` fires when audio is resolved and playback is
+    /// about to begin (after any synthesis). Returns true if it finished, false if
+    /// halted (even mid-synthesis, before playback began) or failed.
+    func play(_ u: Utterance, onStart: @MainActor () -> Void = {}) async -> Bool {
+        let haltCountAtStart = haltCount
         let url: URL
         do { url = try await audioURL(for: u) }
-        catch { NSLog("tts synth failed: \(error)"); return false }
+        catch { Log.log("tts synth failed: \(error)"); return false }
+        guard haltCount == haltCountAtStart else { return false }
+        onStart()
         return await player.play(url: url)
     }
 
@@ -46,7 +57,10 @@ final class TTSEngine {
         return try await task.value
     }
 
-    func halt() { player.halt() }
+    func halt() {
+        haltCount += 1
+        player.halt()
+    }
 
     /// Playback-readiness of an utterance's audio, for the menu's replay list.
     enum AudioState { case ready, synthesizing, needsSynthesis }

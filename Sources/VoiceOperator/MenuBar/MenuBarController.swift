@@ -74,6 +74,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         cmdHistoryItem.submenu = NSMenu()
         menu.addItem(cmdHistoryItem)
         menu.addItem(.separator())
+        let copyLog = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
+        copyLog.target = self
+        menu.addItem(copyLog)
         loginMenuItem.target = self
         menu.addItem(loginMenuItem)   // moved to the bottom, above Restart
         let restart = NSMenuItem(title: "Restart Voice Operator", action: #selector(restartApp), keyEquivalent: "")
@@ -223,6 +226,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func focusAgent(_ sender: NSMenuItem) {
         if let key = sender.representedObject as? String { onFocusAgent?(key) }
+    }
+
+    @objc private func copyLogPath() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(Log.fileURL.path, forType: .string)
     }
 
     @objc private func restartApp() { onRestart?() }

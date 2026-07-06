@@ -268,29 +268,31 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Bullhorn (megaphone) composited with: a tint (red recording / magenta
     /// command / cyan fetching / green playing), a prohibition overlay when muted,
     /// and an unread-count badge. Pure idle renders as an adaptive template.
+    ///
+    /// Every state renders onto the same canvas (the symbol's natural size) so
+    /// the menu-bar item never changes width — a width change here shifts every
+    /// icon to its left in the menu bar.
     private static func icon(status: OperatorStatus, muted: Bool, unread: Int) -> NSImage {
         let base = bullhornBase()
         let hasBadge = unread > 0
-
         // Pure idle, unmuted, no badge → template (adapts to light/dark menu bar).
-        if status.tint == nil, !muted, !hasBadge {
-            base.isTemplate = true
-            return base
-        }
-
+        let isTemplate = status.tint == nil && !muted && !hasBadge
         let color = status.tint ?? .labelColor
-        let w: CGFloat = hasBadge ? 24 : 18
-        let bullRect = NSRect(x: 0, y: 0, width: 18, height: 18)
-        let img = NSImage(size: NSSize(width: w, height: 18), flipped: false) { _ in
-            // Colorized bullhorn.
-            base.draw(in: bullRect)
-            color.set()
-            bullRect.fill(using: .sourceAtop)
-            if muted { drawProhibition(in: bullRect.insetBy(dx: 0.75, dy: 0.75), color: color) }
-            if hasBadge { drawBadge(unread, in: NSRect(x: w - 12, y: 0, width: 12, height: 12)) }
+        let img = NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect)
+            if !isTemplate {
+                color.set()
+                rect.fill(using: .sourceAtop)
+            }
+            if muted {
+                let d = min(rect.width, rect.height) - 1.5
+                let square = NSRect(x: rect.midX - d / 2, y: rect.midY - d / 2, width: d, height: d)
+                drawProhibition(in: square, color: color)
+            }
+            if hasBadge { drawBadge(unread, centeredAtBottomOf: rect) }
             return true
         }
-        img.isTemplate = false
+        img.isTemplate = isTemplate
         return img
     }
 
@@ -317,17 +319,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         line.stroke()
     }
 
-    /// A small red badge with the unread count in the bottom-right corner.
-    private static func drawBadge(_ count: Int, in rect: NSRect) {
-        NSColor.systemRed.setFill()
-        NSBezierPath(ovalIn: rect).fill()
+    /// A small red badge with the unread count, bottom-centered in the canvas.
+    /// Single digits get a circle; "9+" gets a capsule that still fits the canvas.
+    private static func drawBadge(_ count: Int, centeredAtBottomOf canvas: NSRect) {
         let text = count > 9 ? "9+" : "\(count)"
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 8, weight: .bold),
             .foregroundColor: NSColor.white,
         ]
-        let size = (text as NSString).size(withAttributes: attrs)
-        let origin = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        let h: CGFloat = 12
+        let w = max(h, textSize.width + 5)
+        let badge = NSRect(x: canvas.midX - w / 2, y: 0, width: w, height: h)
+        NSColor.systemRed.setFill()
+        NSBezierPath(roundedRect: badge, xRadius: h / 2, yRadius: h / 2).fill()
+        let origin = NSPoint(x: badge.midX - textSize.width / 2, y: badge.midY - textSize.height / 2)
         (text as NSString).draw(at: origin, withAttributes: attrs)
     }
 }

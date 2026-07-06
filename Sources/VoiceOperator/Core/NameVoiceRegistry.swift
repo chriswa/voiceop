@@ -35,6 +35,8 @@ actor NameVoiceRegistry {
     /// Load persisted mappings, resetting each `lastSeen` to now so a restart
     /// gives every mapping a fresh idle-TTL window (an active session keeps its
     /// name; a truly-dead one is reaped after the TTL of post-restart silence).
+    /// Entries whose pair is no longer in NameVoiceTable are dropped, so a
+    /// table regeneration can't resurrect stale (name, voice) pairings.
     /// Failure-tolerant: any decode problem yields an empty registry.
     private static func loadPersisted() -> [String: Entry] {
         guard let data = try? Data(contentsOf: fileURL) else { return [:] }
@@ -45,7 +47,11 @@ actor NameVoiceRegistry {
                 return [:]
             }
             let now = Date()
-            return p.entries.mapValues { Entry(voice: $0.voice, lastSeen: now) }
+            let current = p.entries.filter { NameVoiceTable.all.contains($0.value.voice) }
+            if current.count != p.entries.count {
+                Log.log("registry: dropped \(p.entries.count - current.count) entries not in current table")
+            }
+            return current.mapValues { Entry(voice: $0.voice, lastSeen: now) }
         } catch {
             Log.log("registry: could not load (\(error)); starting empty")
             return [:]
@@ -98,7 +104,7 @@ actor NameVoiceRegistry {
             persist()
             return candidate
         }
-        return nil   // pool exhausted (>100 concurrent sessions)
+        return nil   // pool exhausted (more concurrent sessions than table pairs)
     }
 
     /// Refresh a key's last-seen time so an active session isn't reaped.

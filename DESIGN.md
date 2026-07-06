@@ -109,7 +109,7 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
 ```
 Core/
   AudioArbiter        the brain: mute + halt + TTS queue + coordination invariant
-  NameVoiceRegistry   100-name allowlist; sticky (claudeSessionId, spaceTermId)->(name,voice); idle TTL
+  NameVoiceRegistry   gender-aligned name allowlist; sticky (claudeSessionId, spaceTermId)->(name,voice); idle TTL
   AudioCache          Cartesia PCM cached by (text, voiceId) hash, >=1 day, free replay
 Transcriber/  (protocol Transcriber)   WisprTranscriber today (WS + /llm HTTP); LocalWhisper later
 Speaker/      (protocol Speaker)       CartesiaSpeaker (ports cartesia-read streaming + tones)
@@ -165,7 +165,8 @@ This fixes "a TTS update arrives while I'm dictating and I miss it."
   (AVAudioEngine→WAV) → `WisprTranscriber` (`/llm/asr`) → `TextInserter` (clipboard+⌘V+restore),
   with `SoundEffect` cues and the `MenuBarController` bullhorn (red=recording, green=playing).
   `AudioArbiter` coordinates. App bundle via `scripts/make-app.sh`.
-- **Name/voice registry:** ✅ `NameVoiceTable` (100 pairs) + `NameVoiceRegistry` (sticky,
+- **Name/voice registry:** ✅ `NameVoiceTable` (82 gender-aligned pairs; call-sign gender
+  matches the Cartesia voice's reported gender) + `NameVoiceRegistry` (sticky,
   no active reuse, idle TTL) with passing unit tests.
 - **Phase 3 (TTS half):** ✅ built + validated. `CartesiaSynthesizer` (`/tts/bytes`, native),
   `AudioCache` (≥1-day WAV cache, free replay), `SpeechPlayer` (haltable/awaitable),

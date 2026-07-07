@@ -173,7 +173,9 @@ This fixes "a TTS update arrives while I'm dictating and I miss it."
   `TTSEngine`, and the `AudioArbiter` TTS queue with **barge-in re-cue** (dictation halts +
   re-queues the interrupted utterance from the start). `ClaudeWatcher` = `TranscriptParser`
   (unit-tested) + `ClaudeSummarizer` (Keychain OAuth → Haiku) + `TranscriptWatcher` (tail,
-  mute headless/bg, sticky name/voice, idle TTL) + `SpacetermSocket` (tts-speaking events).
+  mute headless/bg — orphaned Bash tasks whose completion notification the harness never
+  persisted are resolved by probing whether anything still holds the task's `.output` file
+  open — sticky name/voice, idle TTL) + `SpacetermSocket` (tts-speaking events).
   All three external integrations validated with one live call each:
   `--asr-test`, `--tts-test`, `--summarize-test`.
 - **Phase 4 (retire Wispr + transcript-reader.py, move to Fn):** ⏳ pending live use.

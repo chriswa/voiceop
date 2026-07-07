@@ -48,13 +48,48 @@ struct WisprTranscriber: Transcriber {
                 throw error
             }
         }
-        // Same joining rule as Flow's prevAsrText(): drop empty chunks, one space between.
-        return texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return Self.joinChunkTexts(texts)
+    }
+
+    /// Flow's joining rule (`prevAsrText()`): drop empty chunks, one space between.
+    static func joinChunkTexts(_ texts: [String]) -> String {
+        texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: " ")
     }
 
+    /// Attempts per chunk: transient failures (Wispr's upstream answers 502
+    /// "OpenAI request failed" sporadically, ~1 request in 20 observed) are
+    /// retried with a short backoff before the whole transcription is failed.
+    private static let chunkAttempts = 3
+
     private func transcribeChunk(_ wavData: Data, language: String, token: String) async throws -> String {
+        for attempt in 1... {
+            do { return try await transcribeChunkOnce(wavData, language: language, token: token) }
+            catch {
+                guard attempt < Self.chunkAttempts, Self.isTransient(error) else { throw error }
+                Log.log("transcribe: transient error (\(TranscriberError.userMessage(for: error))) — retry \(attempt)/\(Self.chunkAttempts - 1)")
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+            }
+        }
+        fatalError("unreachable")   // the loop always returns or throws
+    }
+
+    /// Errors worth retrying: server-side hiccups and network drops. Client
+    /// errors (bad auth, malformed request) fail immediately.
+    private static func isTransient(_ error: Error) -> Bool {
+        switch error {
+        case TranscriberError.http(let status, _):
+            return status == 408 || status == 429 || status >= 500
+        case let e as URLError:
+            return [.timedOut, .networkConnectionLost, .cannotConnectToHost,
+                    .cannotFindHost, .dnsLookupFailed].contains(e.code)
+        default:
+            return false
+        }
+    }
+
+    private func transcribeChunkOnce(_ wavData: Data, language: String, token: String) async throws -> String {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

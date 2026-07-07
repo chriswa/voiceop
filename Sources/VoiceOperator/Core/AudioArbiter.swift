@@ -68,7 +68,14 @@ final class AudioArbiter {
     private(set) var ttsHistory: [TTSHistoryEntry] = []
     private(set) var sttHistory: [STTHistoryEntry] = []
     private(set) var commandHistory: [CommandHistoryEntry] = []
-    private let historyLimit = 10
+    /// How many entries the menu shows. The dictation/command stores retain
+    /// more than this (see `clipRetention`); TTS history is trimmed to it.
+    private let menuHistoryLimit = 10
+    /// Dictation/command entries — and their audio — are kept until they are
+    /// both beyond the newest `menuHistoryLimit` AND at least this old, so a
+    /// clip can always be retried/recovered for a week even after it has
+    /// scrolled out of the menu.
+    private static let clipRetention: TimeInterval = 7 * 86_400
     private let historyStore = HistoryStore()
     /// Which mode the in-progress dictation is in (set at begin, used at finish).
     private var dictationMode: DictationMode = .paste
@@ -86,6 +93,7 @@ final class AudioArbiter {
         ttsHistory = loaded.tts
         sttHistory = loaded.stt
         commandHistory = loaded.commands
+        reapExpiredClips()   // clips may have aged past retention while the app was closed
     }
 
     /// Persist + notify whenever any history list changes.
@@ -282,10 +290,7 @@ final class AudioArbiter {
                 if texts.count > 1 {
                     Log.log("dictation: merged \(texts.count) chunk transcripts")
                 }
-                // Same joining rule as Wispr Flow: drop empties, one space between.
-                transcript = texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " ")
+                transcript = WisprTranscriber.joinChunkTexts(texts)
             } catch {
                 failure = TranscriberError.userMessage(for: error)
                 Log.log("transcribe failed: \(error)")
@@ -398,7 +403,7 @@ final class AudioArbiter {
 
     private func insertTTS(_ entry: TTSHistoryEntry) {
         ttsHistory.insert(entry, at: 0)
-        if ttsHistory.count > historyLimit { ttsHistory.removeLast(ttsHistory.count - historyLimit) }
+        if ttsHistory.count > menuHistoryLimit { ttsHistory.removeLast(ttsHistory.count - menuHistoryLimit) }
         historyChanged()
     }
 
@@ -411,16 +416,44 @@ final class AudioArbiter {
         return ok ? dst : nil
     }
 
+    /// Dispose of an evicted history clip. Clips whose transcription failed are
+    /// moved to `saved-clips/` instead of deleted — the audio is the only copy
+    /// of words the user never got text for, so eviction must not destroy it.
+    private func discardEvictedClip(_ url: URL?, transcriptionFailed: Bool) {
+        guard let url else { return }
+        guard transcriptionFailed else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        let dir = HistoryStore.supportDir.appendingPathComponent("saved-clips", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dst = dir.appendingPathComponent(url.lastPathComponent)
+        try? FileManager.default.moveItem(at: url, to: dst)
+        Log.log("history: preserved failed dictation audio at \(dst.path)")
+    }
+
+    /// Reap dictation/command entries that are both past the menu window and
+    /// older than `clipRetention`, disposing of their audio. Lists are
+    /// newest-first, so the oldest entry is always last.
+    private func reapExpiredClips() {
+        let cutoff = Date().addingTimeInterval(-Self.clipRetention)
+        while sttHistory.count > menuHistoryLimit,
+              let oldest = sttHistory.last, oldest.date < cutoff {
+            discardEvictedClip(oldest.wavURL, transcriptionFailed: oldest.error != nil)
+            sttHistory.removeLast()
+        }
+        while commandHistory.count > menuHistoryLimit,
+              let oldest = commandHistory.last, oldest.date < cutoff {
+            discardEvictedClip(oldest.wavURL, transcriptionFailed: oldest.error != nil)
+            commandHistory.removeLast()
+        }
+    }
+
     private func recordSTT(wav: URL, duration: TimeInterval, transcript: String, error: String? = nil) {
         let entry = STTHistoryEntry(date: Date(), duration: duration, transcript: transcript,
                                     error: error, wavURL: persistClip(wav))
         sttHistory.insert(entry, at: 0)
-        if sttHistory.count > historyLimit {
-            for evicted in sttHistory[historyLimit...] {
-                if let u = evicted.wavURL { try? FileManager.default.removeItem(at: u) }
-            }
-            sttHistory.removeLast(sttHistory.count - historyLimit)
-        }
+        reapExpiredClips()
         historyChanged()
     }
 
@@ -429,12 +462,7 @@ final class AudioArbiter {
         let entry = CommandHistoryEntry(date: Date(), duration: duration, transcript: transcript,
                                         recognized: recognized, error: error, wavURL: persistClip(wav))
         commandHistory.insert(entry, at: 0)
-        if commandHistory.count > historyLimit {
-            for evicted in commandHistory[historyLimit...] {
-                if let u = evicted.wavURL { try? FileManager.default.removeItem(at: u) }
-            }
-            commandHistory.removeLast(commandHistory.count - historyLimit)
-        }
+        reapExpiredClips()
         historyChanged()
     }
 

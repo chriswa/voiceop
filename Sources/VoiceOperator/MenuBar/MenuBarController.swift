@@ -139,8 +139,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         ttsHistoryItem.submenu = sub
     }
 
+    /// The history *store* retains more than the menu shows (old dictation
+    /// audio is kept a week for retry/recovery); the menu lists the newest few.
+    private let maxHistoryMenuEntries = 10
+
     private func rebuildSTTHistory() {
-        let entries = sttHistoryProvider?() ?? []
+        let entries = (sttHistoryProvider?() ?? []).prefix(maxHistoryMenuEntries)
         let sub = NSMenu()
         if entries.isEmpty {
             sub.addItem(disabledItem("No dictations yet"))
@@ -164,7 +168,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func rebuildCommandHistory() {
-        let entries = commandHistoryProvider?() ?? []
+        let entries = (commandHistoryProvider?() ?? []).prefix(maxHistoryMenuEntries)
         let sub = NSMenu()
         if entries.isEmpty {
             sub.addItem(disabledItem("No commands yet"))

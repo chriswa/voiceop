@@ -24,7 +24,7 @@ actor PermissionWatcher {
     private let emit: @Sendable (Utterance, [Turn]) -> Void
     private let spoolDir: URL
     private let pollInterval: TimeInterval = 0.5
-    private static let planCap = 6000
+    private static let planCap = 10000
 
     init(registry: NameVoiceRegistry, spoolDir: URL,
          emit: @escaping @Sendable (Utterance, [Turn]) -> Void) {
@@ -97,8 +97,9 @@ actor PermissionWatcher {
     // MARK: - Pure helpers (unit-tested)
 
     /// Parse a spool file (`{ receivedAt, payload: <hook json> }`) into a
-    /// narratable event, or nil if it isn't a question/plan we handle. The
-    /// answer OPTIONS are deliberately excluded; the plan is capped.
+    /// narratable event, or nil if it isn't a question/plan we handle. Each
+    /// question carries its options (the summarizer decides whether to convey
+    /// them); the plan is capped.
     static func parse(eventData data: Data, planCap: Int = planCap) -> PermissionEvent? {
         guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let payload = event["payload"] as? [String: Any],
@@ -116,10 +117,20 @@ actor PermissionWatcher {
     static func spokenContent(toolName: String, toolInput: [String: Any], planCap: Int) -> String? {
         switch toolName {
         case "AskUserQuestion":
-            let qs = (toolInput["questions"] as? [[String: Any]])?
-                .compactMap { ($0["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty } ?? []
-            return qs.isEmpty ? nil : qs.joined(separator: "\n")
+            let parts: [String] = ((toolInput["questions"] as? [[String: Any]]) ?? []).compactMap { q in
+                guard let text = (q["question"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+                // Include the real options (label + description) so the summarizer
+                // can convey them; it's instructed to summarize, not read verbatim.
+                let opts = ((q["options"] as? [[String: Any]]) ?? []).compactMap { o -> String? in
+                    guard let label = (o["label"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else { return nil }
+                    let desc = (o["description"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return (desc?.isEmpty == false) ? "\(label) — \(desc!)" : label
+                }
+                return opts.isEmpty ? text : "\(text)\nOptions: \(opts.joined(separator: " | "))"
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
         case "ExitPlanMode":
             guard let plan = (toolInput["plan"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines), !plan.isEmpty else { return nil }

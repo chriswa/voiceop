@@ -34,18 +34,18 @@ struct ClaudeSummarizer {
     """
 
     // A pending block is NOT a completed turn: the agent has paused and is
-    // waiting on the user. The summary must relay the ask itself — crucially,
-    // it must NOT answer the question or fabricate the multiple-choice options
-    // (a bare "What's your favorite fruit?" otherwise tempts the model to
-    // invent an answer like "mango" or list options that aren't real).
+    // waiting on the user. The summary must relay the ask itself — including the
+    // real multiple-choice options (the model may summarize them) — but it must
+    // NOT answer the question or fabricate options that weren't offered.
     private static let questionInstruction = """
     A coding agent has PAUSED and is waiting for the user to answer a question. \
     You are given what the agent did leading up to it, ending with the question \
-    it is asking. In one or two short sentences of plain spoken English, say what \
-    the agent has been doing and what it is now asking. State the question itself. \
-    Do NOT answer it, do NOT guess or state the user's answer, and do NOT invent, \
-    list, or read out any multiple-choice answer options. No markdown, no lists, \
-    no code, no preamble, no quotation marks. Output ONLY the spoken update.
+    it is asking and its multiple-choice options. In one or two short sentences \
+    of plain spoken English, say what the agent has been doing and what it is now \
+    asking. State the question, and briefly convey the options when that helps the \
+    user decide. Do NOT answer the question yourself, do NOT guess or state the \
+    user's answer, and do NOT invent options that weren't listed. No markdown, no \
+    lists, no code, no preamble, no quotation marks. Output ONLY the spoken update.
     """
 
     private static let planInstruction = """

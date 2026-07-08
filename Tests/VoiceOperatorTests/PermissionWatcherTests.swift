@@ -7,7 +7,7 @@ final class PermissionWatcherTests: XCTestCase {
                                     options: .withoutEscapingSlashes)
     }
 
-    func testParsesQuestionExcludingOptions() {
+    func testParsesQuestionIncludingOptions() {
         let data = spool([
             "hook_event_name": "PermissionRequest",
             "tool_name": "AskUserQuestion",
@@ -23,10 +23,17 @@ final class PermissionWatcherTests: XCTestCase {
         XCTAssertEqual(event?.toolName, "AskUserQuestion")
         XCTAssertEqual(event?.sessionID, "sid-123")
         XCTAssertEqual(event?.transcriptPath, "/tmp/sid-123.jsonl")
-        XCTAssertEqual(event?.content, "Persist to disk or memory?")
-        XCTAssertFalse(event?.content.contains("survives restart") ?? true,
-                       "answer options must never be narrated")
-        XCTAssertFalse(event?.content.contains("Memory") ?? true)
+        let content = event?.content ?? ""
+        XCTAssertTrue(content.contains("Persist to disk or memory?"), "the question must be present")
+        // Options are now included (label + description) for the summarizer to convey.
+        XCTAssertTrue(content.contains("Disk — survives restart"), "options must be included")
+        XCTAssertTrue(content.contains("Memory — lost on restart"))
+    }
+
+    func testQuestionWithoutOptionsIsJustTheQuestion() {
+        let data = spool(["tool_name": "AskUserQuestion",
+                          "tool_input": ["questions": [["question": "Ship it?"]]]])
+        XCTAssertEqual(PermissionWatcher.parse(eventData: data)?.content, "Ship it?")
     }
 
     func testJoinsMultipleQuestions() {
@@ -34,7 +41,7 @@ final class PermissionWatcherTests: XCTestCase {
             "tool_name": "AskUserQuestion",
             "tool_input": ["questions": [["question": "A?"], ["question": "B?"]]],
         ])
-        XCTAssertEqual(PermissionWatcher.parse(eventData: data)?.content, "A?\nB?")
+        XCTAssertEqual(PermissionWatcher.parse(eventData: data)?.content, "A?\n\nB?")
     }
 
     func testParsesPlanAndCaps() {

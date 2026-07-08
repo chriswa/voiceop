@@ -31,6 +31,10 @@ actor TranscriptWatcher {
     private let pollInterval: TimeInterval = 0.5
     private let settleSeconds: TimeInterval = 2.5
     private let maxSettleWait: TimeInterval = 20
+    /// Grace period after a turn looks settled before we narrate it, to catch a
+    /// prompt the user had QUEUED being pushed straight back to the agent the
+    /// instant it settled (see the recheck in `handleChange`).
+    private let settleRecheckDelay: TimeInterval = 0.25
     private let spokenHistory = 10
     private let idleTTL: TimeInterval = 30 * 60   // release name/voice after 30m idle
 
@@ -120,6 +124,18 @@ actor TranscriptWatcher {
             guard turn.role == "assistant", turn.pos >= state.consumed,
                   turn.stopReason == "end_turn" else { continue }
 
+            // A settled turn is only worth narrating if it's the session's
+            // terminal state. A user turn after it means a prompt — usually one
+            // the user had QUEUED — re-engaged the agent the instant it settled,
+            // so the turn was a transient stop, not a real one. Nothing but a
+            // user turn can follow a genuine end_turn, so its presence is the
+            // exact test. Catch it in two moments; moment one: the prompt
+            // already landed in this same batch (no wait needed).
+            if Self.userTurnLanded(after: turn.pos, in: turns) {
+                Log.log("watcher: [\(sid.prefix(8))] suppressing settled turn at pos \(turn.pos) — a queued prompt already landed after it in the same batch")
+                continue
+            }
+
             // Suppress turns while background work is still outstanding — but
             // trust the transcript only where it resolves a launch itself.
             // Probing is deferred until a completed turn is actually at stake,
@@ -131,6 +147,16 @@ actor TranscriptWatcher {
                                                     resolved: resolved ?? [])
             if outstanding > 0 {
                 Log.log("watcher: [\(sid.prefix(8))] skipped a completed turn — \(outstanding) background task(s) still outstanding")
+                continue
+            }
+
+            // Moment two: the turn is currently the tail, so wait a beat and
+            // re-read — a queued prompt injected in the window between the
+            // settle and our narration would land as a fresh user turn.
+            try? await Task.sleep(for: .seconds(settleRecheckDelay))
+            if let fresh = try? Data(contentsOf: URL(fileURLWithPath: path)),
+               Self.userTurnLanded(after: turn.pos, in: TranscriptParser.parse(data: fresh).turns) {
+                Log.log("watcher: [\(sid.prefix(8))] suppressing settled turn at pos \(turn.pos) — a queued prompt landed within \(Int(settleRecheckDelay * 1000))ms of it settling")
                 continue
             }
 
@@ -218,6 +244,14 @@ actor TranscriptWatcher {
     /// the delivery only ended to await it, and a liveness probe (which would
     /// truthfully report the work finished) must not unmute it. A launch with
     /// no notification at all resolves only via the liveness probes above.
+    /// Whether a user turn appears after `pos`. Nothing but a user turn can
+    /// follow a genuine `end_turn` (the agent only resumes when re-invoked), so
+    /// this is the exact test for "a prompt re-engaged the agent" — the signal
+    /// that a settled turn was transient and must not be narrated.
+    static func userTurnLanded(after pos: Int, in turns: [Turn]) -> Bool {
+        turns.contains { $0.role == "user" && $0.pos > pos }
+    }
+
     static func outstandingCount(_ launches: [BackgroundLaunch], before pos: Int,
                                  resolved: Set<String>) -> Int {
         launches.filter { launch in

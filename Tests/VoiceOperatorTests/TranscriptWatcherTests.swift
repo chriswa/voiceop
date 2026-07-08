@@ -57,6 +57,33 @@ final class TranscriptWatcherTests: XCTestCase {
         XCTAssertEqual(TranscriptWatcher.outstandingCount(launches, before: 100, resolved: []), 0)
     }
 
+    // MARK: - userTurnLanded (settle recheck)
+
+    private func turn(_ role: String, pos: Int, stop: String? = nil) -> Turn {
+        Turn(role: role, text: "x", pos: pos, stopReason: stop)
+    }
+
+    func testUserTurnLandedFalseWhenTurnIsTerminal() {
+        let turns = [turn("user", pos: 0), turn("assistant", pos: 100, stop: "end_turn")]
+        XCTAssertFalse(TranscriptWatcher.userTurnLanded(after: 100, in: turns),
+                       "a settled turn with nothing after it is a genuine stop")
+    }
+
+    func testUserTurnLandedTrueWhenPromptFollows() {
+        // The queued-prompt case: a user turn appended after the settled turn.
+        let turns = [turn("assistant", pos: 100, stop: "end_turn"), turn("user", pos: 200)]
+        XCTAssertTrue(TranscriptWatcher.userTurnLanded(after: 100, in: turns),
+                      "a user turn after the settled turn means the agent was re-engaged")
+    }
+
+    func testUserTurnLandedIgnoresLaterAssistantTurns() {
+        // Only a user turn re-engages the agent; a later assistant turn alone
+        // (which can't exist past a real end_turn) must not trip the check.
+        let turns = [turn("assistant", pos: 100, stop: "end_turn"),
+                     turn("assistant", pos: 200, stop: "end_turn")]
+        XCTAssertFalse(TranscriptWatcher.userTurnLanded(after: 100, in: turns))
+    }
+
     // MARK: - isFileHeldOpen (bash-task probe)
 
     func testFileHeldOpenProbe() throws {

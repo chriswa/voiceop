@@ -28,6 +28,17 @@ and just decodes garbage). **Never experiment against these third-party APIs
 without first confirming the exact behavior in the app bundle.** When you decode
 something new, record it in `DESIGN.md` + `spike/` so it's never lost.
 
+## Dictation transcription paths
+
+`WisprFlowTranscriber` (the `AudioArbiter` default) transcribes over Wispr's
+primary **gRPC** path (`flow_api.v1.TranscriptionService` on Baseten), which
+returns **formatted** text with the user's dictionary — see DESIGN.md Milestone C
+and `proto/flow_api_v1.proto`. It needs Wispr's Baseten `Api-Key`, read at runtime
+from `$VOICEOP_BASETEN_KEY` or `~/Library/Application Support/VoiceOperator/baseten-key`
+(**never commit it**). Without the key, it falls back to `WisprTranscriber`
+(raw `/llm/asr`). Regenerate the gRPC/protobuf Swift with `scripts/gen-proto.sh`.
+Live-test either path with `--flow-grpc-test` / `--asr-test`.
+
 ## Building — `swift build` alone is NOT enough
 
 The app the user actually runs is the bundle at `build/Voice Operator.app`.

@@ -194,24 +194,22 @@ This fixes "a TTS update arrives while I'm dictating and I miss it."
   `dictionary_context` path below (the correct biasing channel). **Read the app, don't probe the
   live API** (see `CLAUDE.md`).
 
-- **Milestone C — reverse-engineered + recognition path VALIDATED (2026-07-08).**
-  Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest`), captured in
-  `spike/flow_request.md` + `spike/flow_spike.py`. Three transports Wispr uses, in fallback order:
-  1. **gRPC streaming (PRIMARY, formatted)** — `model-<id>.grpc.api.baseten.co`, **protobuf**
-     `flow_api.v1.Request {init, context, payload, commit}`; metadata headers
-     `authorization: Bearer <jwt>`, `baseten-authorization: Api-Key <embedded>`, `baseten-model-id`,
-     `x-baseten-environment`, `disable-formatting: false`. Returns `formatted_text` (→ `llm_text`).
-     The full `flow_api.v1` schema (~35 messages) is reconstructed in `proto/flow_api_v1.proto`
-     (enum *values* still to finalize). **This is the true parity path.**
-  2. **Baseten `run_remote` HTTP (fallback)** — `https://chain-o232k03l.api.baseten.co/environments/
-     production/run_remote`, `Api-Key <embedded>` auth, **msgpack** `{request: <flat serializeFlowRequest>}`
-     (JSON rejected). Response flat `{status, asr_text, llm_text, …}`. Our faithful reconstruction is
-     rejected `input is malformed` (server-side schema not in the bundle) — needs a real request capture.
-  3. **`/llm/asr_audio_chunks` (last resort, raw)** — JSON flat, JWT auth, opus packets ascii85-encoded,
-     `packet_duration` in seconds, `dictionary_context` as string list. **VALIDATED live (HTTP 200):
-     recognition biasing works** ("Claude" spelled correctly). Returns `raw_transcript` only — this
-     endpoint never formats. This is the achievable near-term path for the recognition fix.
-
-  Opus for all packet paths: 16 kHz mono, 20 ms / **320-sample** frames, `OPUS_APPLICATION_VOIP`.
-  Still needs a **libopus** dependency in the app (vendored C SwiftPM target).
-- Opus params (frame size 320 / 20 ms) confirmed for the WS/chunks/gRPC paths.
+- **Milestone C — SHIPPED: formatted gRPC dictation (Wispr parity) (2026-07-08).**
+  Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest` + the
+  `flow_api.v1` protobuf), captured in `spike/flow_request.md`, `spike/flow_spike.py`, and
+  `proto/flow_api_v1.proto`. Three transports Wispr uses, in fallback order:
+  1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowTranscriber`).** Unary
+     `flow_api.v1.TranscriptionService/Transcribe` on `model-v31pl413.grpc.api.baseten.co:443`
+     (TLS, grpc-swift v2). Sends a protobuf `Request {init{metadata,preferences.vocabulary=dictionary},
+     context, payload.audio_packets=opus, commit}`; metadata headers `authorization: Bearer <jwt>`,
+     `baseten-authorization: Api-Key <key>`, `baseten-model-id`, `x-baseten-environment: production`,
+     `disable-formatting: false`. Returns **formatted** `result.output.plaintext` (→ we use
+     `llm_text || asr_text`). **Validated live end to end** — "kubectl"/"Coda" correctly spelled/cased.
+     Opus via the vendored `COpus`/`OpusEncoder` (16 kHz mono, 20 ms / 320-sample frames).
+     The Baseten `Api-Key` is read at runtime from `VOICEOP_BASETEN_KEY` or
+     `~/Library/Application Support/VoiceOperator/baseten-key` and is **not committed**.
+  2. **Baseten `run_remote` HTTP (msgpack)** — decoded but rejected `input is malformed` (server
+     schema not in the bundle); superseded by the gRPC path, not implemented.
+  3. **`/llm/asr_audio_chunks` / `/llm/asr` (raw fallback)** — `WisprTranscriber`. gRPC falls back
+     here when the Baseten key is absent or the call fails. Raw Whisper; never formats.
+- Opus params (frame size 320 / 20 ms, `OPUS_APPLICATION_VOIP`) confirmed for the chunks/gRPC paths.

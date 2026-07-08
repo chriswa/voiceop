@@ -91,8 +91,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         self.watcher = watcher
         Task { await watcher.start() }
 
-        // Prime the custom-word dictionary so the first dictation already biases
-        // toward the user's Wispr words (the fetch is otherwise lazy + cached).
+        // Warm the custom-word dictionary cache. It no longer feeds the raw
+        // /llm/asr prompt (that mis-biased Whisper — see WisprTranscriber); it's
+        // kept ready for the flow-request `dictionary_context` path, Milestone C.
         Task { _ = await WisprDictionary.shared.contextWords() }
 
         menuBar.update(status: .idle)

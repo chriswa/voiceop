@@ -2,12 +2,12 @@ import XCTest
 @testable import VoiceOperator
 
 final class WisprTranscriberTests: XCTestCase {
-    func testPromptJoinsWordsWithCommas() {
-        XCTAssertEqual(WisprTranscriber.prompt(from: ["Claude", "kubectl", "Coda"]),
-                       "Claude, kubectl, Coda")
+    func testJoinChunkTextsDropsEmptyAndSingleSpaces() {
+        XCTAssertEqual(WisprTranscriber.joinChunkTexts(["Hello ", "", "  world"]),
+                       "Hello world")
     }
 
-    func testPromptEmptyWhenNoWords() {
-        XCTAssertEqual(WisprTranscriber.prompt(from: []), "")
+    func testJoinChunkTextsEmptyWhenNoContent() {
+        XCTAssertEqual(WisprTranscriber.joinChunkTexts(["", "   "]), "")
     }
 }

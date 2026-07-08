@@ -5,16 +5,20 @@ import Foundation
 ///     POST https://api.wisprflow.ai/llm/asr
 ///     Authorization: <raw access token>        (NOT "Bearer …")
 ///     Content-Type: application/json
-///     { "audio": base64(16 kHz mono WAV), "language": "en", "prompt": "<words>" }
+///     { "audio": base64(16 kHz mono WAV), "language": "en", "prompt": "" }
 ///     -> 200 { "content": "<transcript>", "detected_language": "en" }
 ///
-/// `prompt` carries the user's custom dictionary words (fetched + cached by
-/// `WisprDictionary`). Whisper treats it as a spelling/context hint, so proper
-/// nouns like "Claude", "kubectl" and "Coda" come back spelled correctly instead
-/// of "Klaud"/"Q-Bectel"/"Koda". This is a lighter-weight substitute for Wispr's
-/// full context-aware "flow request" (`/llm/asr_audio_chunks` with a real
-/// `dictionary_context`), which needs Opus-encoded audio — deferred, see
-/// DESIGN.md Milestone C.
+/// The `prompt` is intentionally **always empty** here. This endpoint is raw
+/// Whisper, and Whisper's `prompt` is not a spelling dictionary — it is
+/// autoregressive "previous transcript" context the model conditions on.
+/// Stuffing it with the user's custom-word list (as we briefly did) backfires:
+/// on quiet/short chunks Whisper regurgitates the prompt verbatim, injects the
+/// listed words when they were never spoken, over-corrects common words toward
+/// them, and silently truncates past its 224-token window. Proper-noun spelling
+/// belongs on the flow-request path instead (`/llm/asr_audio_chunks` with a real
+/// `dictionary_context`) — see DESIGN.md Milestone C — which is a purpose-built
+/// biasing channel rather than a context hack. Do not route `WisprDictionary`
+/// into this prompt.
 ///
 /// The endpoint enforces a ~20 s server-side processing budget (it answers
 /// HTTP 408 beyond it), so it can only ever transcribe a short clip. Wispr Flow
@@ -25,14 +29,6 @@ import Foundation
 /// result.
 struct WisprTranscriber: Transcriber {
     private let endpoint = URL(string: "https://api.wisprflow.ai/llm/asr")!
-
-    /// The custom-word source whose entries seed the transcription `prompt`.
-    /// Defaults to the shared, cached live Wispr dictionary.
-    private let dictionary: DictionaryContextProviding
-
-    init(dictionary: DictionaryContextProviding = WisprDictionary.shared) {
-        self.dictionary = dictionary
-    }
 
     /// Wispr Flow's chunk size (`basetenChunkSizeSeconds` in the Flow app).
     static let chunkSeconds: Double = 28
@@ -45,10 +41,6 @@ struct WisprTranscriber: Transcriber {
 
     func transcribe(wavData: Data, language: String) async throws -> String {
         let token = try await WisprToken.shared.accessToken()
-        // One dictionary snapshot for the whole dictation, so every chunk biases
-        // toward the same words. Returns cached words immediately (empty on a
-        // cold start) and refreshes in the background — never blocks dictation.
-        let prompt = Self.prompt(from: await dictionary.contextWords())
         let wav = try WAVFile.parse(wavData)
         let chunks = wav.segments(maxSeconds: Self.chunkSeconds)
         if chunks.count > 1 {
@@ -58,20 +50,13 @@ struct WisprTranscriber: Transcriber {
         var texts: [String] = []
         for (i, chunk) in chunks.enumerated() {
             do {
-                texts.append(try await transcribeChunk(chunk.data, language: language,
-                                                       token: token, prompt: prompt))
+                texts.append(try await transcribeChunk(chunk.data, language: language, token: token))
             } catch {
                 if chunks.count > 1 { Log.log("transcribe: chunk \(i + 1)/\(chunks.count) failed") }
                 throw error
             }
         }
         return Self.joinChunkTexts(texts)
-    }
-
-    /// The Whisper `prompt`: the custom words as a comma-separated list (Whisper's
-    /// conventional hint format). Empty when there are no words yet.
-    static func prompt(from words: [String]) -> String {
-        words.joined(separator: ", ")
     }
 
     /// Flow's joining rule (`prevAsrText()`): drop empty chunks, one space between.
@@ -86,11 +71,9 @@ struct WisprTranscriber: Transcriber {
     /// retried with a short backoff before the whole transcription is failed.
     private static let chunkAttempts = 3
 
-    private func transcribeChunk(_ wavData: Data, language: String, token: String,
-                                 prompt: String) async throws -> String {
+    private func transcribeChunk(_ wavData: Data, language: String, token: String) async throws -> String {
         for attempt in 1... {
-            do { return try await transcribeChunkOnce(wavData, language: language,
-                                                      token: token, prompt: prompt) }
+            do { return try await transcribeChunkOnce(wavData, language: language, token: token) }
             catch {
                 guard attempt < Self.chunkAttempts, Self.isTransient(error) else { throw error }
                 Log.log("transcribe: transient error (\(TranscriberError.userMessage(for: error))) — retry \(attempt)/\(Self.chunkAttempts - 1)")
@@ -114,15 +97,14 @@ struct WisprTranscriber: Transcriber {
         }
     }
 
-    private func transcribeChunkOnce(_ wavData: Data, language: String, token: String,
-                                     prompt: String) async throws -> String {
+    private func transcribeChunkOnce(_ wavData: Data, language: String, token: String) async throws -> String {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(token, forHTTPHeaderField: "Authorization")   // raw JWT, not "Bearer"
         req.timeoutInterval = 20   // matches Flow's twentySecondTimeout for this endpoint
         req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "audio": wavData.base64EncodedString(), "language": language, "prompt": prompt,
+            "audio": wavData.base64EncodedString(), "language": language, "prompt": "",
         ])
 
         let (data, resp) = try await URLSession.shared.data(for: req)

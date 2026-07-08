@@ -35,10 +35,13 @@ struct WisprFlowTranscriber: Transcriber {
 
     func transcribe(wavData: Data, language: String) async throws -> String {
         guard let apiKey = WisprBasetenKey.value else {
+            Log.log("flow: no Baseten key — using raw /llm/asr")
             return try await fallback.transcribe(wavData: wavData, language: language)
         }
         do {
-            return try await transcribeViaFlow(wavData: wavData, language: language, apiKey: apiKey)
+            let text = try await transcribeViaFlow(wavData: wavData, language: language, apiKey: apiKey)
+            Log.log("flow: gRPC ok — \(text.count) chars")
+            return text
         } catch {
             Log.log("flow: gRPC failed (\(TranscriberError.userMessage(for: error))) — falling back to /llm/asr")
             return try await fallback.transcribe(wavData: wavData, language: language)

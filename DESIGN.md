@@ -186,8 +186,22 @@ This fixes "a TTS update arrives while I'm dictating and I miss it."
 - **Milestone B** — `wss://api.wisprflow.ai/…/ws` streaming: exact path + handshake (auth via
   header vs query param) + per-message JSON schema (opus `audio_chunks` up, `partial_transcript`
   down). Lower priority now that HTTP `/llm/asr` is proven sufficient for v1.
-- **Milestone C** — the richer "flow request" (`serializeFlowRequest`: `access_token`, `audio`/
-  `audio_packets`, `pipeline`, `context{app, ax_context, ocr_context, dictionary_context,
-  user_*}`) → `POST /llm/asr_audio_chunks`, for dictionary/proper-noun/context-aware formatting
-  beyond raw Whisper. Decode `pipeline` steps + minimal viable `context`.
-- Opus params (frame size, bitrate) for the WS/chunks paths.
+- **Dictionary prompt-biasing — SHIPPED (2026-07-07).** We fetch the user's live Wispr
+  dictionary (`GET /api/v1/dictionary/personal` + `/team`, raw-JWT auth, flat snake-case array;
+  keep `is_deleted==false && replacement==null`, rank by usage, dedupe, cap 60) and pass the
+  words as the `/llm/asr` `prompt`. Whisper uses it as a spelling hint, which fixes the
+  proper-noun misspellings that motivated Milestone C (verified: "Klaud/Q-Bectel/Koda" →
+  "Claude/kubectl/Coda"). Fetch is cached to disk with a 24 h *soft* expiry and served
+  stale-while-revalidate so dictation never blocks on the network (`WisprDictionary`).
+- **Milestone C (deferred, blocked on Opus)** — the richer "flow request" (`serializeFlowRequest`:
+  `access_token`, `audio_packets`, `pipeline`, `context{app, ax_context, ocr_context,
+  dictionary_context, user_*}`) → `POST /llm/asr_audio_chunks`, for a true `dictionary_context`
+  + `align`/`format` pipeline. The full request shape is decoded and validated (all fields
+  accepted), BUT this endpoint rejects PCM/WAV `audio_packets` with libopus-style errors
+  ("corrupted stream" / "buffer too small") — it requires **Opus-encoded** packets (20 ms /
+  320-sample frames, `audio_encoding: "opus"`), matching Wispr's WS streaming path. Landing it
+  needs a **libopus encoder dependency** in the app + Wispr's exact Opus packetization. Deferred
+  in favor of the prompt-biasing above, which already fixes the user-visible problem. The
+  Baseten `run_remote` alternative takes the same body but wants msgpack (`input is malformed`
+  over JSON) and a baked-in `Api-Key` — also deferred.
+- Opus params (frame size 320 / 20 ms, bitrate 64 kbps) for the WS/chunks paths.

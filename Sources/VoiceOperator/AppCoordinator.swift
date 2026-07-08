@@ -91,6 +91,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         self.watcher = watcher
         Task { await watcher.start() }
 
+        // Prime the custom-word dictionary so the first dictation already biases
+        // toward the user's Wispr words (the fetch is otherwise lazy + cached).
+        Task { _ = await WisprDictionary.shared.contextWords() }
+
         menuBar.update(status: .idle)
     }
 

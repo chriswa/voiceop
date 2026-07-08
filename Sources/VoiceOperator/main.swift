@@ -18,6 +18,12 @@ if let i = CommandLine.arguments.firstIndex(of: "--transcribe-file"),
     await DebugCLI.runTranscribeFile(path: path)
     exit(0)
 }
+// Fetch the user's Wispr custom dictionary and print the words that would be
+// sent as `dictionary_context`. One network request (personal + team).
+if CommandLine.arguments.contains("--dict-test") {
+    await DebugCLI.runDictTest()
+    exit(0)
+}
 if CommandLine.arguments.contains("--chirp-test") {
     await DebugCLI.runChirpTest()
     exit(0)

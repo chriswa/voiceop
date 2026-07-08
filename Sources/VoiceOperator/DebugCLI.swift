@@ -46,6 +46,35 @@ enum DebugCLI {
         }
     }
 
+    /// Fetch the user's live Wispr dictionary and print the words that would ride
+    /// along as `dictionary_context`. Bypasses the cache (fresh fetch each run).
+    static func runDictTest() async {
+        do {
+            let token = try await WisprToken.shared.accessToken()
+            async let personal = fetchDictJSON(path: "/api/v1/dictionary/personal", token: token)
+            async let team = fetchDictJSON(path: "/api/v1/dictionary/team", token: token)
+            let words = WisprDictionary.contextWords(personal: try await personal,
+                                                     team: (try? await team) ?? [])
+            print("dictionary_context (\(words.count) words):")
+            for w in words { print("  • \(w)") }
+        } catch {
+            FileHandle.standardError.write(Data("dict-test failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    private static func fetchDictJSON(path: String, token: String) async throws -> [WisprDictionary.Entry] {
+        var req = URLRequest(url: URL(string: "https://api.wisprflow.ai" + path)!)
+        req.setValue(token, forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw TranscriberError.http(status: (resp as? HTTPURLResponse)?.statusCode ?? -1,
+                                        body: String(decoding: data, as: UTF8.self))
+        }
+        return try JSONDecoder().decode([WisprDictionary.Entry].self, from: data)
+    }
+
     /// Play the three dictation chirps in sequence (no network).
     @MainActor
     static func runChirpTest() async {

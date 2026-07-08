@@ -87,9 +87,9 @@ actor PermissionWatcher {
         let key = NameVoiceRegistry.key(["claude": sid])
         guard let voice = await registry.assign(key) else { return }
 
-        let kind = event.toolName == "ExitPlanMode" ? "plan approval" : "question"
-        Log.log("permission: [\(sid.prefix(8))] pending \(kind) — speaking; summarizing \(context.count) turn(s)")
-        let summary = await ClaudeSummarizer.summarize(context: context, spoken: [])
+        let isPlan = event.toolName == "ExitPlanMode"
+        Log.log("permission: [\(sid.prefix(8))] pending \(isPlan ? "plan approval" : "question") — speaking; summarizing \(context.count) turn(s)")
+        let summary = await ClaudeSummarizer.summarizePending(context: context, kind: isPlan ? .plan : .question)
         Log.log("permission: [\(sid.prefix(8))] \(voice.name): \(summary.prefix(60))")
         emit(Utterance(name: voice.name, body: summary, voiceID: voice.voiceID, sessionKey: sid), context)
     }

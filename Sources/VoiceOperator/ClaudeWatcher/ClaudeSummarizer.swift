@@ -33,6 +33,45 @@ struct ClaudeSummarizer {
     elaboration (or the exact no-more-information sentence).
     """
 
+    // A pending block is NOT a completed turn: the agent has paused and is
+    // waiting on the user. The summary must relay the ask itself — crucially,
+    // it must NOT answer the question or fabricate the multiple-choice options
+    // (a bare "What's your favorite fruit?" otherwise tempts the model to
+    // invent an answer like "mango" or list options that aren't real).
+    private static let questionInstruction = """
+    A coding agent has PAUSED and is waiting for the user to answer a question. \
+    You are given what the agent did leading up to it, ending with the question \
+    it is asking. In one or two short sentences of plain spoken English, say what \
+    the agent has been doing and what it is now asking. State the question itself. \
+    Do NOT answer it, do NOT guess or state the user's answer, and do NOT invent, \
+    list, or read out any multiple-choice answer options. No markdown, no lists, \
+    no code, no preamble, no quotation marks. Output ONLY the spoken update.
+    """
+
+    private static let planInstruction = """
+    A coding agent has finished planning and is presenting a plan for the user's \
+    approval. You are given what the agent did leading up to it, ending with the \
+    proposed plan. In one or two short sentences of plain spoken English, say what \
+    the agent has been doing and what its plan proposes to do, at a high level. Do \
+    NOT invent specifics that aren't in the plan. No markdown, no lists, no code, \
+    no preamble, no quotation marks. Output ONLY the spoken update.
+    """
+
+    enum PendingKind { case question, plan }
+
+    /// Summarize a pending block (an unanswered question or a plan awaiting
+    /// approval). Unlike `summarize`, this instructs the model to relay the ask
+    /// without answering it or fabricating answer options. On failure it falls
+    /// back to a safe short line (never the multi-KB raw plan).
+    static func summarizePending(context: [Turn], kind: PendingKind) async -> String {
+        let instruction = kind == .plan ? planInstruction : questionInstruction
+        let fallback = kind == .plan
+            ? "The agent has a plan ready for your review."
+            : (context.last?.text ?? "The agent is asking you a question.")
+        return await callHaiku(instruction: instruction,
+                               userContent: userContent(context: context, spoken: [])) ?? fallback
+    }
+
     /// The escape-hatch sentence the model returns when a depth chain is exhausted.
     static let noMoreInfoPhrase = "No more information to summarize."
     static func isNoMoreInfo(_ text: String) -> Bool {

@@ -2,15 +2,19 @@ syntax = "proto3";
 
 package flow_api.v1;
 
+import "google/protobuf/duration.proto";
+
 // Reverse-engineered from the Wispr Flow app bundle (protobuf-ts generated
 // classes in .webpack/main/index.js) — see CLAUDE.md "read the app, don't probe".
-// STATUS: all 35 messages reconstructed (field names/numbers/types/message
-// references verified). REMAINING before use as gRPC codegen input:
-//   - enum VALUE members (names/prefixes known: APP_TYPE_, AUDIO_ENCODING_,
-//     PLATFORM_, COMMIT_, …) — a few fields are still marked `enum?`.
-//   - one message alias (`at`) to resolve, and the gRPC service/method definition
-//     (the transcription RPC on model-<id>.grpc.api.baseten.co).
-// This is the PRIMARY (formatted) parity path; see DESIGN.md Milestone C.
+// Complete: 35 messages, service, enums (incl. AudioEncoding.OPUS=2,
+// Environment.PRODUCTION=1). Only `Language` members are unresolved (placeholder;
+// we never send a meaningful Language). This is the PRIMARY (formatted) parity
+// path — see DESIGN.md Milestone C.
+
+service TranscriptionService {
+  rpc Transcribe(Request) returns (Response);
+  rpc TranscribeStream(stream Request) returns (stream Response);
+}
 
 message Version {
   uint32 major = 1;
@@ -103,7 +107,7 @@ message StyleConfig {
   WritingStyle override_style = 2;
   TaggingStyle tagging = 3;
   SignatureStyle signature = 4;
-  enum? editing_strength = 5;
+  EditingStrength editing_strength = 5;
 }
 
 message AudioPackets {
@@ -124,20 +128,20 @@ message Payload {
 message Text {
   string content = 1;
   uint32 num_tokens = 2;
-  repeated enum? languages = 3;
+  repeated Language languages = 3;
 }
 
 message Progress {
-  at transcriber = 1;
+  google.protobuf.Duration transcriber = 1;
   bool transcriber_finished = 2;
-  at formatter = 3;
+  google.protobuf.Duration formatter = 3;
   bool formatter_finished = 4;
   bool post_processing_finished = 5;
 }
 
 message UserActions {
   bool check_mic = 1;
-  enum? check_language = 2;
+  Language check_language = 2;
 }
 
 message WordAlignment {
@@ -181,15 +185,15 @@ message StaticVocabulary {
 }
 
 message Replacements {
-  ? replacements_personal = 1;
-  ? replacements_team = 2;
-  ? snippets_personal = 3;
-  ? snippets_team = 4;
+  map<string, string> replacements_personal = 1;
+  map<string, string> replacements_team = 2;
+  map<string, string> snippets_personal = 3;
+  map<string, string> snippets_team = 4;
 }
 
 message Preferences {
   User user = 1;
-  repeated enum? language = 2;
+  repeated Language language = 2;
   StaticVocabulary vocabulary = 3;
   Replacements replacements = 4;
   StyleConfig style_config = 5;
@@ -202,7 +206,7 @@ message Init {
 }
 
 message SkipAhead {
-  at position = 1;
+  google.protobuf.Duration position = 1;
 }
 
 message Request {
@@ -213,23 +217,23 @@ message Request {
 }
 
 message ResponseTime {
-  at transcribe = 1;
-  at transcribe_overhead = 2;
-  at format = 3;
-  at format_overhead = 4;
-  at post_process = 5;
-  at total = 6;
-  at external_asr_time = 7;
-  at external_llm_time = 8;
-  at generate_queue_duration = 9;
-  at generate_work_duration = 10;
+  google.protobuf.Duration transcribe = 1;
+  google.protobuf.Duration transcribe_overhead = 2;
+  google.protobuf.Duration format = 3;
+  google.protobuf.Duration format_overhead = 4;
+  google.protobuf.Duration post_process = 5;
+  google.protobuf.Duration total = 6;
+  google.protobuf.Duration external_asr_time = 7;
+  google.protobuf.Duration external_llm_time = 8;
+  google.protobuf.Duration generate_queue_duration = 9;
+  google.protobuf.Duration generate_work_duration = 10;
 }
 
 message Transcription {
   string html = 1;
   string plaintext = 2;
   uint32 num_tokens = 3;
-  repeated enum? languages = 4;
+  repeated Language languages = 4;
   float confidence = 5;
   bool language_detection_low_confidence = 6;
 }
@@ -242,7 +246,7 @@ message TranscriptionStats {
 
 message Result {
   Transcription output = 1;
-  at audio_duration = 2;
+  google.protobuf.Duration audio_duration = 2;
   ResponseTime response_time = 3;
   SignatureStatus signature_status = 4;
   ResultStatus status = 5;
@@ -263,9 +267,103 @@ message Response {
   Heartbeat heartbeat = 4;
 }
 
+enum AppType {
+  APP_TYPE_UNSPECIFIED = 0;
+  APP_TYPE_OTHER = 1;
+  APP_TYPE_BROWSER = 2;
+  APP_TYPE_PERSONAL_MESSAGING = 3;
+  APP_TYPE_WORK_MESSAGING = 4;
+  APP_TYPE_EMAIL = 5;
+  APP_TYPE_CHATBOT = 6;
+  APP_TYPE_DEVELOPER = 7;
+}
+
 enum AudioEncoding {
-  ACK = 0;
-  NACK_IN_USE = 1;
-  NACK_BUSY = 2;
-  NACK_BAD_FORMAT = 3;
+  AUDIO_ENCODING_UNSPECIFIED = 0;
+  AUDIO_ENCODING_WAV = 1;
+  AUDIO_ENCODING_OPUS = 2;
+}
+
+enum ChatRole {
+  CHAT_ROLE_UNSPECIFIED = 0;
+  CHAT_ROLE_USER = 1;
+  CHAT_ROLE_HUMAN = 2;
+  CHAT_ROLE_ASSISTANT = 3;
+}
+
+enum Commit {
+  COMMIT_UNSPECIFIED = 0;
+  COMMIT_TRUE = 1;
+  COMMIT_FALSE = 2;
+}
+
+enum Confidence {
+  CONFIDENCE_UNSPECIFIED = 0;
+  CONFIDENCE_NONE = 1;
+  CONFIDENCE_LOW = 2;
+  CONFIDENCE_MEDIUM = 3;
+  CONFIDENCE_HIGH = 4;
+}
+
+enum EditingStrength {
+  EDITINGSTRENGTH_UNSPECIFIED = 0;   // TODO: members not resolved from bundle
+}
+
+enum Environment {
+  ENVIRONMENT_UNSPECIFIED = 0;
+  ENVIRONMENT_PRODUCTION = 1;
+  ENVIRONMENT_STAGING = 2;
+  ENVIRONMENT_DEVELOPMENT = 3;
+  ENVIRONMENT_TEST = 4;
+}
+
+enum FlowSignaturePrefix {
+  FLOW_SIGNATURE_PREFIX_UNSPECIFIED = 0;
+  FLOW_SIGNATURE_PREFIX_SPOKEN = 1;
+  FLOW_SIGNATURE_PREFIX_WRITTEN = 2;
+}
+
+enum Language {
+  LANGUAGE_UNSPECIFIED = 0;   // TODO: members not resolved from bundle
+}
+
+enum Origin {
+  ORIGIN_UNSPECIFIED = 0;
+  ORIGIN_MIXTURE = 1;
+  ORIGIN_WHISPER = 2;
+  ORIGIN_SCRIBE = 3;
+  ORIGIN_VOXTRAL = 4;
+  ORIGIN_QWEN = 5;
+}
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_MACOS = 1;
+  PLATFORM_WIN32 = 2;
+  PLATFORM_IOS = 3;
+  PLATFORM_ANDROID = 4;
+  PLATFORM_WEB = 5;
+  PLATFORM_API = 6;
+}
+
+enum ResultStatus {
+  RESULT_STATUS_UNSPECIFIED = 0;
+  RESULT_STATUS_FORMATTED = 1;
+  RESULT_STATUS_ERROR = 2;
+  RESULT_STATUS_RAW_TRANSCRIPT = 3;
+}
+
+enum SignatureStatus {
+  SIGNATURE_STATUS_UNSPECIFIED = 0;
+  SIGNATURE_STATUS_ELIGIBLE = 1;
+  SIGNATURE_STATUS_ADDED = 2;
+}
+
+enum WritingStyle {
+  WRITING_STYLE_UNSPECIFIED = 0;
+  WRITING_STYLE_FORMAL = 1;
+  WRITING_STYLE_CASUAL = 2;
+  WRITING_STYLE_VERY_CASUAL = 3;
+  WRITING_STYLE_EXCITED = 4;
+  WRITING_STYLE_GENZ = 5;
 }

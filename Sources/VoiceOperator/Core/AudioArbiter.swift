@@ -54,6 +54,19 @@ final class AudioArbiter {
     private var pumping = false
     private var halted = false      // set when we deliberately stop playback
 
+    /// How many summarizations (narration + on-demand clipboard) are awaiting
+    /// Claude/Haiku right now. Ref-counted so overlapping ones share the single
+    /// blue "summarizing" state; the entry cue plays only on the first.
+    private var summarizingCount = 0
+    /// The most recent clipboard summarize input→output, so re-invoking on
+    /// unchanged text (or on our own last output) never re-summarizes. In-memory
+    /// only — resets on restart, which is enough to stop repeat re-summarization.
+    private var lastSummaryInput: String?
+    private var lastSummaryOutput: String?
+    private var summarizingClipboard = false   // guard against double-trigger
+    /// Voice for ⌘⌃S verbatim clipboard speech (session-less, so not registry-assigned).
+    private let clipboardVoiceID = NameVoiceTable.defaultVoice.voiceID
+
     var unreadCount: Int { unread.count }
     private func notifyUnread() { onUnreadChanged?(unread.count) }
     private func haltPlayback() { halted = true; tts.halt() }
@@ -621,5 +634,92 @@ final class AudioArbiter {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
+    }
+
+    private func clipboardText() -> String? {
+        let text = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (text?.isEmpty ?? true) ? nil : text
+    }
+
+    // MARK: - "Waiting on Claude" state
+
+    /// Enter the blue "waiting on Claude/Haiku" state. Ref-counted so a narration
+    /// summary and an on-demand clipboard summary can overlap; the entry cue plays
+    /// once, and the icon only turns blue when nothing louder (a live dictation or
+    /// TTS playback) already owns it.
+    func beginSummarizing() {
+        summarizingCount += 1
+        guard summarizingCount == 1 else { return }
+        SoundEffect.summarizing.play()
+        if !pumping, !isDictating { onStatus?(.summarizing) }
+    }
+
+    /// Leave the summarizing state. Only restores idle when the last summarization
+    /// finishes and nothing else owns the icon — a subsequent `pump()` (narration)
+    /// will set its own cyan/green regardless.
+    func endSummarizing() {
+        if summarizingCount > 0 { summarizingCount -= 1 }
+        if summarizingCount == 0, !pumping, !isDictating { onStatus?(.idle) }
+    }
+
+    // MARK: - Clipboard actions
+
+    /// ⌘⌃S: speak the current clipboard text verbatim through Cartesia. This is an
+    /// explicit action, so it bypasses narration mute (the one-off path) and drives
+    /// the same cyan→green icon states + clip cues as narration.
+    ///
+    /// Pressing it again *while our own clipboard speech is playing or being
+    /// fetched* means "stop": halt it and drop any queued verbatim one-offs. We
+    /// gate on `verbatim` (which only clipboard speech carries) so ⌘⌃S never halts
+    /// unrelated agent narration — halting that would just make `pump()` replay it
+    /// from the front, the opposite of silencing.
+    func speakClipboardOrHalt() {
+        if pumping, current?.verbatim == true {
+            haltPlayback()
+            oneOff.removeAll { $0.verbatim }
+            return
+        }
+        guard let text = clipboardText() else {
+            Log.log("speak-clipboard: clipboard has no text"); return
+        }
+        playOneOff(Utterance(name: "", body: text, voiceID: clipboardVoiceID,
+                             sessionKey: nil, verbatim: true))
+    }
+
+    /// Summarize the clipboard via Haiku and write the result back to the clipboard.
+    /// Skips silently when the clipboard already holds our last summary (so it never
+    /// re-summarizes its own output over and over), and reuses the cached output
+    /// when the input is unchanged rather than calling Haiku again.
+    func summarizeClipboard() {
+        guard !summarizingClipboard else { return }
+        guard let text = clipboardText() else {
+            Log.log("summarize-clipboard: clipboard has no text"); return
+        }
+        if text == lastSummaryOutput {
+            Log.log("summarize-clipboard: clipboard already holds the last summary — skipping")
+            return
+        }
+        if text == lastSummaryInput, let cached = lastSummaryOutput {
+            Log.log("summarize-clipboard: input unchanged — reusing cached summary")
+            copyToClipboard(cached)
+            SoundEffect.clipFinished.play()
+            return
+        }
+        summarizingClipboard = true
+        beginSummarizing()
+        Task {
+            defer { summarizingClipboard = false; endSummarizing() }
+            guard let summary = await ClaudeSummarizer.summarizeText(text), !summary.isEmpty else {
+                Log.log("summarize-clipboard: Haiku returned nothing — clipboard untouched")
+                SoundEffect.transcriptionFailed.play()
+                return
+            }
+            lastSummaryInput = text
+            lastSummaryOutput = summary
+            copyToClipboard(summary)
+            SoundEffect.clipFinished.play()
+            Log.log("summarize-clipboard: wrote \(summary.count)-char summary to clipboard")
+        }
     }
 }

@@ -126,10 +126,10 @@ enum DebugCLI {
     }
 
     /// Synthesize one utterance via Cartesia and play it. Makes exactly one TTS
-    /// request (cached afterward). Uses the first table voice by default.
+    /// request (cached afterward). Uses the default voice.
     @MainActor
     static func runTTSTest(text: String) async {
-        let voice = NameVoiceTable.all[0]
+        let voice = NameVoiceTable.defaultVoice
         let utterance = Utterance(name: voice.name, body: text, voiceID: voice.voiceID, sessionKey: nil)
         FileHandle.standardError.write(Data("speaking as \(voice.name): \(utterance.spokenText)\n".utf8))
         let engine = TTSEngine()

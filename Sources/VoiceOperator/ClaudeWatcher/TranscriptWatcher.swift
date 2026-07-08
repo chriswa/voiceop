@@ -17,6 +17,9 @@ actor TranscriptWatcher {
 
     private let registry: NameVoiceRegistry
     private let emit: @Sendable (Utterance, [Turn]) -> Void
+    /// Fired around each Haiku summarization (true=started, false=finished) so the
+    /// menu-bar icon can show the shared blue "waiting on Claude" state.
+    private let onClaudeThinking: (@Sendable (Bool) -> Void)?
     private var states: [String: SessionState] = [:]
     private var pending: [String: Pending] = [:]
     /// Launch ids verified dead by a liveness probe (see
@@ -38,8 +41,11 @@ actor TranscriptWatcher {
     private let spokenHistory = 10
     private let idleTTL: TimeInterval = 30 * 60   // release name/voice after 30m idle
 
-    init(registry: NameVoiceRegistry, emit: @escaping @Sendable (Utterance, [Turn]) -> Void) {
+    init(registry: NameVoiceRegistry,
+         onClaudeThinking: (@Sendable (Bool) -> Void)? = nil,
+         emit: @escaping @Sendable (Utterance, [Turn]) -> Void) {
         self.registry = registry
+        self.onClaudeThinking = onClaudeThinking
         self.emit = emit
     }
 
@@ -82,17 +88,36 @@ actor TranscriptWatcher {
     /// A file that appeared after startup is baselined once its size settles, so
     /// a forked session's copied history is skipped, not read as new activity.
     private func settleNewFile(_ path: String, size: Int, now: Date) {
-        if var p = pending[path] {
-            if size != p.size { p.size = size; p.changed = now }
-            if now.timeIntervalSince(p.changed) >= settleSeconds
-                || now.timeIntervalSince(p.first) >= maxSettleWait {
-                states[path] = SessionState(size: size, consumed: size)
-                pending[path] = nil
-            } else {
-                pending[path] = p
-            }
-        } else {
+        guard var p = pending[path] else {
             pending[path] = Pending(size: size, changed: now, first: now)
+            return
+        }
+        if size != p.size { p.size = size; p.changed = now }
+        guard now.timeIntervalSince(p.changed) >= settleSeconds
+            || now.timeIntervalSince(p.first) >= maxSettleWait else {
+            pending[path] = p
+            return
+        }
+        states[path] = SessionState(size: size, consumed: size)
+        pending[path] = nil
+
+        // Baselining at the tail is how a forked session's copied history is
+        // skipped — but the guard can't tell a fork from a genuine new session
+        // whose first turn completed inside the settle window (both just look
+        // like "content appeared, then went quiet"), so it silently discards
+        // that first turn. Any completed turn present at baseline is a turn we
+        // will NEVER narrate; log it so the loss is one grep away instead of a
+        // reconstruction from restart timestamps. (The real fix — distinguish
+        // fork from live by content age, not size — is still pending.)
+        let sid = (path as NSString).lastPathComponent.replacingOccurrences(of: ".jsonl", with: "")
+        let completed = (try? Data(contentsOf: URL(fileURLWithPath: path))).map {
+            TranscriptParser.parse(data: $0).turns
+                .filter { $0.role == "assistant" && $0.stopReason == "end_turn" }.count
+        } ?? 0
+        if completed > 0 {
+            Log.log("watcher: [\(sid.prefix(8))] baselined new transcript at \(size) bytes — skipping \(completed) already-complete turn(s) as presumed fork history; a genuine new session's first turn is indistinguishable here and would be lost the same way")
+        } else {
+            Log.log("watcher: [\(sid.prefix(8))] baselined new transcript at \(size) bytes; tailing new activity")
         }
     }
 
@@ -170,7 +195,9 @@ actor TranscriptWatcher {
             // seconds later (LLM latency), so post-incident forensics need this
             // timestamp, not that one.
             Log.log("watcher: [\(sid.prefix(8))] turn at pos \(turn.pos) has no outstanding background work — speaking; summarizing \(context.count) turn(s)")
+            onClaudeThinking?(true)
             let summary = await ClaudeSummarizer.summarize(context: context, spoken: state.spoken)
+            onClaudeThinking?(false)
             Log.log("watcher: [\(sid.prefix(8))] \(voice.name): \(summary.prefix(60))")
             emit(Utterance(name: voice.name, body: summary, voiceID: voice.voiceID, sessionKey: sid), context)
             state.spoken.append(summary)

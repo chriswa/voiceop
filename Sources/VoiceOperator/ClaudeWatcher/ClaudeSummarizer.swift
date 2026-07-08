@@ -57,7 +57,22 @@ struct ClaudeSummarizer {
     no preamble, no quotation marks. Output ONLY the spoken update.
     """
 
+    private static let clipboardInstruction = """
+    You are summarizing a piece of text the user has on their clipboard. In one \
+    or two short sentences of plain English, capture what it says or is about. Do \
+    NOT add preamble, commentary, or a lead-in like "This text is about"; just give \
+    the summary. No markdown, no lists, no code fences, no quotation marks. Output \
+    ONLY the summary.
+    """
+
     enum PendingKind { case question, plan }
+
+    /// Summarize arbitrary clipboard text into one or two sentences. Returns nil on
+    /// auth/HTTP/parse failure so the caller can leave the clipboard untouched
+    /// rather than overwrite it with a fallback.
+    static func summarizeText(_ text: String) async -> String? {
+        await callHaiku(instruction: clipboardInstruction, userContent: text)
+    }
 
     /// Summarize a pending block (an unanswered question or a plan awaiting
     /// approval). Unlike `summarize`, this instructs the model to relay the ask

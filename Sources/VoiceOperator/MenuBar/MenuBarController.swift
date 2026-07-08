@@ -12,8 +12,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private let statusMenuItem = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
     private let focusAgentItem = NSMenuItem(title: "Focus", action: #selector(focusAgent), keyEquivalent: "")
-    // No key equivalents anywhere: a menu-bar accessory never holds keyboard
-    // focus, so shortcuts would never fire.
+    // Key equivalents here are purely the right-aligned shortcut HINT in the menu.
+    // The shortcuts fire globally via the CGEvent tap (HotkeyMonitor), since a
+    // menu-bar accessory holds no keyboard focus while its menu is closed. While
+    // the menu IS open its own key equivalents fire, so the tap is suppressed then
+    // (see onMenuOpenChanged) to avoid a double trigger.
     private let narrationMenuItem = NSMenuItem(
         title: "Mute", action: #selector(toggleNarration), keyEquivalent: "")
     private let announceBlocksItem = NSMenuItem(
@@ -25,6 +28,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let cmdHistoryItem = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
 
     var onToggleNarration: ((Bool) -> Void)?
+    /// Speak the current clipboard aloud (same as ⌘⌃S).
+    var onSpeakClipboard: (() -> Void)?
+    /// Summarize the current clipboard via Haiku and write it back to the clipboard.
+    var onSummarizeClipboard: (() -> Void)?
+    /// Fired when the menu opens (true) / closes (false), so the CGEvent-tap
+    /// shortcuts can be suppressed while the menu handles its own key equivalents.
+    var onMenuOpenChanged: ((Bool) -> Void)?
     /// Current on/off state of question/plan announcements (reads settings.json).
     var announceBlocksState: (() -> Bool)?
     /// Toggle question/plan announcements to `desired`; returns the effective new
@@ -57,6 +67,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var currentStatus: OperatorStatus = .idle
     private var unreadCount = 0
 
+    /// The ⌘⌃ chord shared by every hinted shortcut (Mute, Speak, Summarize).
+    private static let chordMask: NSEvent.ModifierFlags = [.command, .control]
+
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -72,6 +85,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(focusAgentItem)
         menu.addItem(.separator())
         narrationMenuItem.target = self
+        narrationMenuItem.keyEquivalent = "b"          // ⌘⌃B (hint only; tap fires it)
+        narrationMenuItem.keyEquivalentModifierMask = Self.chordMask
         menu.addItem(narrationMenuItem)
         menu.addItem(.separator())
         ttsHistoryItem.submenu = NSMenu()
@@ -80,6 +95,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(sttHistoryItem)
         cmdHistoryItem.submenu = NSMenu()
         menu.addItem(cmdHistoryItem)
+        menu.addItem(.separator())
+        // Clipboard actions. The key equivalents render the right-aligned shortcut
+        // hint; the shortcuts themselves fire via the CGEvent tap (HotkeyMonitor).
+        let speakClip = NSMenuItem(title: "Speak Clipboard",
+                                   action: #selector(speakClipboard), keyEquivalent: "s")
+        speakClip.keyEquivalentModifierMask = Self.chordMask   // ⌘⌃S
+        speakClip.target = self
+        menu.addItem(speakClip)
+        let summarizeClip = NSMenuItem(title: "Summarize Clipboard",
+                                       action: #selector(summarizeClipboard), keyEquivalent: "a")
+        summarizeClip.keyEquivalentModifierMask = Self.chordMask   // ⌘⌃A
+        summarizeClip.target = self
+        menu.addItem(summarizeClip)
         menu.addItem(.separator())
         // TEMP: audition every cue while we retune them.
         let tones = NSMenuItem(title: "Play Tone (debug)", action: nil, keyEquivalent: "")
@@ -111,6 +139,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     // Rebuild history submenus each time the menu opens (fresh ages/entries).
     func menuWillOpen(_ menu: NSMenu) {
+        onMenuOpenChanged?(true)   // menu handles its own key equivalents now; mute the tap's copy
         rebuildTTSHistory()
         rebuildSTTHistory()
         rebuildCommandHistory()
@@ -125,6 +154,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             focusAgentItem.representedObject = nil
             focusAgentItem.isEnabled = false
         }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        onMenuOpenChanged?(false)   // re-arm the CGEvent-tap shortcuts
     }
 
     private func rebuildTTSHistory() {
@@ -244,6 +277,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleNarration() { toggleNarrationMute() }
+
+    @objc private func speakClipboard() { onSpeakClipboard?() }
+    @objc private func summarizeClipboard() { onSummarizeClipboard?() }
 
     /// Flip question/plan announcements. The checkmark follows the EFFECTIVE state
     /// returned by the handler (settings.json is the source of truth), so a failed

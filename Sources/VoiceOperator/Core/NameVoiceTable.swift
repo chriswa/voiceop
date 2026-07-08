@@ -1,6 +1,6 @@
 import Foundation
 
-/// 82 sticky operator call-signs paired with distinct Cartesia voices.
+/// 81 sticky operator call-signs paired with distinct Cartesia voices.
 /// Regenerated 2026-07 with gender alignment: each pair's `gender` is the
 /// voice's gender as reported by the Cartesia API (GET /voices/{id}), and the
 /// call-sign is chosen to match it. The trailing comment on each row is the
@@ -58,7 +58,6 @@ enum NameVoiceTable {
         NamedVoice(name: "Leon", voiceID: "34d923aa-c3b5-4f21-aac7-2c1f12730d4b", gender: .masculine),  // Griffin - Excited Narrator
         NamedVoice(name: "Penny", voiceID: "358e650d-ac0b-4a74-b14f-aca3daa40d79", gender: .feminine),  // Kendra - Smooth Communicator
         NamedVoice(name: "Oscar", voiceID: "39b376fc-488e-4d0c-8b37-e00b72059fdd", gender: .masculine),  // Sheldon - Help Desk Man
-        NamedVoice(name: "Ruby", voiceID: "3b554273-4299-48b9-9aaf-eefd438e3941", gender: .feminine),  // Simi - Support Specialist
         NamedVoice(name: "Victor", voiceID: "3c0f09d6-e0d7-499c-a594-70c5b7b93048", gender: .masculine),  // Benedict - Measured Mediator
         NamedVoice(name: "George", voiceID: "3d79b1fd-daaa-439c-bff3-903dc18e7684", gender: .masculine),  // Luke - Happy Broadway Voice
         NamedVoice(name: "Jonah", voiceID: "3e39e9a5-585c-4f5f-bac6-5e4905c51095", gender: .masculine),  // Cole - Clear Communicator
@@ -106,4 +105,9 @@ enum NameVoiceTable {
         NamedVoice(name: "Felix", voiceID: "79bfcec0-720c-41f2-a33a-f12383e9627f", gender: .masculine),  // Wang - Guide
         NamedVoice(name: "Jasper", voiceID: "79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e", gender: .masculine),  // Theo - Modern Narrator
     ]
+
+    /// The neutral English voice for verbatim, session-less speech (⌘⌃S
+    /// speak-the-clipboard) and the debug TTS harness. Resolved by name so
+    /// reordering `all` can never silently change which voice this is.
+    static let defaultVoice: NamedVoice = all.first { $0.name == "Oliver" } ?? all[0]
 }

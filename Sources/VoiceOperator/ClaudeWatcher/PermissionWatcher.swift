@@ -22,14 +22,19 @@ actor PermissionWatcher {
 
     private let registry: NameVoiceRegistry
     private let emit: @Sendable (Utterance, [Turn]) -> Void
+    /// Fired around Haiku summarization (true=started, false=finished) so the
+    /// menu-bar icon can show the shared blue "waiting on Claude" state.
+    private let onClaudeThinking: (@Sendable (Bool) -> Void)?
     private let spoolDir: URL
     private let pollInterval: TimeInterval = 0.5
     private static let planCap = 10000
 
     init(registry: NameVoiceRegistry, spoolDir: URL,
+         onClaudeThinking: (@Sendable (Bool) -> Void)? = nil,
          emit: @escaping @Sendable (Utterance, [Turn]) -> Void) {
         self.registry = registry
         self.spoolDir = spoolDir
+        self.onClaudeThinking = onClaudeThinking
         self.emit = emit
     }
 
@@ -89,7 +94,9 @@ actor PermissionWatcher {
 
         let isPlan = event.toolName == "ExitPlanMode"
         Log.log("permission: [\(sid.prefix(8))] pending \(isPlan ? "plan approval" : "question") — speaking; summarizing \(context.count) turn(s)")
+        onClaudeThinking?(true)
         let summary = await ClaudeSummarizer.summarizePending(context: context, kind: isPlan ? .plan : .question)
+        onClaudeThinking?(false)
         Log.log("permission: [\(sid.prefix(8))] \(voice.name): \(summary.prefix(60))")
         emit(Utterance(name: voice.name, body: summary, voiceID: voice.voiceID, sessionKey: sid), context)
     }

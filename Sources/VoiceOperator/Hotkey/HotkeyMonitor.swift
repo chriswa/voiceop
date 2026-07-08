@@ -39,6 +39,16 @@ final class HotkeyMonitor {
     var onRepaste: (() -> Void)?
     /// Fired on ⌘⌃B — toggle narration mute.
     var onToggleMute: (() -> Void)?
+    /// Fired on ⌘⌃S — speak the clipboard aloud (or stop if already speaking).
+    var onSpeakClipboard: (() -> Void)?
+    /// Fired on ⌘⌃A — summarize the clipboard via Haiku.
+    var onSummarizeClipboard: (() -> Void)?
+
+    /// Suppresses the ⌘⌃ chord shortcuts while the status-bar menu is open. Those
+    /// items carry real menu key equivalents (for the right-aligned shortcut hint),
+    /// which the menu fires itself while open — so we mute the tap's copy to avoid
+    /// firing twice. The Fn dictation trigger is unaffected.
+    var chordsSuppressed = false
 
     /// Live Control-key state, updated from every flagsChanged event.
     private var controlDown = false
@@ -48,6 +58,10 @@ final class HotkeyMonitor {
     private static let vKeycode: Int64 = 9
     // ⌘⌃B: B is keycode 11 (kVK_ANSI_B); requires Command + Control.
     private static let bKeycode: Int64 = 11
+    // ⌘⌃S: S is keycode 1 (kVK_ANSI_S); requires Command + Control.
+    private static let sKeycode: Int64 = 1
+    // ⌘⌃A: A is keycode 0 (kVK_ANSI_A); requires Command + Control.
+    private static let aKeycode: Int64 = 0
 
     // Fn (Globe): keycode 63 (kVK_Function), flagged by kCGEventFlagMaskSecondaryFn.
     private static let triggerKeycode: Int64 = 63
@@ -67,7 +81,7 @@ final class HotkeyMonitor {
 
     func start() -> Bool {
         let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
-            | (1 << CGEventType.keyDown.rawValue)   // for the ⌘⌃V re-paste chord
+            | (1 << CGEventType.keyDown.rawValue)   // for the ⌘⌃-chord shortcuts
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
@@ -95,13 +109,18 @@ final class HotkeyMonitor {
             Log.log("hotkey tap re-enabled after \(type == .tapDisabledByTimeout ? "timeout" : "user input")")
             return
         }
-        // ⌘⌃-chord keyDown shortcuts (V = re-paste, B = toggle mute).
+        // ⌘⌃-chord keyDown shortcuts (V = re-paste, B = toggle mute, S = speak
+        // clipboard, A = summarize clipboard). Suppressed while the menu is open,
+        // where the items' own key equivalents fire instead (see chordsSuppressed).
         if type == .keyDown {
+            guard !chordsSuppressed else { return }
             let keycode = event.getIntegerValueField(.keyboardEventKeycode)
             if event.flags.contains(.maskCommand), event.flags.contains(.maskControl) {
                 switch keycode {
                 case Self.vKeycode: onRepaste?()
                 case Self.bKeycode: onToggleMute?()
+                case Self.sKeycode: onSpeakClipboard?()
+                case Self.aKeycode: onSummarizeClipboard?()
                 default: break
                 }
             }

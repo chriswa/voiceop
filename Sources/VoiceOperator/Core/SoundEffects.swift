@@ -18,6 +18,7 @@ enum SoundEffect: CaseIterable {
     case surfaceRaised              // a voice tool matched + ran
     case unrecognized               // command matched no tool ("sad")
     case transcriptionFailed        // transcription request errored
+    case summarizing                // started waiting on Claude/Haiku (very short)
     case clipRequested              // started fetching a TTS clip (very short)
     case clipStarted                // TTS playback began (very short)
     case clipFinished               // TTS playback finished (very short)
@@ -36,6 +37,7 @@ enum SoundEffect: CaseIterable {
         case .surfaceRaised:            return "Surface raised (tool ran)"
         case .unrecognized:             return "Unrecognized (no match)"
         case .transcriptionFailed:      return "Transcription failed"
+        case .summarizing:              return "Summarizing (waiting on Claude)"
         case .clipRequested:            return "Clip requested"
         case .clipStarted:              return "Clip started"
         case .clipFinished:             return "Clip finished"
@@ -73,6 +75,10 @@ final class SoundBank {
             // transcription request failed). Longer/lower than "unrecognized"
             // so an error is audibly distinct from a mere no-match.
             .transcriptionFailed: Self.chirp([(523, 0.10), (392, 0.10), (262, 0.22)]),
+            // Soft ascending double-blip — Claude/Haiku summarization began.
+            // Distinct from the single-blip clip cues so a "waiting on Claude"
+            // beat is audibly its own state before any Cartesia fetch.
+            .summarizing:       Self.chirp([(784, 0.04), (1046, 0.05)], volume: 0.5),
             // Very short single blips around each TTS clip's lifecycle.
             .clipRequested:     Self.chirp([(1200, 0.04)], volume: 0.5),
             .clipStarted:       Self.chirp([(1600, 0.04)], volume: 0.5),

@@ -16,6 +16,7 @@ enum OperatorStatus: Equatable {
     case commandListening // Ctrl+Fn command dictation capturing   -> MAGENTA
     case transcribing     // audio sent, awaiting text                 -> YELLOW
     case pasting          // inserting text into the focused app
+    case summarizing      // waiting on Claude/Haiku (any summary)  -> BLUE
     case requestingTTS    // fetching/synthesizing a clip          -> CYAN
     case speaking         // TTS is playing                        -> GREEN
 
@@ -26,6 +27,7 @@ enum OperatorStatus: Equatable {
         case .listening:        return .systemRed
         case .commandListening: return .magenta
         case .transcribing:     return .systemYellow
+        case .summarizing:      return .systemBlue
         case .requestingTTS:    return .systemCyan
         case .speaking:         return .systemGreen
         case .idle, .pasting:   return nil
@@ -39,6 +41,7 @@ enum OperatorStatus: Equatable {
         case .commandListening: return "Voice Operator — listening (command)"
         case .transcribing:     return "Voice Operator — transcribing"
         case .pasting:          return "Voice Operator — pasting"
+        case .summarizing:      return "Voice Operator — summarizing"
         case .requestingTTS:    return "Voice Operator — fetching audio"
         case .speaking:         return "Voice Operator — speaking"
         }

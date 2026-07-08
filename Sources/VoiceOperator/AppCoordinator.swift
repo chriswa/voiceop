@@ -47,6 +47,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             }
         }
         menuBar.onToggleNarration = { [weak self] muted in self?.arbiter.setNarrationMuted(muted) }
+        menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboardOrHalt() }
+        menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
+        // While the menu is open its own key equivalents fire; suppress the tap's
+        // copies of those chords so a shortcut never triggers twice.
+        menuBar.onMenuOpenChanged = { [weak self] open in self?.hotkey.chordsSuppressed = open }
         // Announce pending questions/plans: the checkbox reflects (and drives) the
         // presence of our PermissionRequest hook in ~/.claude/settings.json.
         menuBar.announceBlocksState = { PermissionHook.isInstalled() }
@@ -89,6 +94,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
+        hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboardOrHalt() }
+        hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         installHotkeyWhenTrusted()
 
         // Voice commands: a dictation that is a "<verb> [name]" command (rather
@@ -100,7 +107,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         // Claude Code narration. The watcher runs off-main and hops to main to
         // record + play each update (with its context, for "More details").
         let arbiter = self.arbiter
-        let watcher = TranscriptWatcher(registry: registry) { utterance, context in
+        // Shared "waiting on Claude" signal: both watchers turn the icon blue (and
+        // sound the entry cue) around their Haiku summarization, matching the
+        // on-demand clipboard summarizer.
+        let onClaudeThinking: @Sendable (Bool) -> Void = { active in
+            Task { @MainActor in active ? arbiter.beginSummarizing() : arbiter.endSummarizing() }
+        }
+        let watcher = TranscriptWatcher(registry: registry, onClaudeThinking: onClaudeThinking) { utterance, context in
             Task { @MainActor in arbiter.narrate(utterance, context: context) }
         }
         self.watcher = watcher
@@ -122,7 +135,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             do { try PermissionHook.ensureScriptInstalled() }
             catch { Log.log("permission-hook: could not refresh script: \(error)") }
         }
-        let permissionWatcher = PermissionWatcher(registry: registry, spoolDir: PermissionHook.spoolDir) { utterance, context in
+        let permissionWatcher = PermissionWatcher(registry: registry, spoolDir: PermissionHook.spoolDir,
+                                                  onClaudeThinking: onClaudeThinking) { utterance, context in
             Task { @MainActor in arbiter.narrate(utterance, context: context) }
         }
         self.permissionWatcher = permissionWatcher

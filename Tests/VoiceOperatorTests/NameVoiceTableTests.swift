@@ -10,7 +10,7 @@ final class NameVoiceTableTests: XCTestCase {
         "Fiona", "Gemma", "Grace", "Hazel", "Heidi", "Iris", "Ivy", "Jane",
         "Julia", "Kate", "Laura", "Lily", "Lucy", "Maya", "Mia", "Molly",
         "Naomi", "Nina", "Nora", "Olivia", "Penny", "Piper", "Rachel", "Rita",
-        "Rose", "Ruby", "Ruth", "Sadie", "Stella", "Tessa", "Vivian", "Wendy",
+        "Rose", "Ruth", "Sadie", "Stella", "Tessa", "Vivian", "Wendy",
         "Zoe",
     ]
 

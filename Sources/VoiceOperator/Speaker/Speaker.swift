@@ -4,13 +4,18 @@ import Foundation
 /// actually sent to TTS is "⟨name⟩ here. ⟨body⟩". `voiceID` is the Cartesia
 /// voice; `sessionKey` identifies the originating Claude surface for spaceterm
 /// speaking events. Keeping name/body separate lets the history show them nicely.
+///
+/// A `verbatim` utterance (⌘⌃S speak-the-clipboard) is spoken exactly as its
+/// `body` — no call-sign prefix — since it's the user's own text, not an agent
+/// update.
 struct Utterance: Sendable, Equatable {
     let name: String
     let body: String
     let voiceID: String
     let sessionKey: String?
+    var verbatim: Bool = false
 
-    var spokenText: String { "\(name) here. \(body)" }
+    var spokenText: String { verbatim ? body : "\(name) here. \(body)" }
 }
 
 /// Text→audio provider, swappable like `Transcriber`. Produces a complete WAV

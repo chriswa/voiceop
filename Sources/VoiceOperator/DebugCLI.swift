@@ -30,6 +30,32 @@ enum DebugCLI {
         }
     }
 
+    /// Synthesize `text` with `say` and transcribe it through the gRPC flow path
+    /// (`WisprFlowTranscriber`) — the formatted Wispr-parity path. Requires
+    /// `VOICEOP_BASETEN_KEY`; otherwise it exercises the `/llm/asr` fallback.
+    /// One network request (endpoint etiquette).
+    static func runFlowGRPCTest(text: String) async {
+        do {
+            let tmp = FileManager.default.temporaryDirectory
+            let aiff = tmp.appendingPathComponent("vo-say-\(UUID().uuidString).aiff")
+            let wav = aiff.deletingPathExtension().appendingPathExtension("wav")
+            defer { try? FileManager.default.removeItem(at: aiff)
+                    try? FileManager.default.removeItem(at: wav) }
+            let say = Process()
+            say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+            say.arguments = ["-o", aiff.path, text]
+            try say.run(); say.waitUntilExit()
+            try AudioRecorder.convertToASRWav(from: aiff, to: wav)
+            let haveKey = WisprBasetenKey.value != nil
+            FileHandle.standardError.write(Data("flow-grpc-test: said \(text.count) chars; baseten key \(haveKey ? "present" : "ABSENT → /llm fallback")\n".utf8))
+            let transcript = try await WisprFlowTranscriber().transcribe(wavURL: wav, language: "en")
+            print("transcript: \(transcript)")
+        } catch {
+            FileHandle.standardError.write(Data("flow-grpc-test failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
     /// Transcribe an existing WAV file through the real chunked transcriber
     /// path (one network request per 28 s chunk). Prints the transcript.
     static func runTranscribeFile(path: String) async {

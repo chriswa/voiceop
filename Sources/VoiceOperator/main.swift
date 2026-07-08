@@ -24,6 +24,15 @@ if CommandLine.arguments.contains("--dict-test") {
     await DebugCLI.runDictTest()
     exit(0)
 }
+// Transcribe `say`-synthesized speech through the gRPC flow path
+// (WisprFlowTranscriber) — the formatted Wispr-parity path. Needs
+// VOICEOP_BASETEN_KEY; otherwise exercises the /llm/asr fallback.
+if CommandLine.arguments.contains("--flow-grpc-test") {
+    await DebugCLI.runFlowGRPCTest(
+        text: CommandLine.arguments.last.flatMap { $0 == "--flow-grpc-test" ? nil : $0 }
+            ?? "Claude and kubectl and Coda are proper nouns.")
+    exit(0)
+}
 if CommandLine.arguments.contains("--chirp-test") {
     await DebugCLI.runChirpTest()
     exit(0)

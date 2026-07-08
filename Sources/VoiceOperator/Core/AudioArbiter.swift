@@ -89,7 +89,9 @@ final class AudioArbiter {
         return dir
     }()
 
-    init(transcriber: Transcriber = WisprTranscriber()) {
+    // WisprFlowTranscriber = the formatted Wispr-parity gRPC path, falling back
+    // to raw /llm/asr (WisprTranscriber) when the Baseten key is absent or gRPC fails.
+    init(transcriber: Transcriber = WisprFlowTranscriber()) {
         self.transcriber = transcriber
         let loaded = historyStore.load()
         ttsHistory = loaded.tts

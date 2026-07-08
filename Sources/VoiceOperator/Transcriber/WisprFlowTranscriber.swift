@@ -34,24 +34,44 @@ struct WisprFlowTranscriber: Transcriber {
     }
 
     func transcribe(wavData: Data, language: String) async throws -> String {
+        // The gRPC unary Transcribe handles a short clip per call, so cut anything
+        // longer than one chunk into 28 s segments (matching WisprTranscriber and
+        // Wispr's own basetenChunkSizeSeconds) and join the per-segment transcripts.
+        // Live dictation already arrives pre-chunked (one segment); this only fans
+        // out when transcribing a long stored clip (e.g. a history retry).
+        let wav = try WAVFile.parse(wavData)
+        let segments = wav.segments(maxSeconds: WisprTranscriber.chunkSeconds)
+        if segments.count > 1 {
+            Log.log(String(format: "flow: %.1fs clip → %d segments of ≤%.0fs",
+                           wav.duration, segments.count, WisprTranscriber.chunkSeconds))
+        }
+        var texts: [String] = []
+        for segment in segments {
+            texts.append(try await transcribeSegment(segment, language: language))
+        }
+        return WisprTranscriber.joinChunkTexts(texts)
+    }
+
+    /// One ≤28 s segment: the gRPC flow path, falling back to raw `/llm/asr` when
+    /// the Baseten key is absent or the gRPC call fails.
+    private func transcribeSegment(_ wav: WAVFile, language: String) async throws -> String {
         guard let apiKey = WisprBasetenKey.value else {
             Log.log("flow: no Baseten key — using raw /llm/asr")
-            return try await fallback.transcribe(wavData: wavData, language: language)
+            return try await fallback.transcribe(wavData: wav.data, language: language)
         }
         do {
-            let text = try await transcribeViaFlow(wavData: wavData, language: language, apiKey: apiKey)
+            let text = try await transcribeViaFlow(wav: wav, language: language, apiKey: apiKey)
             Log.log("flow: gRPC ok — \(text.count) chars")
             return text
         } catch {
             Log.log("flow: gRPC failed (\(TranscriberError.userMessage(for: error))) — falling back to /llm/asr")
-            return try await fallback.transcribe(wavData: wavData, language: language)
+            return try await fallback.transcribe(wavData: wav.data, language: language)
         }
     }
 
-    private func transcribeViaFlow(wavData: Data, language: String, apiKey: String) async throws -> String {
+    private func transcribeViaFlow(wav: WAVFile, language: String, apiKey: String) async throws -> String {
         let token = try await WisprToken.shared.accessToken()
         let words = await dictionary.contextWords()
-        let wav = try WAVFile.parse(wavData)
         let audio = try OpusEncoder().encode(pcm: wav.samples)
 
         let request = Self.buildRequest(packets: audio.packets, words: words, token: token)

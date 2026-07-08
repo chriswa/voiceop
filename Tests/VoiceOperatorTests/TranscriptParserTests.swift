@@ -264,6 +264,83 @@ final class TranscriptParserTests: XCTestCase {
                      "agents have no probeable file — they resolve via notifications only")
     }
 
+    func testAskUserQuestionTurnFoldsQuestionsAndExcludesOptions() {
+        // A blocking AskUserQuestion turn: stop_reason is "tool_use", the
+        // explanation is a text block, and the question prompts live in the tool
+        // input. We fold the questions into the turn text and mark it a question
+        // — but the multiple-choice options must never appear.
+        let jsonl = line([
+            "type": "assistant",
+            "message": [
+                "stop_reason": "tool_use",
+                "content": [
+                    ["type": "text", "text": "I've wired up the two options."],
+                    ["type": "tool_use", "name": "AskUserQuestion",
+                     "input": ["questions": [
+                        ["question": "Persist slots to disk or keep them in memory?",
+                         "header": "Persistence", "multiSelect": false,
+                         "options": [
+                            ["label": "Persist to disk", "description": "survives restart"],
+                            ["label": "In-memory only", "description": "lost on restart"],
+                         ]],
+                     ]]],
+                ],
+            ],
+        ]) + "\n"
+
+        let parsed = TranscriptParser.parse(data: Data(jsonl.utf8))
+        XCTAssertEqual(parsed.turns.count, 1)
+        let turn = parsed.turns[0]
+        XCTAssertTrue(turn.isQuestion, "an AskUserQuestion tool_use turn must be marked a question")
+        XCTAssertTrue(turn.text.contains("I've wired up the two options."),
+                      "the explanation preceding the question must be included")
+        XCTAssertTrue(turn.text.contains("Persist slots to disk or keep them in memory?"),
+                      "the question prompt must be included")
+        XCTAssertFalse(turn.text.contains("survives restart"),
+                       "the answer options must NOT be read aloud")
+        XCTAssertFalse(turn.text.contains("In-memory only"),
+                       "the answer option labels must NOT be read aloud")
+    }
+
+    func testAskUserQuestionWithoutTextBlockStillProducesQuestionTurn() {
+        // Real transcripts often put the explanation in earlier turns, so the
+        // AskUserQuestion message itself carries only the tool_use. It must still
+        // yield a narratable question turn (previously it produced no turn).
+        let jsonl = line([
+            "type": "assistant",
+            "message": ["stop_reason": "tool_use",
+                        "content": [["type": "tool_use", "name": "AskUserQuestion",
+                                     "input": ["questions": [["question": "Ship it now?"]]]]]],
+        ]) + "\n"
+        let parsed = TranscriptParser.parse(data: Data(jsonl.utf8))
+        XCTAssertEqual(parsed.turns.count, 1)
+        XCTAssertTrue(parsed.turns[0].isQuestion)
+        XCTAssertEqual(parsed.turns[0].text, "Ship it now?")
+    }
+
+    func testOrdinaryToolUseTurnIsNotAQuestion() {
+        // A normal tool_use turn (e.g. Bash) must not be flagged as a question,
+        // or every tool call would trigger narration.
+        let jsonl = line([
+            "type": "assistant",
+            "message": ["stop_reason": "tool_use",
+                        "content": [["type": "text", "text": "running the build"],
+                                    ["type": "tool_use", "name": "Bash", "input": ["command": "make"]]]],
+        ]) + "\n"
+        let parsed = TranscriptParser.parse(data: Data(jsonl.utf8))
+        XCTAssertEqual(parsed.turns.count, 1)
+        XCTAssertFalse(parsed.turns[0].isQuestion)
+    }
+
+    func testTurnDecodesWithoutIsQuestionKey() throws {
+        // History persisted before isQuestion existed lacks the key; it must
+        // decode to false rather than failing (which would drop all history).
+        let legacy = #"{"role":"assistant","text":"done","pos":0,"stopReason":"end_turn"}"#
+        let turn = try JSONDecoder().decode(Turn.self, from: Data(legacy.utf8))
+        XCTAssertFalse(turn.isQuestion)
+        XCTAssertEqual(turn.text, "done")
+    }
+
     func testIncompleteTrailingLineExcluded() {
         let jsonl = line(["type": "assistant",
                           "message": ["stop_reason": "end_turn", "content": [["type": "text", "text": "complete"]]]])

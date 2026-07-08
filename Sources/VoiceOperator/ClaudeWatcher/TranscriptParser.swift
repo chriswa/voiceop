@@ -10,6 +10,30 @@ struct Turn: Equatable, Codable, Sendable {
     let text: String
     let pos: Int              // byte offset of the line
     let stopReason: String?   // assistant only: "end_turn" | "tool_use" | …
+    /// True when this assistant turn ended by calling `AskUserQuestion` — a
+    /// hard block on the user, narrated like an `end_turn` even though its
+    /// stop_reason is "tool_use". `text` carries the extracted question(s).
+    let isQuestion: Bool
+
+    init(role: String, text: String, pos: Int, stopReason: String?, isQuestion: Bool = false) {
+        self.role = role; self.text = text; self.pos = pos
+        self.stopReason = stopReason; self.isQuestion = isQuestion
+    }
+}
+
+extension Turn {
+    // Lenient decode: `isQuestion` was added later, so Turns persisted before
+    // then (inside TTSHistoryEntry.context) lack the key — default to false
+    // rather than failing the decode, which would drop all saved history. In an
+    // extension so the memberwise-style initializer above is preserved.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decode(String.self, forKey: .role)
+        text = try c.decode(String.self, forKey: .text)
+        pos = try c.decode(Int.self, forKey: .pos)
+        stopReason = try c.decodeIfPresent(String.self, forKey: .stopReason)
+        isQuestion = try c.decodeIfPresent(Bool.self, forKey: .isQuestion) ?? false
+    }
 }
 
 /// A background launch observed in the transcript. `donePos` is nil when no
@@ -142,10 +166,18 @@ enum TranscriptParser {
             }
 
             if kind == "assistant", let message {
-                let text = textBlocks(message["content"])
-                if !text.isEmpty {
-                    turns.append(Turn(role: "assistant", text: text, pos: start,
-                                      stopReason: message["stop_reason"] as? String))
+                // An AskUserQuestion turn's explanation lives in its text blocks
+                // (or in earlier turns of the group); the question prompts live
+                // in the tool_use input. Fold the questions in — but never the
+                // multiple-choice options — so narration reads the ask, not the
+                // menu the user picks from on screen.
+                let questions = askedQuestions(message["content"])
+                let body = [textBlocks(message["content"]), questions.joined(separator: "\n")]
+                    .filter { !$0.isEmpty }.joined(separator: "\n\n")
+                if !body.isEmpty {
+                    turns.append(Turn(role: "assistant", text: body, pos: start,
+                                      stopReason: message["stop_reason"] as? String,
+                                      isQuestion: !questions.isEmpty))
                 }
             } else if kind == "user", let message {
                 let content = message["content"]
@@ -266,6 +298,26 @@ enum TranscriptParser {
         }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
          .filter { !$0.isEmpty }
          .joined(separator: "\n\n")
+    }
+
+    /// The `question` prompts of any `AskUserQuestion` tool_use in an assistant
+    /// message — deliberately excluding `options` (the multiple-choice answers),
+    /// which are an on-screen affordance, not something to read aloud.
+    private static func askedQuestions(_ content: Any?) -> [String] {
+        guard let blocks = content as? [[String: Any]] else { return [] }
+        var out: [String] = []
+        for b in blocks where (b["type"] as? String) == "tool_use"
+            && (b["name"] as? String) == "AskUserQuestion" {
+            guard let input = b["input"] as? [String: Any],
+                  let questions = input["questions"] as? [[String: Any]] else { continue }
+            for q in questions {
+                if let text = (q["question"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    out.append(text)
+                }
+            }
+        }
+        return out
     }
 
     private static func isToolResult(_ content: Any?) -> Bool {

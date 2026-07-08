@@ -74,6 +74,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onStart = { [weak self] mode in self?.arbiter.beginDictation(mode: mode) }
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
+        hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         installHotkeyWhenTrusted()
 
         // Voice commands: a dictation that is a "<verb> [name]" command (rather

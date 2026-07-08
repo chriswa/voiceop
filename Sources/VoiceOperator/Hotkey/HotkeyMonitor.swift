@@ -37,6 +37,8 @@ final class HotkeyMonitor {
     var onStop: (() -> Void)?
     /// Fired on ⌘⌃V — re-paste the last pasted text.
     var onRepaste: (() -> Void)?
+    /// Fired on ⌘⌃B — toggle narration mute.
+    var onToggleMute: (() -> Void)?
 
     /// Live Control-key state, updated from every flagsChanged event.
     private var controlDown = false
@@ -44,6 +46,8 @@ final class HotkeyMonitor {
 
     // ⌘⌃V: V is keycode 9 (kVK_ANSI_V); requires Command + Control.
     private static let vKeycode: Int64 = 9
+    // ⌘⌃B: B is keycode 11 (kVK_ANSI_B); requires Command + Control.
+    private static let bKeycode: Int64 = 11
 
     // Fn (Globe): keycode 63 (kVK_Function), flagged by kCGEventFlagMaskSecondaryFn.
     private static let triggerKeycode: Int64 = 63
@@ -91,12 +95,15 @@ final class HotkeyMonitor {
             Log.log("hotkey tap re-enabled after \(type == .tapDisabledByTimeout ? "timeout" : "user input")")
             return
         }
-        // ⌘⌃V re-paste chord.
+        // ⌘⌃-chord keyDown shortcuts (V = re-paste, B = toggle mute).
         if type == .keyDown {
             let keycode = event.getIntegerValueField(.keyboardEventKeycode)
-            if keycode == Self.vKeycode,
-               event.flags.contains(.maskCommand), event.flags.contains(.maskControl) {
-                onRepaste?()
+            if event.flags.contains(.maskCommand), event.flags.contains(.maskControl) {
+                switch keycode {
+                case Self.vKeycode: onRepaste?()
+                case Self.bKeycode: onToggleMute?()
+                default: break
+                }
             }
             return
         }

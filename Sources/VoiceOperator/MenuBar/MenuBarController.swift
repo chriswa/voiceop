@@ -233,7 +233,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if let id = sender.representedObject as? UUID { onCopySTT?(id) }
     }
 
-    @objc private func toggleNarration() {
+    @objc private func toggleNarration() { toggleNarrationMute() }
+
+    /// Flip narration mute, keeping the menu title, the prohibition icon overlay,
+    /// and the downstream `onToggleNarration` callback in sync. Public so the
+    /// ⌘⌃B global hotkey drives the exact same path as the menu item.
+    func toggleNarrationMute() {
         isNarrationMuted.toggle()
         narrationMenuItem.title = isNarrationMuted ? "Unmute" : "Mute"
         onToggleNarration?(isNarrationMuted)

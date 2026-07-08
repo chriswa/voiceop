@@ -74,6 +74,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         cmdHistoryItem.submenu = NSMenu()
         menu.addItem(cmdHistoryItem)
         menu.addItem(.separator())
+        // TEMP: audition every cue while we retune them.
+        let tones = NSMenuItem(title: "Play Tone (debug)", action: nil, keyEquivalent: "")
+        let toneMenu = NSMenu()
+        for effect in SoundEffect.allCases {
+            let item = NSMenuItem(title: effect.menuLabel, action: #selector(playTone(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = effect
+            toneMenu.addItem(item)
+        }
+        tones.submenu = toneMenu
+        menu.addItem(tones)
+        menu.addItem(.separator())
         let copyLog = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
         copyLog.target = self
         menu.addItem(copyLog)
@@ -232,6 +244,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if let key = sender.representedObject as? String { onFocusAgent?(key) }
     }
 
+    // TEMP: play the selected cue from the debug "Play Tone" menu.
+    @objc private func playTone(_ sender: NSMenuItem) {
+        if let effect = sender.representedObject as? SoundEffect { effect.play() }
+    }
+
     @objc private func copyLogPath() {
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -270,8 +287,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Icon rendering
 
     /// Bullhorn (megaphone) composited with: a tint (red recording / magenta
-    /// command / cyan fetching / green playing), a prohibition overlay when muted,
-    /// and an unread-count badge. Pure idle renders as an adaptive template.
+    /// command / yellow transcribing / cyan fetching / green playing), a
+    /// prohibition overlay when muted, and an unread-count badge. Pure idle
+    /// renders as an adaptive template.
     ///
     /// Every state renders onto the same canvas (the symbol's natural size) so
     /// the menu-bar item never changes width — a width change here shifts every

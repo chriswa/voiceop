@@ -37,9 +37,11 @@ final class AudioArbiter {
     private var lastPastedText: String?
 
     /// Voice-energy thresholds below which a clip is treated as "said nothing"
-    /// (both must be under to skip). Tunable; logged on every dictation.
-    private static let silencePeak: Float = 0.03
-    private static let silenceRMS: Float = 0.006
+    /// (both must be under to skip). Tunable; logged on every dictation. Nudged
+    /// down slightly from 0.03/0.006 after a quiet-but-real dictation (peak
+    /// 0.0275) was falsely skipped.
+    private static let silencePeak: Float = 0.025
+    private static let silenceRMS: Float = 0.005
 
     // Narration updates not fully heard yet (oldest→newest) — the "unread" list
     // and badge source. Muting halts and leaves them here; unmuting replays oldest
@@ -250,15 +252,34 @@ final class AudioArbiter {
         let peak = recorder.lastPeak
         let rms = recorder.lastRMS
         muter.restore()                    // listening done → unmute immediately
-        (dictationMode == .command ? SoundEffect.commandListeningFinished : .listeningFinished).play()
 
         // Silence gate: if the mic never crossed a voice-energy threshold, the
         // user said nothing — skip transcription entirely rather than let Whisper
         // hallucinate "you" (this is the volume check Wispr does). Thresholds are
         // conservative; measured peak/rms are logged so they can be tuned.
-        if peak < Self.silencePeak && rms < Self.silenceRMS {
-            Log.log(String(format: "dictation: silent input (peak %.4f, rms %.4f) — skipping transcription", peak, rms))
-            try? FileManager.default.removeItem(at: wav)
+        //
+        // We still record the clip to history (marked as skipped) rather than
+        // deleting it: the audio is the only evidence of a borderline capture, so
+        // keeping it lets us investigate false skips and gives the user visible
+        // feedback + a Retry, instead of the dictation vanishing without a trace.
+        let isSilent = peak < Self.silencePeak && rms < Self.silenceRMS
+        // Sad "silence skipped" cue when nothing was captured; otherwise the
+        // normal stop-listening confirmation. (Only one, so they don't overlap.)
+        if isSilent {
+            SoundEffect.silenceSkipped.play()
+        } else {
+            (dictationMode == .command ? SoundEffect.commandListeningFinished : .listeningFinished).play()
+        }
+
+        if isSilent {
+            let note = String(format: "no speech detected (peak %.4f, rms %.4f)", peak, rms)
+            Log.log("dictation: silent input — skipping transcription, \(note)")
+            switch dictationMode {
+            case .paste:
+                recordSTT(wav: wav, duration: duration, transcript: "", error: note)
+            case .command:
+                recordCommand(wav: wav, duration: duration, transcript: "", recognized: false, error: note)
+            }
             finishDictation()
             return
         }

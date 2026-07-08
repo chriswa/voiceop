@@ -73,8 +73,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         narrationMenuItem.target = self
         menu.addItem(narrationMenuItem)
-        announceBlocksItem.target = self
-        menu.addItem(announceBlocksItem)
         menu.addItem(.separator())
         ttsHistoryItem.submenu = NSMenu()
         menu.addItem(ttsHistoryItem)
@@ -100,6 +98,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(copyLog)
         loginMenuItem.target = self
         menu.addItem(loginMenuItem)   // moved to the bottom, above Restart
+        announceBlocksItem.target = self
+        menu.addItem(announceBlocksItem)
         let restart = NSMenuItem(title: "Restart Voice Operator", action: #selector(restartApp), keyEquivalent: "")
         restart.target = self
         menu.addItem(restart)

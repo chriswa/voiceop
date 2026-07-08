@@ -17,7 +17,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let narrationMenuItem = NSMenuItem(
         title: "Mute", action: #selector(toggleNarration), keyEquivalent: "")
     private let announceBlocksItem = NSMenuItem(
-        title: "Announce Questions & Plans", action: #selector(toggleAnnounceBlocks), keyEquivalent: "")
+        title: "Use Hooks for Interactive Feedback", action: #selector(toggleAnnounceBlocks), keyEquivalent: "")
     private let loginMenuItem = NSMenuItem(
         title: "Open at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let ttsHistoryItem = NSMenuItem(title: "Recent Updates", action: nil, keyEquivalent: "")

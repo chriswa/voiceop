@@ -212,6 +212,45 @@ final class TranscriptParserTests: XCTestCase {
         XCTAssertNil(parsed.launches.first?.donePos)
     }
 
+    func testQueuedNotificationMarksLaunchQueuedNotDelivered() {
+        // Regression (2026-07-07 false summary): while the session is mid-turn,
+        // the harness enqueues the FULL notification text as a queue-operation
+        // event, then delivers it as a user event once the turn ends. The
+        // enqueue must not count as the delivery — a turn ending in between
+        // only ended to await the delivery, and the session WILL be re-invoked.
+        let ack = "Async agent launched successfully (agentId: a78deaffbad9fd46f)"
+        let notification = "<task-notification>\n<task-id>a78deaffbad9fd46f</task-id>\n<status>completed</status>\n</task-notification>"
+        var events = [
+            line(["type": "user", "message": ["content": [["type": "tool_result", "content": ack]]]]),
+            line(["type": "queue-operation", "operation": "enqueue", "content": notification]),
+        ]
+        var parsed = TranscriptParser.parse(data: Data((events.joined(separator: "\n") + "\n").utf8))
+        XCTAssertEqual(parsed.launches.count, 1)
+        XCTAssertNil(parsed.launches.first?.donePos,
+                     "an enqueued notification is not a delivery")
+        XCTAssertNotNil(parsed.launches.first?.queuedPos)
+
+        events.append(line(["type": "queue-operation", "operation": "dequeue"]))
+        events.append(line(["type": "user", "message": ["content": notification]]))
+        parsed = TranscriptParser.parse(data: Data((events.joined(separator: "\n") + "\n").utf8))
+        XCTAssertNotNil(parsed.launches.first?.donePos,
+                        "the user event is the delivery, resolving positionally")
+    }
+
+    func testQueuedMonitorEventWithoutStatusIsNotQueuedCompletion() {
+        // A persistent monitor's per-EVENT notifications also pass through the
+        // queue but carry no <status>; they must not mark the launch queued.
+        let ack = "Monitor started (task bi2vnqpk7, timeout 240000ms). You will be notified on each event."
+        let event = "<task-notification>\n<task-id>bi2vnqpk7</task-id>\n<summary>Monitor event</summary>\n</task-notification>"
+        let jsonl = [
+            line(["type": "user", "message": ["content": [["type": "tool_result", "content": ack]]]]),
+            line(["type": "queue-operation", "operation": "enqueue", "content": event]),
+        ].joined(separator: "\n") + "\n"
+        let parsed = TranscriptParser.parse(data: Data(jsonl.utf8))
+        XCTAssertNil(parsed.launches.first?.queuedPos)
+        XCTAssertNil(parsed.launches.first?.donePos)
+    }
+
     func testAgentLaunchHasNoOutputPath() {
         let jsonl = [
             line(["type": "user",

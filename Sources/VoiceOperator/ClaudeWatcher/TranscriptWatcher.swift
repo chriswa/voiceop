@@ -24,6 +24,9 @@ actor TranscriptWatcher {
     /// their verdicts cache forever. Agents CAN be resumed (the same task-id
     /// notifies again), so agent verdicts are recomputed per change instead.
     private var resolvedDead: Set<String> = []
+    /// Agent-probe verdicts already logged (log dedup only — the verdicts
+    /// themselves are deliberately recomputed per change; see above).
+    private var loggedAgentProbes: Set<String> = []
 
     private let pollInterval: TimeInterval = 0.5
     private let settleSeconds: TimeInterval = 2.5
@@ -137,6 +140,10 @@ actor TranscriptWatcher {
                 prev -= 1
             }
             let context = Array(turns[(prev + 1)...i])
+            // The decision to speak is made HERE — the summary line below lands
+            // seconds later (LLM latency), so post-incident forensics need this
+            // timestamp, not that one.
+            Log.log("watcher: [\(sid.prefix(8))] turn at pos \(turn.pos) has no outstanding background work — speaking; summarizing \(context.count) turn(s)")
             let summary = await ClaudeSummarizer.summarize(context: context, spoken: state.spoken)
             Log.log("watcher: [\(sid.prefix(8))] \(voice.name): \(summary.prefix(60))")
             emit(Utterance(name: voice.name, body: summary, voiceID: voice.voiceID, sessionKey: sid), context)
@@ -169,7 +176,10 @@ actor TranscriptWatcher {
                                          transcriptPath: String) -> Set<String> {
         var resolved = resolvedDead
         var sessionShellsAlive: Bool?
-        for launch in launches where launch.donePos == nil && !resolved.contains(launch.id) {
+        // Queued-but-undelivered launches are never probed: the work IS
+        // finished, but outstandingCount must keep muting until delivery.
+        for launch in launches where launch.donePos == nil && launch.queuedPos == nil
+            && !resolved.contains(launch.id) {
             switch launch.kind {
             case .bash:
                 guard let path = launch.outputPath, !Self.isFileHeldOpen(path) else { continue }
@@ -182,6 +192,9 @@ actor TranscriptWatcher {
                                                       sid: sid, agentID: launch.id)
                 guard Self.agentFinished(subagentTranscript: sub) else { continue }
                 resolved.insert(launch.id)   // resumable — don't cache
+                if loggedAgentProbes.insert(launch.id).inserted {
+                    Log.log("watcher: [\(sid.prefix(8))] agent \(launch.id) probe: subagent transcript shows end_turn — treating as finished (rechecked per change; agents can resume)")
+                }
                 continue
             case .workflow:
                 guard let runID = launch.runID,
@@ -199,13 +212,18 @@ actor TranscriptWatcher {
 
     /// Launches still outstanding at a byte offset. A completion notification
     /// resolves positionally (a turn that ended mid-task stays muted even when
-    /// rescanned after the task finished); a launch with no notification at all
-    /// resolves only via the liveness probes above.
+    /// rescanned after the task finished); a launch whose notification is
+    /// queued but undelivered stays outstanding unconditionally — the harness
+    /// is about to re-invoke the session with the result, so every turn until
+    /// the delivery only ended to await it, and a liveness probe (which would
+    /// truthfully report the work finished) must not unmute it. A launch with
+    /// no notification at all resolves only via the liveness probes above.
     static func outstandingCount(_ launches: [BackgroundLaunch], before pos: Int,
                                  resolved: Set<String>) -> Int {
         launches.filter { launch in
             guard launch.pos < pos else { return false }
             if let done = launch.donePos { return done >= pos }
+            if launch.queuedPos != nil { return true }
             return !resolved.contains(launch.id)
         }.count
     }

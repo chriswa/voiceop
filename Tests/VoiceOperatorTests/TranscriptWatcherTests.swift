@@ -40,6 +40,17 @@ final class TranscriptWatcherTests: XCTestCase {
         XCTAssertEqual(TranscriptWatcher.outstandingCount(launches, before: 300, resolved: []), 0)
     }
 
+    func testQueuedCompletionKeepsMutingDespiteProbe() {
+        // Replay of the 2026-07-07 incident: the agent HAS finished (so any
+        // liveness probe truthfully reports it dead), but its completion
+        // notification is still queued — the harness is about to re-invoke the
+        // session, so the turn that ended in between must stay muted.
+        let launches = [BackgroundLaunch(id: "a78d", kind: .agent, pos: 10,
+                                         queuedPos: 50, donePos: nil)]
+        XCTAssertEqual(TranscriptWatcher.outstandingCount(launches, before: 100, resolved: ["a78d"]), 1,
+                       "a queued (undelivered) completion must keep muting even when a probe resolves the id")
+    }
+
     func testLaunchAfterTurnDoesNotCount() {
         let launches = [BackgroundLaunch(id: "abc", kind: .bash, pos: 500,
                                          outputPath: "/tmp/abc.output", donePos: nil)]

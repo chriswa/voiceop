@@ -13,11 +13,19 @@ struct Turn: Equatable, Codable, Sendable {
 }
 
 /// A background launch observed in the transcript. `donePos` is nil when no
-/// completion notification has been recorded — which happens not only while
+/// completion notification has been DELIVERED — which happens not only while
 /// the work runs, but forever if it was killed or finished while the session
 /// sat idle (the harness never persists a notification in those cases). Each
 /// kind has a different liveness probe the watcher uses to resolve launches
 /// the transcript never will; see TranscriptWatcher.resolveOrphanedLaunches.
+///
+/// `queuedPos` marks the harness ENQUEUEING the completion notification while
+/// the session was mid-turn (a `queue-operation` event). The work is finished,
+/// but the session hasn't seen the result yet and is guaranteed to be
+/// re-invoked to process it — so a queued launch must keep muting narration
+/// (and must not be "resolved" by a liveness probe, which would truthfully
+/// report the work finished). Delivery later lands as a user event, setting
+/// `donePos`, and the normal positional rule takes over.
 struct BackgroundLaunch: Sendable {
     enum Kind: Sendable { case bash, agent, monitor, workflow }
     let id: String
@@ -25,12 +33,14 @@ struct BackgroundLaunch: Sendable {
     let pos: Int              // byte offset of the launch ack
     let outputPath: String?   // bash only: the file its process tree holds open
     let runID: String?        // workflow only: the wf_… id keying its state file
-    let donePos: Int?         // byte offset of the completion notification
+    let queuedPos: Int?       // byte offset of the queued (undelivered) completion
+    let donePos: Int?         // byte offset of the delivered completion notification
 
     init(id: String, kind: Kind, pos: Int, outputPath: String? = nil,
-         runID: String? = nil, donePos: Int?) {
+         runID: String? = nil, queuedPos: Int? = nil, donePos: Int?) {
         self.id = id; self.kind = kind; self.pos = pos
-        self.outputPath = outputPath; self.runID = runID; self.donePos = donePos
+        self.outputPath = outputPath; self.runID = runID
+        self.queuedPos = queuedPos; self.donePos = donePos
     }
 }
 
@@ -86,7 +96,8 @@ enum TranscriptParser {
         let complete = data[...cut]
         var turns: [Turn] = []
         var launchPos: [String: (kind: BackgroundLaunch.Kind, pos: Int, path: String?, runID: String?)] = [:]
-        var donePositions: [String: [Int]] = [:]   // ascending (scan order)
+        var donePositions: [String: [Int]] = [:]     // ascending (scan order)
+        var queuedPositions: [String: [Int]] = [:]   // ascending (scan order)
         var resumptions: [(id: String, pos: Int)] = []
         var entrypoint: String?
         var pos = 0
@@ -105,15 +116,28 @@ enum TranscriptParser {
             let kind = event["type"] as? String
             let message = event["message"] as? [String: Any]
 
+            // A queue-operation "enqueue" carries the FULL notification text
+            // while it is still queued — the session hasn't seen it yet and
+            // will be re-invoked to deliver it, so it marks the task queued,
+            // never delivered. (Counting it as a delivery is the 2026-07-07
+            // false-summary bug: a turn ending between enqueue and delivery
+            // looked like it postdated all background work.)
+            if kind == "queue-operation" {
+                if event["operation"] as? String == "enqueue",
+                   let content = event["content"] as? String {
+                    for id in Self.completedTaskIDs(in: content) {
+                        queuedPositions[id, default: []].append(start)
+                    }
+                }
+                continue
+            }
+
             // Completion markers only from non-assistant lines (task notifications
             // are injected as user/system events), so the assistant's own words
             // can't spuriously complete a task.
-            if kind != "assistant", lineText.contains("<status>") {
-                let range = NSRange(lineText.startIndex..., in: lineText)
-                for m in bgDone.matches(in: lineText, range: range) {
-                    if let r = Range(m.range(at: 1), in: lineText) {
-                        donePositions[String(lineText[r]), default: []].append(start)
-                    }
+            if kind != "assistant" {
+                for id in Self.completedTaskIDs(in: lineText) {
+                    donePositions[id, default: []].append(start)
                 }
             }
 
@@ -150,15 +174,28 @@ enum TranscriptParser {
         var launches = launchPos.map { id, launch in
             BackgroundLaunch(id: id, kind: launch.kind, pos: launch.pos,
                              outputPath: launch.path, runID: launch.runID,
+                             queuedPos: queuedPositions[id]?.first { $0 > launch.pos },
                              donePos: donePositions[id]?.first { $0 > launch.pos })
         }
         launches += resumptions.map { r in
             BackgroundLaunch(id: r.id, kind: .agent, pos: r.pos,
+                             queuedPos: queuedPositions[r.id]?.first { $0 > r.pos },
                              donePos: donePositions[r.id]?.first { $0 > r.pos })
         }
         launches.sort { $0.pos < $1.pos }
         return ParsedTranscript(turns: turns, completeBytes: complete.count,
                                 entrypoint: entrypoint, launches: launches)
+    }
+
+    /// Task ids named by completion notifications in `text`. Requires <status>
+    /// alongside <task-id>: a persistent monitor's per-EVENT notifications
+    /// carry <task-id> but no <status>, and must not resolve the launch.
+    private static func completedTaskIDs(in text: String) -> [String] {
+        guard text.contains("<status>") else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        return bgDone.matches(in: text, range: range).compactMap { m in
+            Range(m.range(at: 1), in: text).map { String(text[$0]) }
+        }
     }
 
     /// Concatenated text of a message's tool_result blocks (where background

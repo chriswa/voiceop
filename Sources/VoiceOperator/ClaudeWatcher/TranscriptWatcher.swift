@@ -117,31 +117,21 @@ actor TranscriptWatcher {
         let turns = parsed.turns
         var resolved: Set<String>? = nil
         for (i, turn) in turns.enumerated() {
-            guard turn.role == "assistant", turn.pos >= state.consumed else { continue }
-            // Narrate a completed turn, or a still-pending AskUserQuestion: a
-            // question is only "pending" while it's the tail of the transcript
-            // (once answered, the session appends more turns after it), so we
-            // require it to be the last turn — a question buried mid-history has
-            // already been answered and must not be read aloud.
-            let isPendingQuestion = turn.isQuestion && i == turns.count - 1
-            guard turn.stopReason == "end_turn" || isPendingQuestion else { continue }
+            guard turn.role == "assistant", turn.pos >= state.consumed,
+                  turn.stopReason == "end_turn" else { continue }
 
             // Suppress turns while background work is still outstanding — but
             // trust the transcript only where it resolves a launch itself.
             // Probing is deferred until a completed turn is actually at stake,
-            // and run once per change batch (lsof scans every process). A
-            // pending question is a hard block on the user regardless of any
-            // background work, so it bypasses this suppression entirely.
-            if !isPendingQuestion {
-                if resolved == nil {
-                    resolved = resolveOrphanedLaunches(parsed.launches, sid: sid, transcriptPath: path)
-                }
-                let outstanding = Self.outstandingCount(parsed.launches, before: turn.pos,
-                                                        resolved: resolved ?? [])
-                if outstanding > 0 {
-                    Log.log("watcher: [\(sid.prefix(8))] skipped a completed turn — \(outstanding) background task(s) still outstanding")
-                    continue
-                }
+            // and run once per change batch (lsof scans every process).
+            if resolved == nil {
+                resolved = resolveOrphanedLaunches(parsed.launches, sid: sid, transcriptPath: path)
+            }
+            let outstanding = Self.outstandingCount(parsed.launches, before: turn.pos,
+                                                    resolved: resolved ?? [])
+            if outstanding > 0 {
+                Log.log("watcher: [\(sid.prefix(8))] skipped a completed turn — \(outstanding) background task(s) still outstanding")
+                continue
             }
 
             // Context = turns since the previous end-of-turn marker.
@@ -153,8 +143,7 @@ actor TranscriptWatcher {
             // The decision to speak is made HERE — the summary line below lands
             // seconds later (LLM latency), so post-incident forensics need this
             // timestamp, not that one.
-            let why = isPendingQuestion ? "pending user question" : "no outstanding background work"
-            Log.log("watcher: [\(sid.prefix(8))] turn at pos \(turn.pos) — \(why) — speaking; summarizing \(context.count) turn(s)")
+            Log.log("watcher: [\(sid.prefix(8))] turn at pos \(turn.pos) has no outstanding background work — speaking; summarizing \(context.count) turn(s)")
             let summary = await ClaudeSummarizer.summarize(context: context, spoken: state.spoken)
             Log.log("watcher: [\(sid.prefix(8))] \(voice.name): \(summary.prefix(60))")
             emit(Utterance(name: voice.name, body: summary, voiceID: voice.voiceID, sessionKey: sid), context)

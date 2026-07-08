@@ -186,22 +186,32 @@ This fixes "a TTS update arrives while I'm dictating and I miss it."
 - **Milestone B** — `wss://api.wisprflow.ai/…/ws` streaming: exact path + handshake (auth via
   header vs query param) + per-message JSON schema (opus `audio_chunks` up, `partial_transcript`
   down). Lower priority now that HTTP `/llm/asr` is proven sufficient for v1.
-- **Dictionary prompt-biasing — SHIPPED (2026-07-07).** We fetch the user's live Wispr
-  dictionary (`GET /api/v1/dictionary/personal` + `/team`, raw-JWT auth, flat snake-case array;
-  keep `is_deleted==false && replacement==null`, rank by usage, dedupe, cap 60) and pass the
-  words as the `/llm/asr` `prompt`. Whisper uses it as a spelling hint, which fixes the
-  proper-noun misspellings that motivated Milestone C (verified: "Klaud/Q-Bectel/Koda" →
-  "Claude/kubectl/Coda"). Fetch is cached to disk with a 24 h *soft* expiry and served
-  stale-while-revalidate so dictation never blocks on the network (`WisprDictionary`).
-- **Milestone C (deferred, blocked on Opus)** — the richer "flow request" (`serializeFlowRequest`:
-  `access_token`, `audio_packets`, `pipeline`, `context{app, ax_context, ocr_context,
-  dictionary_context, user_*}`) → `POST /llm/asr_audio_chunks`, for a true `dictionary_context`
-  + `align`/`format` pipeline. The full request shape is decoded and validated (all fields
-  accepted), BUT this endpoint rejects PCM/WAV `audio_packets` with libopus-style errors
-  ("corrupted stream" / "buffer too small") — it requires **Opus-encoded** packets (20 ms /
-  320-sample frames, `audio_encoding: "opus"`), matching Wispr's WS streaming path. Landing it
-  needs a **libopus encoder dependency** in the app + Wispr's exact Opus packetization. Deferred
-  in favor of the prompt-biasing above, which already fixes the user-visible problem. The
-  Baseten `run_remote` alternative takes the same body but wants msgpack (`input is malformed`
-  over JSON) and a baked-in `Api-Key` — also deferred.
-- Opus params (frame size 320 / 20 ms, bitrate 64 kbps) for the WS/chunks paths.
+- **Dictionary prompt-biasing — REVERTED (2026-07-08).** The 2026-07-07 change that passed the
+  dictionary as the `/llm/asr` `prompt` degraded transcription: Whisper's `prompt` is
+  autoregressive *previous-transcript* context, not a spelling dictionary, so it regurgitated the
+  word list on quiet chunks, injected unspoken words, and over-corrected. Reverted to an empty
+  prompt (`WisprTranscriber`). `WisprDictionary` is kept as infrastructure for the flow-request
+  `dictionary_context` path below (the correct biasing channel). **Read the app, don't probe the
+  live API** (see `CLAUDE.md`).
+
+- **Milestone C — reverse-engineered + recognition path VALIDATED (2026-07-08).**
+  Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest`), captured in
+  `spike/flow_request.md` + `spike/flow_spike.py`. Three transports Wispr uses, in fallback order:
+  1. **gRPC streaming (PRIMARY, formatted)** — `model-<id>.grpc.api.baseten.co`, **protobuf**
+     `flow_api.v1.Request {init, context, payload, commit}`; metadata headers
+     `authorization: Bearer <jwt>`, `baseten-authorization: Api-Key <embedded>`, `baseten-model-id`,
+     `x-baseten-environment`, `disable-formatting: false`. Returns `formatted_text` (→ `llm_text`).
+     The full `flow_api.v1` schema (~35 messages) is reconstructed in `proto/flow_api_v1.proto`
+     (enum *values* still to finalize). **This is the true parity path.**
+  2. **Baseten `run_remote` HTTP (fallback)** — `https://chain-o232k03l.api.baseten.co/environments/
+     production/run_remote`, `Api-Key <embedded>` auth, **msgpack** `{request: <flat serializeFlowRequest>}`
+     (JSON rejected). Response flat `{status, asr_text, llm_text, …}`. Our faithful reconstruction is
+     rejected `input is malformed` (server-side schema not in the bundle) — needs a real request capture.
+  3. **`/llm/asr_audio_chunks` (last resort, raw)** — JSON flat, JWT auth, opus packets ascii85-encoded,
+     `packet_duration` in seconds, `dictionary_context` as string list. **VALIDATED live (HTTP 200):
+     recognition biasing works** ("Claude" spelled correctly). Returns `raw_transcript` only — this
+     endpoint never formats. This is the achievable near-term path for the recognition fix.
+
+  Opus for all packet paths: 16 kHz mono, 20 ms / **320-sample** frames, `OPUS_APPLICATION_VOIP`.
+  Still needs a **libopus** dependency in the app (vendored C SwiftPM target).
+- Opus params (frame size 320 / 20 ms) confirmed for the WS/chunks/gRPC paths.

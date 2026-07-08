@@ -1,0 +1,271 @@
+syntax = "proto3";
+
+package flow_api.v1;
+
+// Reverse-engineered from the Wispr Flow app bundle (protobuf-ts generated
+// classes in .webpack/main/index.js) — see CLAUDE.md "read the app, don't probe".
+// STATUS: all 35 messages reconstructed (field names/numbers/types/message
+// references verified). REMAINING before use as gRPC codegen input:
+//   - enum VALUE members (names/prefixes known: APP_TYPE_, AUDIO_ENCODING_,
+//     PLATFORM_, COMMIT_, …) — a few fields are still marked `enum?`.
+//   - one message alias (`at`) to resolve, and the gRPC service/method definition
+//     (the transcription RPC on model-<id>.grpc.api.baseten.co).
+// This is the PRIMARY (formatted) parity path; see DESIGN.md Milestone C.
+
+message Version {
+  uint32 major = 1;
+  uint32 minor = 2;
+  uint32 patch = 3;
+}
+
+message Client {
+  string name = 1;
+  Platform platform = 2;
+  Version version = 3;
+}
+
+message App {
+  string name = 1;
+  string bundle_id = 2;
+  string url = 3;
+  AppType type = 4;
+}
+
+message Textbox {
+  optional string contents = 1;
+  optional string before_text = 2;
+  optional string selected_text = 3;
+  optional string after_text = 4;
+}
+
+message DynamicVocabulary {
+  repeated string screen_content_ax = 1;
+  repeated string screen_content_ocr = 2;
+  repeated string variable_names = 3;
+  repeated string file_names = 4;
+}
+
+message ChatMessage {
+  ChatRole role = 1;
+  string content = 2;
+  string sender_id = 3;
+}
+
+message Conversation {
+  string id = 1;
+  repeated string participants = 2;
+  repeated ChatMessage messages = 3;
+}
+
+message Context {
+  App app = 1;
+  Textbox textbox = 2;
+  DynamicVocabulary vocabulary = 3;
+  string user_identifier = 4;
+  string content_text = 5;
+  string content_html = 6;
+  repeated App session_dictation_apps = 7;
+  bytes screenshot = 8;
+  Conversation conversation = 9;
+}
+
+message Metadata {
+  string user_id = 1;
+  string session_id = 2;
+  string request_id = 3;
+  AudioEncoding audio_encoding = 4;
+  Environment environment = 5;
+  Client client = 6;
+  bool debug = 7;
+  string referral_code = 8;
+  bool always_wait_scribe = 9;
+}
+
+message GeneralWritingStyle {
+  WritingStyle other = 1;
+  WritingStyle personal = 2;
+  WritingStyle work = 3;
+  WritingStyle email = 4;
+}
+
+message TaggingStyle {
+  optional bool slack = 1;
+}
+
+message SignatureStyle {
+  FlowSignaturePrefix flow_signature_prefix = 1;
+  optional bool flow_signature_hyperlink = 2;
+  optional bool sign_emails = 3;
+}
+
+message StyleConfig {
+  GeneralWritingStyle general_style = 1;
+  WritingStyle override_style = 2;
+  TaggingStyle tagging = 3;
+  SignatureStyle signature = 4;
+  enum? editing_strength = 5;
+}
+
+message AudioPackets {
+  repeated bytes items = 1;
+}
+
+message AudioFile {
+  bytes data = 1;
+}
+
+message Payload {
+  oneof audio {
+    AudioPackets audio_packets = 1;
+    AudioFile audio_file = 2;
+  }
+}
+
+message Text {
+  string content = 1;
+  uint32 num_tokens = 2;
+  repeated enum? languages = 3;
+}
+
+message Progress {
+  at transcriber = 1;
+  bool transcriber_finished = 2;
+  at formatter = 3;
+  bool formatter_finished = 4;
+  bool post_processing_finished = 5;
+}
+
+message UserActions {
+  bool check_mic = 1;
+  enum? check_language = 2;
+}
+
+message WordAlignment {
+  string word = 1;
+  float score = 2;
+}
+
+message CandidateBeam {
+  Text text = 1;
+  float score = 2;
+  Confidence confidence = 3;
+  Origin origin = 4;
+  optional float alignment_score = 5;
+  optional string original_text = 6;
+  repeated WordAlignment word_alignments = 7;
+}
+
+message State {
+  Progress progress = 1;
+  Text raw_text = 2;
+  Text formatted_text = 3;
+  Confidence confidence = 4;
+  UserActions user_actions = 5;
+  repeated CandidateBeam candidate_beams = 6;
+  optional float audio_snr = 7;
+  optional float audio_volume = 8;
+  optional float mean_alignment_score = 9;
+}
+
+message User {
+  string first_name = 1;
+  string last_name = 2;
+  string email = 3;
+}
+
+message StaticVocabulary {
+  repeated string dictionary_personal = 1;
+  repeated string dictionary_team = 2;
+  repeated string dictionary_personal_starred = 3;
+  repeated string dictionary_team_starred = 4;
+}
+
+message Replacements {
+  ? replacements_personal = 1;
+  ? replacements_team = 2;
+  ? snippets_personal = 3;
+  ? snippets_team = 4;
+}
+
+message Preferences {
+  User user = 1;
+  repeated enum? language = 2;
+  StaticVocabulary vocabulary = 3;
+  Replacements replacements = 4;
+  StyleConfig style_config = 5;
+}
+
+message Init {
+  Metadata metadata = 1;
+  Preferences preferences = 2;
+  State state = 3;
+}
+
+message SkipAhead {
+  at position = 1;
+}
+
+message Request {
+  Init init = 1;
+  Context context = 2;
+  Payload payload = 3;
+  Commit commit = 4;
+}
+
+message ResponseTime {
+  at transcribe = 1;
+  at transcribe_overhead = 2;
+  at format = 3;
+  at format_overhead = 4;
+  at post_process = 5;
+  at total = 6;
+  at external_asr_time = 7;
+  at external_llm_time = 8;
+  at generate_queue_duration = 9;
+  at generate_work_duration = 10;
+}
+
+message Transcription {
+  string html = 1;
+  string plaintext = 2;
+  uint32 num_tokens = 3;
+  repeated enum? languages = 4;
+  float confidence = 5;
+  bool language_detection_low_confidence = 6;
+}
+
+message TranscriptionStats {
+  uint32 word_deletions = 1;
+  uint32 context_word_count = 2;
+  uint32 word_substitutions = 3;
+}
+
+message Result {
+  Transcription output = 1;
+  at audio_duration = 2;
+  ResponseTime response_time = 3;
+  SignatureStatus signature_status = 4;
+  ResultStatus status = 5;
+  TranscriptionStats stats = 6;
+  string transcript_origin = 7;
+  string server_address = 8;
+}
+
+message Heartbeat {
+  float audio_received_seconds = 1;
+  bool commit_ack = 2;
+}
+
+message Response {
+  Result result = 1;
+  State state = 2;
+  repeated State all_states = 3;
+  Heartbeat heartbeat = 4;
+}
+
+enum AudioEncoding {
+  ACK = 0;
+  NACK_IN_USE = 1;
+  NACK_BUSY = 2;
+  NACK_BAD_FORMAT = 3;
+}

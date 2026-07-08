@@ -16,6 +16,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // focus, so shortcuts would never fire.
     private let narrationMenuItem = NSMenuItem(
         title: "Mute", action: #selector(toggleNarration), keyEquivalent: "")
+    private let announceBlocksItem = NSMenuItem(
+        title: "Announce Questions & Plans", action: #selector(toggleAnnounceBlocks), keyEquivalent: "")
     private let loginMenuItem = NSMenuItem(
         title: "Open at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let ttsHistoryItem = NSMenuItem(title: "Recent Updates", action: nil, keyEquivalent: "")
@@ -23,6 +25,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let cmdHistoryItem = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
 
     var onToggleNarration: ((Bool) -> Void)?
+    /// Current on/off state of question/plan announcements (reads settings.json).
+    var announceBlocksState: (() -> Bool)?
+    /// Toggle question/plan announcements to `desired`; returns the effective new
+    /// state (in case install/uninstall failed) for the checkmark.
+    var onToggleAnnounceBlocks: ((Bool) -> Bool)?
     var onRestart: (() -> Void)?
     /// The agent to offer under "Focus <name>" (current/most-recent), or nil.
     var focusAgentProvider: (() -> (name: String, sessionKey: String)?)?
@@ -66,6 +73,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         narrationMenuItem.target = self
         menu.addItem(narrationMenuItem)
+        announceBlocksItem.target = self
+        menu.addItem(announceBlocksItem)
         menu.addItem(.separator())
         ttsHistoryItem.submenu = NSMenu()
         menu.addItem(ttsHistoryItem)
@@ -106,6 +115,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         rebuildSTTHistory()
         rebuildCommandHistory()
         loginMenuItem.state = (launchAtLoginState?() ?? false) ? .on : .off
+        announceBlocksItem.state = (announceBlocksState?() ?? false) ? .on : .off
         if let agent = focusAgentProvider?() {
             focusAgentItem.title = "Focus \(agent.name)"
             focusAgentItem.representedObject = agent.sessionKey
@@ -234,6 +244,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleNarration() { toggleNarrationMute() }
+
+    /// Flip question/plan announcements. The checkmark follows the EFFECTIVE state
+    /// returned by the handler (settings.json is the source of truth), so a failed
+    /// install leaves the box unchecked rather than lying.
+    @objc private func toggleAnnounceBlocks() {
+        let desired = !(announceBlocksState?() ?? false)
+        let effective = onToggleAnnounceBlocks?(desired) ?? false
+        announceBlocksItem.state = effective ? .on : .off
+    }
 
     /// Flip narration mute, keeping the menu title, the prohibition icon overlay,
     /// and the downstream `onToggleNarration` callback in sync. Public so the

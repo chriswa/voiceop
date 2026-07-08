@@ -11,6 +11,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let hotkey = HotkeyMonitor()
     private let registry = NameVoiceRegistry()   // shared: assignment + directed-reply lookup
     private var watcher: TranscriptWatcher?
+    private var permissionWatcher: PermissionWatcher?
     private var lastSpeaking: Utterance?
 
     /// Accepted transcriptions of the "focus" verb (raises a spaceterm surface).
@@ -46,6 +47,19 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             }
         }
         menuBar.onToggleNarration = { [weak self] muted in self?.arbiter.setNarrationMuted(muted) }
+        // Announce pending questions/plans: the checkbox reflects (and drives) the
+        // presence of our PermissionRequest hook in ~/.claude/settings.json.
+        menuBar.announceBlocksState = { PermissionHook.isInstalled() }
+        menuBar.onToggleAnnounceBlocks = { enable in
+            do {
+                if enable { try PermissionHook.install() } else { try PermissionHook.uninstall() }
+            } catch {
+                Log.log("permission-hook: toggle to \(enable) failed: \(error)")
+            }
+            let now = PermissionHook.isInstalled()
+            Log.log("permission-hook: announce questions & plans → \(now)")
+            return now
+        }
         menuBar.onRestart = { Relauncher.restartAfterTermination() }
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
@@ -91,6 +105,21 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         self.watcher = watcher
         Task { await watcher.start() }
+
+        // Pending-block narration (questions & plans). The transcript never shows
+        // a pending tool_use, so this is driven by our PermissionRequest hook,
+        // which spools payloads for this watcher to tail. Always run it — the
+        // spool is simply empty when the hook isn't installed. Only refresh the
+        // hook SCRIPT if the feature is already enabled; never force-install.
+        if PermissionHook.isInstalled() {
+            do { try PermissionHook.ensureScriptInstalled() }
+            catch { Log.log("permission-hook: could not refresh script: \(error)") }
+        }
+        let permissionWatcher = PermissionWatcher(registry: registry, spoolDir: PermissionHook.spoolDir) { utterance, context in
+            Task { @MainActor in arbiter.narrate(utterance, context: context) }
+        }
+        self.permissionWatcher = permissionWatcher
+        Task { await permissionWatcher.start() }
 
         // Warm the custom-word dictionary cache. It no longer feeds the raw
         // /llm/asr prompt (that mis-biased Whisper — see WisprTranscriber); it's

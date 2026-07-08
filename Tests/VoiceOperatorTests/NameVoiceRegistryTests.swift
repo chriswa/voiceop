@@ -76,4 +76,55 @@ final class NameVoiceRegistryTests: XCTestCase {
         let count = await reg.activeCount
         XCTAssertEqual(count, 0)
     }
+
+    // MARK: - session→name snapshot + change broadcast
+
+    func testSnapshotMapsClaudeSessionToName() async {
+        let reg = NameVoiceRegistry(persisting: false)
+        let sid = "sess-1"
+        let v = await reg.assign(NameVoiceRegistry.key(["claude": sid]))
+        let snap = await reg.snapshot()
+        XCTAssertEqual(snap[sid], v?.name, "snapshot maps session id → assigned name")
+        XCTAssertEqual(snap.count, 1)
+    }
+
+    /// A `@Sendable` sink is needed because `setOnChange` takes a `@Sendable`
+    /// closure; an actor collects the emissions so the test can inspect them.
+    private actor Emissions {
+        private(set) var maps: [[String: String]] = []
+        func record(_ m: [String: String]) { maps.append(m) }
+        var count: Int { maps.count }
+        var last: [String: String]? { maps.last }
+    }
+
+    func testSetOnChangeEmitsImmediately() async {
+        let reg = NameVoiceRegistry(persisting: false)
+        _ = await reg.assign(NameVoiceRegistry.key(["claude": "s"]))
+        let sink = Emissions()
+        await reg.setOnChange { m in Task { await sink.record(m) } }
+        // The immediate emit is the persisted-map (restart) broadcast.
+        await Task.yield()
+        let last = await sink.last
+        XCTAssertEqual(last?.count, 1, "setOnChange broadcasts the current map at once")
+    }
+
+    func testAssignAndReapEmitButTouchDoesNot() async {
+        let reg = NameVoiceRegistry(persisting: false)
+        let sink = Emissions()
+        await reg.setOnChange { m in Task { await sink.record(m) } }   // emit #1 (empty)
+
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        let key = NameVoiceRegistry.key(["claude": "s"])
+        _ = await reg.assign(key, now: t0)                            // emit #2 (new entry)
+        _ = await reg.assign(key, now: t0)                            // no emit (already present)
+        await reg.touch(key, now: t0)                                 // no emit (name unchanged)
+        _ = await reg.reapIdle(ttl: 60, now: t0.addingTimeInterval(120))  // emit #3 (removed)
+
+        // Drain the Task-hopped recordings.
+        for _ in 0..<5 { await Task.yield() }
+        let count = await sink.count
+        XCTAssertEqual(count, 3, "emits on set + assign + reap; not on re-assign or touch")
+        let last = await sink.last
+        XCTAssertEqual(last?.isEmpty, true, "final map is empty after reap")
+    }
 }

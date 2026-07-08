@@ -18,6 +18,12 @@ actor NameVoiceRegistry {
     private var byKey: [String: Entry] = [:]
     private let table = NameVoiceTable.all
 
+    /// Fired whenever the session→name map changes (assign / release / reap), and
+    /// once immediately when set (so a restart re-broadcasts the persisted map).
+    /// Receives the full snapshot each time — consumers replace, never diff.
+    /// Transport-agnostic: AppCoordinator wires this to SpacetermSocket.
+    private var onChange: (@Sendable ([String: String]) -> Void)?
+
     // MARK: - Persistence (name↔session mapping survives restarts)
 
     private static let version = 1
@@ -64,6 +70,34 @@ actor NameVoiceRegistry {
         try? data.write(to: Self.fileURL, options: .atomic)
     }
 
+    // MARK: - Change notification (session→name map broadcast to spaceterm)
+
+    /// Register the change listener and immediately emit the current snapshot
+    /// (the restart/startup broadcast). Replaces any previous handler.
+    func setOnChange(_ handler: @escaping @Sendable ([String: String]) -> Void) {
+        onChange = handler
+        handler(snapshot())
+    }
+
+    /// The current session→call-sign map: Claude session id → assigned name.
+    /// Keys without a `claude=` component (future spaceterm-only identities) are
+    /// omitted.
+    func snapshot() -> [String: String] {
+        var out: [String: String] = [:]
+        for (key, entry) in byKey {
+            if let sid = Self.claudeID(fromKey: key) { out[sid] = entry.voice.name }
+        }
+        return out
+    }
+
+    /// Persist the map and notify the listener. Called after every mutation so
+    /// persistence and broadcast can never drift (a change that's saved but not
+    /// announced, or announced but not saved).
+    private func didMutate() {
+        persist()
+        onChange?(snapshot())
+    }
+
     /// Build the canonical key from the identity map the caller tracks.
     /// Sorted so key order never matters.
     static func key(_ identity: [String: String]) -> String {
@@ -101,7 +135,7 @@ actor NameVoiceRegistry {
             if activeNames.contains(lname) { continue }
             if let pk = NameAliases.phoneticKey[lname], activePhonetic.contains(pk) { continue }
             byKey[key] = Entry(voice: candidate, lastSeen: now)
-            persist()
+            didMutate()
             return candidate
         }
         return nil   // pool exhausted (more concurrent sessions than table pairs)
@@ -113,20 +147,25 @@ actor NameVoiceRegistry {
     }
 
     /// Explicitly release a key's pair (for the future "release" event).
-    func release(_ key: String) { byKey[key] = nil; persist() }
+    func release(_ key: String) { byKey[key] = nil; didMutate() }
 
     /// Reverse lookup for directed replies: the Claude session id currently
-    /// assigned to a given call-sign (case-insensitive), or nil. Extracts the
-    /// `claude=<id>` component of the identity key.
+    /// assigned to a given call-sign (case-insensitive), or nil.
     func claudeSession(forName name: String) -> String? {
         // Resolve a spoken/ASR homophone to its canonical call-sign first.
         let lower = name.lowercased()
         let target = NameAliases.aliasToCanonical[lower] ?? lower
         for (key, entry) in byKey where entry.voice.name.lowercased() == target {
-            for pair in key.split(separator: "&") {
-                let kv = pair.split(separator: "=", maxSplits: 1)
-                if kv.count == 2, kv[0] == "claude" { return String(kv[1]) }
-            }
+            if let sid = Self.claudeID(fromKey: key) { return sid }
+        }
+        return nil
+    }
+
+    /// Extract the `claude=<id>` component of an identity key, or nil if absent.
+    private static func claudeID(fromKey key: String) -> String? {
+        for pair in key.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, kv[0] == "claude" { return String(kv[1]) }
         }
         return nil
     }
@@ -136,7 +175,7 @@ actor NameVoiceRegistry {
     func reapIdle(ttl: TimeInterval, now: Date = Date()) -> Int {
         let stale = byKey.filter { now.timeIntervalSince($0.value.lastSeen) > ttl }.map(\.key)
         stale.forEach { byKey[$0] = nil }
-        if !stale.isEmpty { persist() }
+        if !stale.isEmpty { didMutate() }
         return stale.count
     }
 

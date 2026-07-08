@@ -175,7 +175,9 @@ This fixes "a TTS update arrives while I'm dictating and I miss it."
   (unit-tested) + `ClaudeSummarizer` (Keychain OAuth → Haiku) + `TranscriptWatcher` (tail,
   mute headless/bg — orphaned Bash tasks whose completion notification the harness never
   persisted are resolved by probing whether anything still holds the task's `.output` file
-  open — sticky name/voice, idle TTL) + `SpacetermSocket` (tts-speaking events).
+  open — sticky name/voice, idle TTL) + `SpacetermSocket` (tts-speaking events, and
+  a `session-names` event: the full Claude-session→call-sign map, broadcast whole on
+  every registry change and once on startup).
   All three external integrations validated with one live call each:
   `--asr-test`, `--tts-test`, `--summarize-test`.
 - **Phase 4 (retire Wispr + transcript-reader.py, move to Fn):** ⏳ pending live use.

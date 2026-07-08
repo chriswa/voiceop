@@ -27,6 +27,13 @@ enum SpacetermSocket {
         send(event, to: hooksPath)
     }
 
+    /// Broadcast the full Claude-session→call-sign map. Sent whole (no diffing)
+    /// on every change and once on startup; the receiver replaces its copy each
+    /// time. `names` maps a Claude session id → its assigned display name.
+    static func sessionNames(_ names: [String: String]) {
+        send(["type": "session-names", "names": names], to: hooksPath, label: "session-names")
+    }
+
     /// Raise/focus a surface by its spaceterm surface (pty session) id.
     static func focusSurface(surfaceId: String) {
         send(["type": "focus-surface-request", "surfaceId": surfaceId],

@@ -104,7 +104,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             Task { @MainActor in arbiter.narrate(utterance, context: context) }
         }
         self.watcher = watcher
-        Task { await watcher.start() }
+        // Broadcast the session→call-sign map to spaceterm. Setting the handler
+        // emits the persisted map immediately (the startup/restart broadcast);
+        // do it before the watcher's run loop so no early assignment is missed.
+        let registry = self.registry
+        Task {
+            await registry.setOnChange { names in SpacetermSocket.sessionNames(names) }
+            await watcher.start()
+        }
 
         // Pending-block narration (questions & plans). The transcript never shows
         // a pending tool_use, so this is driven by our PermissionRequest hook,

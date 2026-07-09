@@ -11,6 +11,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private let statusMenuItem = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
+    private let skipItem = NSMenuItem(title: "Skip", action: #selector(skip), keyEquivalent: "n")
     private let focusAgentItem = NSMenuItem(title: "Focus", action: #selector(focusAgent), keyEquivalent: "")
     // Key equivalents here are purely the right-aligned shortcut HINT in the menu.
     // The shortcuts fire globally via the CGEvent tap (HotkeyMonitor), since a
@@ -28,6 +29,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let cmdHistoryItem = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
 
     var onToggleNarration: ((Bool) -> Void)?
+    /// Skip the clip playing now (same as ⌘⌃N). Only enabled while playing.
+    var onSkip: (() -> Void)?
+    /// Whether a clip is playing now, to enable/disable the "Skip" item on open.
+    var isPlayingProvider: (() -> Bool)?
     /// Speak the current clipboard aloud (same as ⌘⌃S).
     var onSpeakClipboard: (() -> Void)?
     /// Summarize the current clipboard via Haiku and write it back to the clipboard.
@@ -81,6 +86,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.delegate = self
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        skipItem.target = self
+        skipItem.keyEquivalentModifierMask = Self.chordMask   // ⌘⌃N (hint only; tap fires it)
+        menu.addItem(skipItem)
         focusAgentItem.target = self
         menu.addItem(focusAgentItem)
         menu.addItem(.separator())
@@ -143,6 +151,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         rebuildTTSHistory()
         rebuildSTTHistory()
         rebuildCommandHistory()
+        skipItem.isEnabled = isPlayingProvider?() ?? false
         loginMenuItem.state = (launchAtLoginState?() ?? false) ? .on : .off
         announceBlocksItem.state = (announceBlocksState?() ?? false) ? .on : .off
         if let agent = focusAgentProvider?() {
@@ -277,6 +286,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleNarration() { toggleNarrationMute() }
+
+    @objc private func skip() { onSkip?() }
 
     @objc private func speakClipboard() { onSpeakClipboard?() }
     @objc private func summarizeClipboard() { onSummarizeClipboard?() }

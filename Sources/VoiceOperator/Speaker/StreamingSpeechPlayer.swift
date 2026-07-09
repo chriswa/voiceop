@@ -72,6 +72,10 @@ final class StreamingSpeechPlayer {
     /// Barge-in: stop playback now and resolve `false`.
     func halt() { resolve(false) }
 
+    /// Skip: stop playback now but resolve `true`, so the caller treats the clip
+    /// as fully heard (unlike `halt()`/`fail()`, which resolve `false`).
+    func finishNow() { resolve(true) }
+
     /// Stream or engine error: stop playback and resolve `false`.
     func fail() { resolve(false) }
 

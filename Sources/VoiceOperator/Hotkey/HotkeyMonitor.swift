@@ -43,6 +43,8 @@ final class HotkeyMonitor {
     var onSpeakClipboard: (() -> Void)?
     /// Fired on ⌘⌃A — summarize the clipboard via Haiku.
     var onSummarizeClipboard: (() -> Void)?
+    /// Fired on ⌘⌃N — skip the clip playing now (no-op when nothing is playing).
+    var onSkip: (() -> Void)?
 
     /// Suppresses the ⌘⌃ chord shortcuts while the status-bar menu is open. Those
     /// items carry real menu key equivalents (for the right-aligned shortcut hint),
@@ -62,6 +64,8 @@ final class HotkeyMonitor {
     private static let sKeycode: Int64 = 1
     // ⌘⌃A: A is keycode 0 (kVK_ANSI_A); requires Command + Control.
     private static let aKeycode: Int64 = 0
+    // ⌘⌃N: N is keycode 45 (kVK_ANSI_N); requires Command + Control.
+    private static let nKeycode: Int64 = 45
 
     // Fn (Globe): keycode 63 (kVK_Function), flagged by kCGEventFlagMaskSecondaryFn.
     private static let triggerKeycode: Int64 = 63
@@ -110,7 +114,8 @@ final class HotkeyMonitor {
             return
         }
         // ⌘⌃-chord keyDown shortcuts (V = re-paste, B = toggle mute, S = speak
-        // clipboard, A = summarize clipboard). Suppressed while the menu is open,
+        // clipboard, A = summarize clipboard, N = skip current clip). Suppressed
+        // while the menu is open,
         // where the items' own key equivalents fire instead (see chordsSuppressed).
         if type == .keyDown {
             guard !chordsSuppressed else { return }
@@ -121,6 +126,7 @@ final class HotkeyMonitor {
                 case Self.bKeycode: onToggleMute?()
                 case Self.sKeycode: onSpeakClipboard?()
                 case Self.aKeycode: onSummarizeClipboard?()
+                case Self.nKeycode: onSkip?()
                 default: break
                 }
             }

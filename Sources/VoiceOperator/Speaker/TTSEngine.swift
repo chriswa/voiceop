@@ -147,6 +147,17 @@ final class TTSEngine {
         activeStream = nil
     }
 
+    /// Skip the clip playing now: stop the audio but resolve playback as a
+    /// natural finish (`true`), so the caller advances the queue as if the clip
+    /// had been fully heard. Unlike `halt()` it does NOT bump `haltCount`, so the
+    /// streaming return value stays `true`. The synthesis producer is left
+    /// running so the clip still lands in cache.
+    func skip() {
+        filePlayer.finishNow()
+        activeStream?.finishNow()
+        activeStream = nil
+    }
+
     /// Playback-readiness of an utterance's audio, for the menu's replay list.
     enum AudioState { case ready, synthesizing, needsSynthesis }
     func audioState(for u: Utterance) -> AudioState {

@@ -47,6 +47,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             }
         }
         menuBar.onToggleNarration = { [weak self] muted in self?.arbiter.setNarrationMuted(muted) }
+        menuBar.onSkip = { [weak self] in self?.arbiter.skipCurrent() }
+        menuBar.isPlayingProvider = { [weak self] in self?.arbiter.isPlaying ?? false }
         menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboardOrHalt() }
         menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         // While the menu is open its own key equivalents fire; suppress the tap's
@@ -96,6 +98,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboardOrHalt() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
+        hotkey.onSkip = { [weak self] in self?.arbiter.skipCurrent() }
         installHotkeyWhenTrusted()
 
         // Voice commands: a dictation that is a "<verb> [name]" command (rather

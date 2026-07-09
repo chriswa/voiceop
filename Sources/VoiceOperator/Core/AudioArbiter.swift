@@ -68,8 +68,21 @@ final class AudioArbiter {
     private let clipboardVoiceID = NameVoiceTable.defaultVoice.voiceID
 
     var unreadCount: Int { unread.count }
+    /// Whether a clip is being fetched or played right now — the "Skip" action is
+    /// only meaningful while this is true.
+    var isPlaying: Bool { pumping }
     private func notifyUnread() { onUnreadChanged?(unread.count) }
     private func haltPlayback() { halted = true; tts.halt() }
+
+    /// Skip the clip playing now, treating it as fully heard: stop the current
+    /// audio and let `pump()` advance to the next queued clip. Unlike mute /
+    /// barge-in (`haltPlayback`), the skipped narration leaves the unread queue
+    /// rather than staying to replay in full — it's already recorded in Recent
+    /// Updates. No-op when nothing is playing.
+    func skipCurrent() {
+        guard pumping, current != nil else { return }
+        tts.skip()
+    }
 
     /// The session most recently *referenced* — by narration OR by any tool
     /// (repeat / more-details / surface, with or without a name). A name-less

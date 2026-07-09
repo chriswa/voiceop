@@ -84,6 +84,20 @@ final class AudioArbiter {
         tts.skip()
     }
 
+    /// Voice "skip". A command dictation barges in on whatever was playing
+    /// (`beginDictation` → `haltPlayback`), returning an interrupted narration to
+    /// the front of `unread` to resume once dictation ends. By the time the
+    /// "skip" transcript is recognized nothing is playing, so we drop that
+    /// front-of-queue entry — the clip that was playing — so playback advances to
+    /// the next update instead of resuming it. It stays in Recent Updates. Falls
+    /// back to a live skip if a clip is somehow still playing.
+    func skipQueued() {
+        if pumping, current != nil { tts.skip(); return }
+        guard !unread.isEmpty else { return }
+        unread.removeFirst()
+        notifyUnread()
+    }
+
     /// The session most recently *referenced* — by narration OR by any tool
     /// (repeat / more-details / surface, with or without a name). A name-less
     /// voice tool targets this session, so referencing one agent then issuing a

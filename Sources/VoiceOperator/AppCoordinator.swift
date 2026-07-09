@@ -18,6 +18,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private static let focusVerbs: Set<String> = ["focus", "focuses", "focused"]
     /// Accepted transcriptions of the "repeat" verb (re-plays the cached audio).
     private static let repeatVerbs: Set<String> = ["repeat", "repeats", "repeated"]
+    /// Accepted transcriptions of the "skip" verb (drops the clip that was
+    /// playing when this command began, so playback advances to the next update).
+    private static let skipVerbs: Set<String> = ["skip", "skips", "skipped"]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching")
@@ -183,6 +186,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         if Self.repeatVerbs.contains(verb) {
             guard words.count <= 2 else { return false }
             await runRepeat(name: words.count == 2 ? words[1] : nil)
+            return true
+        }
+        // "skip" — global; no name (it acts on whatever was just playing).
+        if Self.skipVerbs.contains(verb) {
+            guard words.count == 1 else { return false }
+            arbiter.skipQueued()
             return true
         }
         return false

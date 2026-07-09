@@ -1,8 +1,9 @@
 import Foundation
 
-/// 81 sticky operator call-signs mapped onto the 27 English Kokoro (kokoro-82m)
-/// voices the local TTS server exposes — roughly three call-signs per voice, so
-/// we have a deep name pool without running short. Each name has a fixed voice
+/// 81 sticky operator call-signs mapped onto 26 of the 27 English Kokoro
+/// (kokoro-82m) voices the local TTS server exposes (af_nicole is blocked) —
+/// roughly three call-signs per voice, so we have a deep name pool without
+/// running short. Each name has a fixed voice
 /// (a name always sounds the same), but a voice is shared by several names; the
 /// registry prefers to hand each concurrent session a *distinct* voice and only
 /// doubles up once all 27 are in use. Every pair's `gender` matches the voice's
@@ -40,12 +41,12 @@ enum NameVoiceTable {
         voice("af_aoede", .feminine, ["Hazel", "Mia", "Daphne"]) +         // Aoede
         voice("af_kore", .feminine, ["Iris", "Nora", "Rose"]) +            // Kore
         voice("af_jessica", .feminine, ["Julia", "Tessa", "Beth"]) +       // Jessica
-        voice("af_nicole", .feminine, ["Kate", "Dana", "Gemma"]) +         // Nicole
+        // af_nicole (Nicole) blocked; its Kate/Dana/Gemma redistributed below.
         voice("bf_lily", .feminine, ["Lily", "Laura", "Wendy"]) +          // Lily (British)
         voice("af_alloy", .feminine, ["Molly", "Bella", "Naomi"]) +        // Alloy
-        voice("af_nova", .feminine, ["Nina", "Rita"]) +                    // Nova
-        voice("bf_isabella", .feminine, ["Olivia", "Vivian"]) +            // Isabella (British)
-        voice("af_river", .feminine, ["Penny", "Ruth"]) +                  // River
+        voice("af_nova", .feminine, ["Nina", "Rita", "Kate"]) +            // Nova
+        voice("bf_isabella", .feminine, ["Olivia", "Vivian", "Dana"]) +    // Isabella (British)
+        voice("af_river", .feminine, ["Penny", "Ruth", "Gemma"]) +         // River
         voice("af_sarah", .feminine, ["Rachel", "Piper"]) +                // Sarah
         voice("af_sky", .feminine, ["Stella", "Zoe"]) +                    // Sky
         // ── Male voices (American am_*, British bm_*) ────────────────────────

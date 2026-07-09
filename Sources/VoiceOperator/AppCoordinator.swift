@@ -33,13 +33,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         arbiter.onStatus = { [weak self] status in self?.menuBar.update(status: status) }
         arbiter.onUnreadChanged = { [weak self] count in self?.menuBar.setUnread(count) }
         menuBar.focusAgentProvider = { [weak self] in self?.arbiter.currentOrLastAgent() }
-        menuBar.onFocusAgent = { [weak self] key in
-            guard let self else { return }
-            self.arbiter.referenceSession(key)
-            if let surface = SpacetermSurfaceResolver.surfaceId(forClaudeSession: key) {
-                SpacetermSocket.focusSurface(surfaceId: surface)
-            }
-        }
+        menuBar.onFocusAgent = { [weak self] key in self?.focusSurface(key: key, source: "menu button") }
         arbiter.onSpeaking = { [weak self] utterance in
             if let utterance {
                 self?.lastSpeaking = utterance
@@ -80,13 +74,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onSurfaceTTS = { [weak self] id in
             guard let self,
                   let key = self.arbiter.ttsHistory.first(where: { $0.id == id })?.sessionKey else { return }
-            self.arbiter.referenceSession(key)   // clicking Surface references that agent
-            if let surface = SpacetermSurfaceResolver.surfaceId(forClaudeSession: key) {
-                SpacetermSocket.focusSurface(surfaceId: surface)
-                Log.log("surface (from history): session \(key.prefix(8)) → \(surface.prefix(8))")
-            } else {
-                Log.log("surface (from history): no live surface for session \(key.prefix(8))")
-            }
+            self.focusSurface(key: key, source: "history")
         }
         menuBar.onMoreDetailsTTS = { [weak self] id in self?.arbiter.moreDetails(id: id) }
         menuBar.onRetrySTT = { [weak self] id in self?.arbiter.retrySTT(id: id) }
@@ -208,13 +196,26 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func runSurface(name: String?) async {
         let label = name ?? "last-referenced"
         guard let key = await targetSessionKey(name) else { Log.log("surface: no target (\(label))"); return }
-        arbiter.referenceSession(key)   // surface has no playback, so note it explicitly
-        if let surface = SpacetermSurfaceResolver.surfaceId(forClaudeSession: key) {
-            SpacetermSocket.focusSurface(surfaceId: surface)
-            Log.log("surface: \(label) → \(surface.prefix(8))")
-        } else {
-            Log.log("surface: no live surface for \(label)")
-        }
+        focusSurface(key: key, source: "voice: \(label)")
+    }
+
+    /// Focus the surface of the last agent that spoke (⌘⌃J) — the same
+    /// current/most-recent agent the menu's "Focus <name>" item offers, so it
+    /// tracks whoever is speaking the moment narration starts.
+    private func focusLastAgent() {
+        guard let agent = arbiter.currentOrLastAgent() else { Log.log("focus (⌘⌃J): no agent yet"); return }
+        focusSurface(key: agent.sessionKey, source: "⌘⌃J")
+    }
+
+    /// Raise the spaceterm surface hosting a session, noting it as the
+    /// last-referenced target. Shared by the menu button, ⌘⌃J, the TTS-history
+    /// Surface button, and the "focus" voice command (a surface has no playback,
+    /// so we reference it explicitly). We hand spaceterm the claude session id and
+    /// let it resolve the surface; whether one exists is spaceterm's to log.
+    private func focusSurface(key: String, source: String) {
+        arbiter.referenceSession(key)
+        SpacetermSocket.focusClaudeSession(key)
+        Log.log("focus (\(source)): session \(key.prefix(8))")
     }
 
     /// Replay a call-sign's latest update (free, from cache), or the

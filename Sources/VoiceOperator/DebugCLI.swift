@@ -125,15 +125,22 @@ enum DebugCLI {
         print("summary: \(summary)")
     }
 
-    /// Synthesize one utterance via Cartesia and play it. Makes exactly one TTS
-    /// request (cached afterward). Uses the default voice.
+    /// Synthesize one utterance via Cartesia and play it, streaming as it arrives.
+    /// Logs time-to-first-audio vs. total wall time so you can confirm playback
+    /// starts long before synthesis finishes. Uses the default voice.
     @MainActor
     static func runTTSTest(text: String) async {
         let voice = NameVoiceTable.defaultVoice
         let utterance = Utterance(name: voice.name, body: text, voiceID: voice.voiceID, sessionKey: nil)
-        FileHandle.standardError.write(Data("speaking as \(voice.name): \(utterance.spokenText)\n".utf8))
+        func note(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+        note("speaking as \(voice.name): \(utterance.spokenText)")
         let engine = TTSEngine()
-        let ok = await engine.play(utterance)
-        FileHandle.standardError.write(Data("tts-test \(ok ? "finished" : "failed/halted")\n".utf8))
+        let t0 = Date()
+        let ok = await engine.play(utterance, onStart: {
+            let s = String(format: "tts-test: first audio at %.2fs\n", Date().timeIntervalSince(t0))
+            FileHandle.standardError.write(Data(s.utf8))
+        })
+        note(String(format: "tts-test %@ (%.2fs total)",
+                    ok ? "finished" : "failed/halted", Date().timeIntervalSince(t0)))
     }
 }

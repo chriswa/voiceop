@@ -18,13 +18,23 @@ struct Utterance: Sendable, Equatable {
     var spokenText: String { verbatim ? body : "\(name) here. \(body)" }
 }
 
-/// Text→audio provider, swappable like `Transcriber`. Produces a complete WAV
-/// for a given text+voice (so it can be cached and replayed for free).
+/// Text→audio provider, swappable like `Transcriber`. Streams raw PCM as it's
+/// synthesized (so playback can start on the first chunk) while `synthesizeWAV`
+/// remains available as a one-shot fallback. Both let the result be cached and
+/// replayed for free.
 protocol SpeechSynthesizer: Sendable {
+    /// Stream raw `pcm_f32le` audio (mono, 44100 Hz) as it is synthesized. The
+    /// stream finishes normally on the provider's `done` signal and throws
+    /// `SpeakerError` (e.g. `.synthesis`) on an error signal.
+    func synthesizeStream(text: String, voiceID: String) -> AsyncThrowingStream<Data, Error>
+
+    /// One-shot WAV. Fallback path (e.g. when live audio playback can't start).
     func synthesizeWAV(text: String, voiceID: String) async throws -> Data
 }
 
 enum SpeakerError: Error {
     case noAPIKey
     case http(status: Int, body: String)
+    /// The provider reported a synthesis error mid-stream (SSE error frame).
+    case synthesis(String)
 }

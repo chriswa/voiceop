@@ -25,6 +25,26 @@ Italian, Portuguese) = 41 voices. Add pyopenjtalk / misaki[zh] and the two
 entries in LANGUAGES below to extend.
 """
 import struct, time, threading, json, os, asyncio
+
+def _load_dotenv(path=".env"):
+    # Minimal .env loader (no dependency): KEY=VALUE lines, '#' comments.
+    # Real environment variables always win over the file, so an explicit
+    # `PORT=... python kokoro_server.py` still overrides the .env. This lets
+    # the primary install keep its hard-coded 3004 default while a per-machine
+    # .env picks a non-conflicting port.
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), path)) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+
+_load_dotenv()
+
 import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
@@ -134,12 +154,29 @@ _lock = threading.Lock()
 _model = None
 _pipelines = {}
 
+def _pick_device():
+    # Allow explicit override (e.g. KOKORO_DEVICE=cpu on a flaky MPS backend).
+    forced = os.environ.get("KOKORO_DEVICE")
+    if forced:
+        return forced
+    if torch.cuda.is_available():
+        return "cuda"
+    # Apple Silicon: MPS gives a big speedup over CPU for the 82M model.
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+def _vram_mb():
+    # Only CUDA exposes an allocator query; other backends report 0.
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024**2
+    return 0.0
+
 def _get_model():
     global _model
     if _model is None:
         from kokoro import KModel
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _model = KModel(repo_id=REPO_ID).to(device).eval()
+        _model = KModel(repo_id=REPO_ID).to(_pick_device()).eval()
     return _model
 
 def _get_pipeline(lang_code: str):
@@ -155,7 +192,7 @@ print("Loading Kokoro model...", flush=True)
 _t0 = time.time()
 _get_model()
 _get_pipeline("a")   # preload the default/most-likely-used language eagerly
-print(f"Kokoro ready in {time.time()-_t0:.1f}s | VRAM: {torch.cuda.memory_allocated()/1024**2:.0f} MB", flush=True)
+print(f"Kokoro ready in {time.time()-_t0:.1f}s | device: {_pick_device()} | VRAM: {_vram_mb():.0f} MB", flush=True)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _wav_stream_header(sample_rate=SAMPLE_RATE, channels=1, bits=16) -> bytes:
@@ -194,8 +231,7 @@ app = FastAPI()
 
 @app.get("/health")
 def health():
-    vram = torch.cuda.memory_allocated() / 1024**2
-    return {"status": "ok", "model": "kokoro-82m", "loaded": True, "vram_mb": round(vram)}
+    return {"status": "ok", "model": "kokoro-82m", "loaded": True, "vram_mb": round(_vram_mb())}
 
 @app.get("/voices")
 def voices():
@@ -756,4 +792,4 @@ def index():
     return HTML
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=3004, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "3004")), log_level="warning")

@@ -77,7 +77,7 @@ final class SoundBank {
             .transcriptionFailed: Self.chirp([(523, 0.10), (392, 0.10), (262, 0.22)]),
             // Soft ascending double-blip — Claude/Haiku summarization began.
             // Distinct from the single-blip clip cues so a "waiting on Claude"
-            // beat is audibly its own state before any Cartesia fetch.
+            // beat is audibly its own state before any TTS fetch.
             .summarizing:       Self.chirp([(784, 0.04), (1046, 0.05)], volume: 0.5),
             // Very short single blips around each TTS clip's lifecycle.
             .clipRequested:     Self.chirp([(1200, 0.04)], volume: 0.5),

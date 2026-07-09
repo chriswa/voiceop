@@ -17,7 +17,7 @@ struct AudioCache {
 
     /// Stable cache key for a text+voice pair (also the WAV filename stem).
     func key(text: String, voiceID: String) -> String {
-        let digest = SHA256.hash(data: Data("sonic-3|\(voiceID)|\(text)".utf8))
+        let digest = SHA256.hash(data: Data("kokoro-82m|\(voiceID)|\(text)".utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 

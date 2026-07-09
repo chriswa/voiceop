@@ -1,8 +1,8 @@
 import Foundation
 
 /// One thing to say. `name` is the call-sign and `body` the summary; the text
-/// actually sent to TTS is "⟨name⟩ here. ⟨body⟩". `voiceID` is the Cartesia
-/// voice; `sessionKey` identifies the originating Claude surface for spaceterm
+/// actually sent to TTS is "⟨name⟩ here. ⟨body⟩". `voiceID` is the TTS provider's
+/// voice id; `sessionKey` identifies the originating Claude surface for spaceterm
 /// speaking events. Keeping name/body separate lets the history show them nicely.
 ///
 /// A `verbatim` utterance (⌘⌃S speak-the-clipboard) is spoken exactly as its
@@ -23,9 +23,13 @@ struct Utterance: Sendable, Equatable {
 /// remains available as a one-shot fallback. Both let the result be cached and
 /// replayed for free.
 protocol SpeechSynthesizer: Sendable {
-    /// Stream raw `pcm_f32le` audio (mono, 44100 Hz) as it is synthesized. The
-    /// stream finishes normally on the provider's `done` signal and throws
-    /// `SpeakerError` (e.g. `.synthesis`) on an error signal.
+    /// Native sample rate of the raw PCM this synthesizer yields (mono). Drives
+    /// the live-playback `AVAudioFormat` and the cached WAV's header rate.
+    var sampleRate: Int { get }
+
+    /// Stream raw `pcm_f32le` audio (mono, at `sampleRate`) as it is synthesized.
+    /// The stream finishes normally when the provider is done and throws
+    /// `SpeakerError` (e.g. `.synthesis`) on an error.
     func synthesizeStream(text: String, voiceID: String) -> AsyncThrowingStream<Data, Error>
 
     /// One-shot WAV. Fallback path (e.g. when live audio playback can't start).
@@ -33,7 +37,6 @@ protocol SpeechSynthesizer: Sendable {
 }
 
 enum SpeakerError: Error {
-    case noAPIKey
     case http(status: Int, body: String)
     /// The provider reported a synthesis error mid-stream (SSE error frame).
     case synthesis(String)

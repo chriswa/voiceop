@@ -125,7 +125,7 @@ enum DebugCLI {
         print("summary: \(summary)")
     }
 
-    /// Synthesize one utterance via Cartesia and play it, streaming as it arrives.
+    /// Synthesize one utterance via the TTS engine and play it, streaming as it arrives.
     /// Logs time-to-first-audio vs. total wall time so you can confirm playback
     /// starts long before synthesis finishes. Uses the default voice.
     @MainActor

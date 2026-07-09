@@ -740,7 +740,7 @@ final class AudioArbiter {
 
     // MARK: - Clipboard actions
 
-    /// ⌘⌃S: speak the current clipboard text verbatim through Cartesia. This is an
+    /// ⌘⌃S: speak the current clipboard text verbatim through the TTS engine. This is an
     /// explicit action, so it bypasses narration mute (the one-off path) and drives
     /// the same cyan→green icon states + clip cues as narration.
     ///

@@ -1,8 +1,8 @@
 import AVFoundation
 import Foundation
 
-/// Turns a stream of `pcm_f32le` byte chunks (as delivered over Cartesia's SSE
-/// path) into `AVAudioPCMBuffer`s on whole-sample boundaries. A single 4-byte
+/// Turns a stream of `pcm_f32le` byte chunks (as delivered by a
+/// `SpeechSynthesizer`) into `AVAudioPCMBuffer`s on whole-sample boundaries. A single 4-byte
 /// float can straddle two network chunks, so any trailing partial-sample bytes
 /// are carried over to the next call.
 struct PCMReframer {
@@ -34,8 +34,8 @@ struct PCMReframer {
     }
 }
 
-/// Conversions between the raw `pcm_f32le` we receive live and the s16le WAV the
-/// audio cache stores (matching the app's canonical `WAVFile` format, so cached
+/// Conversions between the raw `pcm_f32le` we receive live from a synthesizer and
+/// the s16le WAV the audio cache stores (matching the app's canonical `WAVFile` format, so cached
 /// clips replay unchanged through `AVAudioPlayer`).
 enum PCMAudio {
     /// Convert accumulated `pcm_f32le` bytes to s16le sample bytes, clamping to

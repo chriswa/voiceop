@@ -4,11 +4,35 @@ import XCTest
 final class NameVoiceRegistryTests: XCTestCase {
     func testTableIsUniqueAndNonEmpty() {
         // The roster is empirically curated (ASR round-trip), so its size can
-        // change; the invariants are non-empty + unique names and voices.
+        // change; the invariants are non-empty + unique names. Voices are
+        // intentionally shared (~3 names each), so voiceIDs are NOT unique — but
+        // every voice in the pool must be used, and names must outnumber voices.
         let all = NameVoiceTable.all
         XCTAssertFalse(all.isEmpty)
         XCTAssertEqual(Set(all.map(\.name)).count, all.count, "names must be unique")
-        XCTAssertEqual(Set(all.map(\.voiceID)).count, all.count, "voices must be unique")
+        XCTAssertGreaterThan(all.count, Set(all.map(\.voiceID)).count,
+                             "names share voices, so names outnumber distinct voices")
+    }
+
+    func testPrefersDistinctVoicesUntilPoolExhausted() async {
+        // With several names per voice, the registry should still give each of
+        // the first N concurrent sessions a distinct voice (N = voice-pool size),
+        // and only start reusing a voice once all of them are in play.
+        let reg = NameVoiceRegistry(persisting: false)
+        let voicePool = Set(NameVoiceTable.all.map(\.voiceID)).count
+        var voices: [String] = []
+        for i in 0..<voicePool {
+            if let v = await reg.assign(NameVoiceRegistry.key(["claude": "s\(i)"])) {
+                voices.append(v.voiceID)
+            }
+        }
+        XCTAssertEqual(voices.count, voicePool, "one session assigned per voice")
+        XCTAssertEqual(Set(voices).count, voicePool, "every early session gets a distinct voice")
+        // One more session: all voices are active, so it must double up on a voice
+        // already in use (while still getting a unique name — checked elsewhere).
+        let extra = await reg.assign(NameVoiceRegistry.key(["claude": "extra"]))
+        XCTAssertNotNil(extra)
+        XCTAssertTrue(voices.contains(extra!.voiceID), "voice doubles up once the pool is exhausted")
     }
 
     func testStickyAssignment() async {
@@ -33,8 +57,9 @@ final class NameVoiceRegistryTests: XCTestCase {
         let keys = assigned.compactMap { NameAliases.phoneticKey[$0] }
         XCTAssertEqual(keys.count, assigned.count, "every name has a phonetic key")
         XCTAssertEqual(Set(keys).count, keys.count, "no sound-alike active names")
-        // Concurrent capacity == number of distinct phonetic codes in the table
-        // (100 names minus the two confusable-pair collisions = 98).
+        // Concurrent capacity == number of distinct phonetic codes in the table.
+        // (The Kokoro roster's names were chosen with all-distinct codes, so this
+        // equals the table size; a future table with sound-alikes would be lower.)
         let capacity = Set(NameVoiceTable.all.compactMap { NameAliases.phoneticKey[$0.name.lowercased()] }).count
         XCTAssertEqual(assigned.count, capacity)
     }

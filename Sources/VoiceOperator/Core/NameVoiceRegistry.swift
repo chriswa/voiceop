@@ -8,7 +8,11 @@ import CryptoKit
 ///
 /// Rules:
 ///   • A key keeps its pair across calls (sticky).
-///   • We avoid handing out a name or voice that is currently active.
+///   • We never hand out a name (or a sound-alike name) that is currently active.
+///   • Several names share one voice (the table is ~3:1), so we also *prefer* a
+///     voice no active session is using, and only double up a voice once all
+///     voices are in use — concurrent sessions stay distinct-sounding as long as
+///     the voice pool lasts.
 ///   • The starting slot is derived from a stable hash of the key, so a given
 ///     session tends to land on the same pair even across process restarts;
 ///     linear probing resolves collisions with other *active* sessions.
@@ -128,17 +132,25 @@ actor NameVoiceRegistry {
         let activePhonetic = Set(byKey.values.compactMap {
             NameAliases.phoneticKey[$0.voice.name.lowercased()]
         })
+        let activeVoices = Set(byKey.values.map { $0.voice.voiceID })
         let start = stableStartIndex(key)
-        for offset in 0..<table.count {
-            let candidate = table[(start + offset) % table.count]
-            let lname = candidate.name.lowercased()
-            if activeNames.contains(lname) { continue }
-            if let pk = NameAliases.phoneticKey[lname], activePhonetic.contains(pk) { continue }
-            byKey[key] = Entry(voice: candidate, lastSeen: now)
-            didMutate()
-            return candidate
+        // Two passes over the roster from the same stable start: the first insists
+        // on a voice no active session is using (so ≤27 sessions all sound
+        // distinct); the second drops that and only requires a free, non-sound-
+        // alike name (voices double up). Name distinctness is the binding limit.
+        for requireFreshVoice in [true, false] {
+            for offset in 0..<table.count {
+                let candidate = table[(start + offset) % table.count]
+                let lname = candidate.name.lowercased()
+                if activeNames.contains(lname) { continue }
+                if let pk = NameAliases.phoneticKey[lname], activePhonetic.contains(pk) { continue }
+                if requireFreshVoice && activeVoices.contains(candidate.voiceID) { continue }
+                byKey[key] = Entry(voice: candidate, lastSeen: now)
+                didMutate()
+                return candidate
+            }
         }
-        return nil   // pool exhausted (more concurrent sessions than table pairs)
+        return nil   // pool exhausted (more concurrent sessions than distinct names)
     }
 
     /// Refresh a key's last-seen time so an active session isn't reaped.

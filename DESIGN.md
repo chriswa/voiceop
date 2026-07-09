@@ -25,7 +25,7 @@ In:
   sticky per-session name+voice ("Waldo here. …"), forward speaking events to spaceterm.
 - **Audio arbitration**: dictation mutes system output + halts current TTS + defers queued
   TTS until listening ends + a short delay. Interrupted utterances re-cue from the start.
-- **Cartesia audio cache**: every synthesized stream cached ≥1 day, keyed by (text, voice),
+- **TTS audio cache**: every synthesized stream cached ≥1 day, keyed by (text, voice),
   replayed for free.
 - **Menu bar UI**: live status (idle / listening / transcribing / pasting / speaking), and a
   quick **Pause** toggle (for meetings).
@@ -111,9 +111,9 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
 Core/
   AudioArbiter        the brain: mute + halt + TTS queue + coordination invariant
   NameVoiceRegistry   gender-aligned name allowlist; sticky (claudeSessionId, spaceTermId)->(name,voice); idle TTL
-  AudioCache          Cartesia PCM cached by (text, voiceId) hash, >=1 day, free replay
+  AudioCache          TTS PCM cached by (text, voiceId) hash, >=1 day, free replay
 Transcriber/  (protocol Transcriber)   WisprTranscriber today (WS + /llm HTTP); LocalWhisper later
-Speaker/      (protocol Speaker)       CartesiaSpeaker (ports cartesia-read streaming + tones)
+Speaker/      (protocol SpeechSynthesizer)  KokoroSynthesizer (local kokoro-82m HTTP, streaming)
 Inserter/                              Swift paste helper (lazy clipboard + Cmd-V + restore + AX ctx)
 ClaudeWatcher/                         ports transcript-reader.py: tail, Haiku-summarize, spaceterm sock
 Hotkey/                                CGEventTap; Right Shift now -> Fn later; hold + double-tap
@@ -124,8 +124,29 @@ MenuBarUI/                             status states + Pause toggle
 (re-cue from start) + mute output + block queue; dictation-end (+delay) → unmute + drain queue.
 This fixes "a TTS update arrives while I'm dictating and I miss it."
 
-**Provider boundaries** so Wispr and Cartesia are swappable: `Transcriber` (audio→text),
-`Speaker` (text→audio), each behind a protocol with the vendor client fully contained.
+**Provider boundaries** so the STT and TTS backends are swappable: `Transcriber`
+(audio→text), `SpeechSynthesizer` (text→audio), each behind a protocol with the vendor
+client fully contained.
+
+### TTS — Kokoro (local `kokoro-82m` HTTP server)
+
+The app synthesizes speech through a local Kokoro server (`KokoroSynthesizer`), replacing
+the earlier Cartesia integration (removed 2026-07-09 when the Cartesia quota ran out; recover
+it from git history if ever needed). It's a plain, self-documented HTTP service — no API key,
+no reverse-engineering:
+
+- `POST {base}/synthesize`, `Content-Type: application/json`,
+  body `{ "text": <string ≤5000>, "voice": <voice id>, "speed": <0.5–2.0, default 1.2> }`.
+  Base URL defaults to `http://localhost:56841`, overridable via `$VOICEOP_KOKORO_URL`.
+- Response is one streaming `audio/wav` body: a **44-byte PCM WAV header** (with placeholder
+  `0xffffffff` RIFF/data sizes, since length isn't known up front) followed by raw
+  **s16le PCM, mono, 24000 Hz**, flushed as generated so playback starts on the first chunk.
+  `KokoroSynthesizer` strips the header and converts s16le→`pcm_f32le` to feed the existing
+  f32le streaming pipeline; the cache rebuilds a canonical, real-size WAV.
+- `GET {base}/voices` lists the voices. We use the 27 English ones (American `af_`/`am_`,
+  British `bf_`/`bm_`); `NameVoiceTable` maps the full 81-name Cartesia-era roster onto them
+  (~3 gender-matched call-signs per voice) so the name pool stays deep, while
+  `NameVoiceRegistry` hands each concurrent session a distinct voice until all 27 are in use.
 
 ---
 
@@ -185,7 +206,7 @@ optional-name peel and last-referenced fallback apply uniformly.
 - **Phase 1 — Swift app skeleton.** Menu bar, Hotkey (Right Shift), CoreAudio mute, SFX,
   Inserter (paste helper), wired to a stub Transcriber. End-to-end dictation → paste.
 - **Phase 2 — Port the proven STT** into `WisprTranscriber` (Swift), behind the protocol.
-- **Phase 3 — Speaker + ClaudeWatcher + AudioArbiter.** Cartesia TTS with cache, transcript
+- **Phase 3 — Speaker + ClaudeWatcher + AudioArbiter.** Streaming TTS with cache, transcript
   watching/summarization, name/voice registry, spaceterm forwarding, full arbitration.
 - **Phase 4 — Retire** Wispr Flow (move trigger to Fn) and `transcript-reader.py`.
 
@@ -210,10 +231,11 @@ optional-name peel and last-referenced fallback apply uniformly.
   (AVAudioEngine→WAV) → `WisprTranscriber` (`/llm/asr`) → `TextInserter` (clipboard+⌘V+restore),
   with `SoundEffect` cues and the `MenuBarController` bullhorn (red=recording, green=playing).
   `AudioArbiter` coordinates. App bundle via `scripts/make-app.sh`.
-- **Name/voice registry:** ✅ `NameVoiceTable` (82 gender-aligned pairs; call-sign gender
-  matches the Cartesia voice's reported gender) + `NameVoiceRegistry` (sticky,
-  no active reuse, idle TTL) with passing unit tests.
-- **Phase 3 (TTS half):** ✅ built + validated. `CartesiaSynthesizer` (`/tts/bytes`, native),
+- **Name/voice registry:** ✅ `NameVoiceTable` (81 gender-aligned call-signs mapped onto the
+  27 English Kokoro voices, ~3 names/voice; call-sign gender matches the voice's reported
+  gender) + `NameVoiceRegistry` (sticky, no active name reuse, prefers a distinct voice per
+  concurrent session until the 27-voice pool is exhausted, idle TTL) with passing unit tests.
+- **Phase 3 (TTS half):** ✅ built + validated. `KokoroSynthesizer` (local `/synthesize`, streaming),
   `AudioCache` (≥1-day WAV cache, free replay), `SpeechPlayer` (haltable/awaitable),
   `TTSEngine`, and the `AudioArbiter` TTS queue with **barge-in re-cue** (dictation halts +
   re-queues the interrupted utterance from the start). `ClaudeWatcher` = `TranscriptParser`

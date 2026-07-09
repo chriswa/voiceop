@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 /// Turns an `Utterance` into audio. Cache hit → play the stored WAV instantly.
-/// Miss → stream from the provider (Cartesia SSE), playing chunks as they arrive
+/// Miss → stream from the provider (Kokoro), playing chunks as they arrive
 /// while accumulating the full clip; on completion the assembled WAV is cached so
 /// future plays are free. Playback is haltable for dictation barge-in. Reaps stale
 /// cache entries on init.
@@ -16,12 +16,9 @@ final class TTSEngine {
     /// so `halt()` can stop it. Nil when nothing is streaming.
     private var activeStream: StreamingSpeechPlayer?
 
-    /// Live-playback PCM format: `pcm_f32le`, mono, 44100 Hz (matches the SSE
-    /// output_format requested in `CartesiaSynthesizer`).
-    private static let streamFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: Double(CartesiaSynthesizer.sampleRate),
-        channels: 1, interleaved: false)!
+    /// Live-playback PCM format: `pcm_f32le`, mono, at the synthesizer's native
+    /// sample rate (the format its `synthesizeStream` chunks decode to).
+    private let streamFormat: AVAudioFormat
 
     /// Synthesis tasks currently in flight, keyed by cache key, each resolving to
     /// the cached WAV's URL. Coalesces concurrent requests for the same text+voice
@@ -35,9 +32,13 @@ final class TTSEngine {
     /// to completion so the clip lands in cache (barge-in re-cues from cache).
     private var haltCount = 0
 
-    init(synth: SpeechSynthesizer = CartesiaSynthesizer(), cache: AudioCache = AudioCache()) {
+    init(synth: SpeechSynthesizer = KokoroSynthesizer(), cache: AudioCache = AudioCache()) {
         self.synth = synth
         self.cache = cache
+        self.streamFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Double(synth.sampleRate),
+            channels: 1, interleaved: false)!
         let reaped = cache.reap()
         if reaped > 0 { Log.log("audio cache: reaped \(reaped) stale entr\(reaped == 1 ? "y" : "ies")") }
     }
@@ -76,7 +77,7 @@ final class TTSEngine {
                                onStart: @escaping @Sendable @MainActor () -> Void) async -> Bool {
         let player = StreamingSpeechPlayer()
         player.onFirstBuffer = onStart
-        do { try player.start(format: Self.streamFormat) }
+        do { try player.start(format: streamFormat) }
         catch {
             Log.log("tts stream: engine start failed (\(error)); falling back to WAV")
             return await playViaWAV(u, key: key, mark: mark, onStart: onStart)
@@ -93,7 +94,7 @@ final class TTSEngine {
                     acc.append(pcm)   // full bytes always accumulate for the cache
                     // Feed live playback only while this play is un-halted.
                     if self.haltCount == mark,
-                       let buf = reframer.buffer(from: pcm, format: Self.streamFormat) {
+                       let buf = reframer.buffer(from: pcm, format: self.streamFormat) {
                         player.schedule(buf)
                     }
                 }
@@ -107,7 +108,7 @@ final class TTSEngine {
                 self.inFlight[key] = nil
                 throw SpeakerError.synthesis("no audio")
             }
-            let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: CartesiaSynthesizer.sampleRate)
+            let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: self.synth.sampleRate)
             let url = try self.cache.store(wav, text: u.spokenText, voiceID: u.voiceID)
             self.inFlight[key] = nil
             return url

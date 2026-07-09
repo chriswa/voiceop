@@ -27,6 +27,9 @@ struct HistoryStore {
         var tts: [TTSHistoryEntry] = []
         var stt: [STTHistoryEntry] = []
         var commands: [CommandHistoryEntry] = []
+        /// The session most recently referenced (last speaker / tool target),
+        /// restored so "Focus last speaker" survives a restart. nil until one exists.
+        var lastReferencedSessionKey: String? = nil
     }
 
     private struct Payload: Codable {
@@ -34,11 +37,14 @@ struct HistoryStore {
         var tts: [TTSHistoryEntry]
         var stt: [STTHistoryEntry]
         var commands: [CommandHistoryEntry]
+        var lastReferencedSessionKey: String?
 
-        // Lenient: every list defaults to empty if absent, so adding a new list
-        // (or reading an older file) never fails the whole decode.
-        init(version: Int, tts: [TTSHistoryEntry], stt: [STTHistoryEntry], commands: [CommandHistoryEntry]) {
+        // Lenient: every list defaults to empty (and the key to nil) if absent, so
+        // adding a new field (or reading an older file) never fails the whole decode.
+        init(version: Int, tts: [TTSHistoryEntry], stt: [STTHistoryEntry],
+             commands: [CommandHistoryEntry], lastReferencedSessionKey: String?) {
             self.version = version; self.tts = tts; self.stt = stt; self.commands = commands
+            self.lastReferencedSessionKey = lastReferencedSessionKey
         }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -46,6 +52,7 @@ struct HistoryStore {
             tts = try c.decodeIfPresent([TTSHistoryEntry].self, forKey: .tts) ?? []
             stt = try c.decodeIfPresent([STTHistoryEntry].self, forKey: .stt) ?? []
             commands = try c.decodeIfPresent([CommandHistoryEntry].self, forKey: .commands) ?? []
+            lastReferencedSessionKey = try c.decodeIfPresent(String.self, forKey: .lastReferencedSessionKey)
         }
     }
 
@@ -63,7 +70,8 @@ struct HistoryStore {
                 Log.log("history: ignoring incompatible version \(p.version) (expected \(version))")
                 return Contents()
             }
-            return Contents(tts: p.tts, stt: p.stt, commands: p.commands)
+            return Contents(tts: p.tts, stt: p.stt, commands: p.commands,
+                            lastReferencedSessionKey: p.lastReferencedSessionKey)
         } catch {
             Log.log("history: could not decode (\(error)); starting empty")
             return Contents()
@@ -71,7 +79,8 @@ struct HistoryStore {
     }
 
     func save(_ c: Contents) {
-        let payload = Payload(version: Self.version, tts: c.tts, stt: c.stt, commands: c.commands)
+        let payload = Payload(version: Self.version, tts: c.tts, stt: c.stt, commands: c.commands,
+                              lastReferencedSessionKey: c.lastReferencedSessionKey)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }

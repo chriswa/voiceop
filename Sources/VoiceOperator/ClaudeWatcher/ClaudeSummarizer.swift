@@ -65,6 +65,21 @@ struct ClaudeSummarizer {
     ONLY the summary.
     """
 
+    // Unlike `elaborate`, an ask is a genuine back-and-forth: the user may ask to
+    // repeat something already said, or dig into a specific point. So this
+    // instruction explicitly PERMITS repetition and answers the message directly,
+    // rather than forbidding overlap with what was already spoken.
+    private static let askInstruction = """
+    You already summarized a coding agent's recent turn aloud for the user, and \
+    the user is now asking spoken questions about it — a continuing conversation. \
+    Answer the user's latest question directly, in one or two short sentences of \
+    plain spoken English, grounded in the conversation provided. You MAY repeat or \
+    restate things you already said if the user asks, and you may go deeper on \
+    anything you summarized. If the answer genuinely isn't in the material, say so \
+    briefly rather than inventing it. No markdown, no lists, no code, no preamble, \
+    no quotation marks. Output ONLY the spoken answer.
+    """
+
     enum PendingKind { case question, plan }
 
     /// Summarize arbitrary clipboard text into one or two sentences. Returns nil on
@@ -109,14 +124,47 @@ struct ClaudeSummarizer {
                         userContent: userContent(context: context, spoken: alreadySpoken)) ?? noMoreInfoPhrase
     }
 
+    /// Answer a spoken ask as a multi-turn conversation: the agent's original
+    /// turns and what was spoken aloud become the opening exchange, any earlier
+    /// ask Q&A (`dialogue`, alternating user/assistant turns) is replayed, then
+    /// the new `message` is delivered. Returns nil on failure so the caller can
+    /// speak a short apology instead of a fabricated answer.
+    static func ask(context: [Turn], spoken: [String],
+                    dialogue: [Turn], message: String) async -> String? {
+        let transcript = context.map { "\($0.role.uppercased()): \($0.text)" }.joined(separator: "\n\n")
+        var messages: [[String: Any]] = [
+            ["role": "user",
+             "content": "Here is the coding agent turn you summarized aloud for me:\n\n"
+                + "--- AGENT CONVERSATION ---\n\n\(transcript)"],
+            ["role": "assistant",
+             "content": spoken.isEmpty ? "(the earlier spoken summary)" : spoken.joined(separator: " ")],
+        ]
+        // `dialogue` is always stored in user/assistant pairs, preserving the
+        // strict alternation the Messages API requires.
+        for turn in dialogue {
+            messages.append(["role": turn.role == "assistant" ? "assistant" : "user",
+                             "content": turn.text])
+        }
+        messages.append(["role": "user", "content": message])
+        return await callHaiku(instruction: askInstruction, messages: messages)
+    }
+
     private static func userContent(context: [Turn], spoken: [String]) -> String {
         let transcript = context.map { "\($0.role.uppercased()): \($0.text)" }.joined(separator: "\n\n")
         let already = spoken.isEmpty ? "(nothing yet)" : spoken.map { "- \($0)" }.joined(separator: "\n")
         return "ALREADY SPOKEN ALOUD (do not repeat these):\n\(already)\n\n--- CONVERSATION ---\n\n\(transcript)"
     }
 
-    /// Shared Haiku call. Returns trimmed text, or nil on auth/HTTP/parse failure.
+    /// Shared Haiku call for a single user message. Returns trimmed text, or nil
+    /// on auth/HTTP/parse failure.
     private static func callHaiku(instruction: String, userContent: String) async -> String? {
+        await callHaiku(instruction: instruction,
+                        messages: [["role": "user", "content": userContent]])
+    }
+
+    /// Shared Haiku call for a full message array (multi-turn). Returns trimmed
+    /// text, or nil on auth/HTTP/parse failure.
+    private static func callHaiku(instruction: String, messages: [[String: Any]]) async -> String? {
         guard let token = readOAuthToken() else { return nil }
         let body: [String: Any] = [
             "model": model, "max_tokens": 250,
@@ -124,7 +172,7 @@ struct ClaudeSummarizer {
                 ["type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."],
                 ["type": "text", "text": instruction],
             ],
-            "messages": [["role": "user", "content": userContent]],
+            "messages": messages,
         ]
         var req = URLRequest(url: url)
         req.httpMethod = "POST"

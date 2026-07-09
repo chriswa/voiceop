@@ -31,8 +31,9 @@ In:
   quick **Pause** toggle (for meetings).
 
 Out (deferred):
-- Command mode. Directing a reply to a named surface (tracked in the name registry design,
-  but not wired yet). Historical replay UI. On-device STT/TTS. Reimplementing Wispr login.
+- Historical replay UI. On-device STT/TTS. Reimplementing Wispr login.
+  (Command mode — including addressing an agent by call-sign and asking the summarizer about
+  its work — has since shipped; see [Voice commands](#voice-commands-command-mode).)
 - Formatting note: v1 **does** match Wispr's text formatting via their `/llm` endpoints
   (chosen over shipping raw ASR first).
 
@@ -125,6 +126,50 @@ This fixes "a TTS update arrives while I'm dictating and I miss it."
 
 **Provider boundaries** so Wispr and Cartesia are swappable: `Transcriber` (audio→text),
 `Speaker` (text→audio), each behind a protocol with the vendor client fully contained.
+
+---
+
+## Voice commands (command mode)
+
+Command mode (hold **Ctrl** with the dictation trigger) routes the transcript to
+`AppCoordinator.handleVoiceCommand` instead of pasting it. Recognition is a
+hand-written tokenizer + verb table (not an LLM classifier). Grammar is
+**name-first** — an optional leading call-sign, then the verb, then any args:
+
+    [name] <command> [args]
+
+| Command | Example | Effect |
+|---|---|---|
+| `focus` | `Apollo focus` | raise the agent's spaceterm surface (a bare `Apollo` is shorthand for the same) |
+| `repeat` | `Apollo repeat` | replay the agent's latest update (free, from cache) |
+| `more details` | `Apollo more details` | elaborate with NEW info beyond what was spoken (`ClaudeSummarizer.elaborate`) |
+| `ask <message>` | `Apollo ask: what was that second file?` | question the summarizer — a multi-turn Haiku call over the original context + what was spoken + the running ask thread (`ClaudeSummarizer.ask`) |
+| `skip` | `skip` | global: drop the clip playing now so playback advances |
+
+Rules:
+- **Optional name.** The first token is a call-sign only if it isn't itself a
+  command word (`AppCoordinator.commandHeads`); otherwise the command targets the
+  **last-referenced** session (the last agent that spoke). `skip` is global and
+  ignores any name.
+- **Bare call-sign = focus.** A name with no following command word (`"Apollo"`)
+  is treated as `Apollo focus` — the quickest way to raise a surface.
+- **Free-text payload.** `ask`'s message is sliced from the *original* transcript
+  (casing/punctuation preserved), not the punctuation-stripped tokens.
+- **`ask` vs `more details`.** `more details` forbids repeating anything already
+  spoken (it deepens a summary); `ask` is a genuine back-and-forth that MAY repeat
+  on request and answers the message directly. Each ask is stored on the target
+  `TTSHistoryEntry` (`asks`: alternating user/assistant `Turn`s) and is spoken as
+  a new entry, so `ask` / `more details` / `repeat` all chain off the answer.
+- **`ask` is read-only.** It questions the low-context Haiku summarizer, which
+  only knows the turn it summarized — it does *not* reach the real Claude Code
+  session. A future **`send`** verb (not yet built) is reserved for pushing a
+  message into the canonical session via spaceterm; the verb split keeps the
+  harmless read from the consequential write unambiguous by ear.
+- **Unrecognized** transcripts (a bare name, an empty `ask`, an unknown verb)
+  play the `unrecognized` cue and are not pasted.
+
+New argument-taking commands should keep this `[name] <verb> [args]` shape so the
+optional-name peel and last-referenced fallback apply uniformly.
 
 ---
 

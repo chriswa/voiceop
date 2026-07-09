@@ -38,4 +38,16 @@ final class HistoryStoreTests: XCTestCase {
         let c = HistoryStore.decode(Data(#"{"version": 1}"#.utf8))
         XCTAssertTrue(c.tts.isEmpty && c.stt.isEmpty && c.commands.isEmpty)
     }
+
+    func testLastReferencedSessionKeyDecodes() {
+        let json = #"{"version": 1, "lastReferencedSessionKey": "s1"}"#
+        let c = HistoryStore.decode(Data(json.utf8))
+        XCTAssertEqual(c.lastReferencedSessionKey, "s1", "restored last speaker survives")
+    }
+
+    func testOlderFileWithoutLastReferencedKeyIsNil() {
+        // Files written before "Focus last speaker" persistence lack the key.
+        let c = HistoryStore.decode(Data(#"{"version": 1, "tts": [], "stt": []}"#.utf8))
+        XCTAssertNil(c.lastReferencedSessionKey, "absent key defaults to nil, not a crash")
+    }
 }

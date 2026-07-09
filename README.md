@@ -66,23 +66,33 @@ also trigger emoji/dictation/input-switching.
 
 ## Voice commands (command mode — Ctrl+Fn)
 
-In command mode, dictate one of these. A verb with **no name** targets the
-**last-referenced** agent — the last one that spoke *or* that any tool
-(repeat / more details / focus) last acted on:
+In command mode, dictate `⟨name⟩ ⟨command⟩ ⟨args⟩` — grammar is **name-first**:
+an optional leading call-sign, then the verb. With **no name** the command
+targets the **last-referenced** agent — the last one that spoke *or* that any
+tool (repeat / more details / ask / focus) last acted on. Name homophones resolve
+(e.g. "Amber" → Ember):
 
-- **"Focus ⟨name⟩"** — raise that Claude surface in spaceterm. Name homophones
-  resolve (e.g. "Focus Amber" → Ember).
-- **"More details ⟨name⟩"** — re-summarize that surface's latest update with
+- **"⟨name⟩ focus"** — raise that Claude surface in spaceterm. Saying just the
+  bare call-sign (**"⟨name⟩"** with no verb) is shorthand for the same.
+- **"⟨name⟩ repeat"** — replay that surface's latest update (free, from cache).
+- **"⟨name⟩ more details"** — re-summarize that surface's latest update with
   *new* depth (doesn't repeat what was already said). Iterable; when there's
   nothing left it says "No more information to summarize."
-- **"Repeat ⟨name⟩"** — replay that surface's latest update (free, from cache).
+- **"⟨name⟩ ask ⟨message⟩"** — question the summarizer about that update in a
+  continuing conversation (it may repeat or go deeper on request). Read-only: it
+  talks only to the low-context Haiku summarizer, not the real Claude session.
+- **"skip"** — global; drop the clip playing now so playback advances.
 
 The menu-bar **Recent Updates → ⟨entry⟩** submenu offers **Replay**, **Focus**,
 and **More details** for the same actions by click.
 
-## Re-paste
+## Global shortcuts
 
-**⌘⌃V** re-pastes the last text Voice Operator pasted, into the frontmost app.
+Fire from any app (they run off the CGEvent tap, so no window focus needed):
+
+- **⌘⌃J** — focus the surface of the last agent that spoke (same as the menu-bar
+  **Focus ⟨name⟩** item; tracks whoever is speaking the moment narration starts).
+- **⌘⌃V** — re-paste the last text Voice Operator pasted, into the frontmost app.
 
 ## STT self-test (mic-free, one request)
 

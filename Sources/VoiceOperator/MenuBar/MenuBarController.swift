@@ -12,7 +12,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private let statusMenuItem = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
     private let skipItem = NSMenuItem(title: "Skip", action: #selector(skip), keyEquivalent: "n")
-    private let focusAgentItem = NSMenuItem(title: "Focus", action: #selector(focusAgent), keyEquivalent: "")
+    private let focusAgentItem = NSMenuItem(title: "Focus last speaker", action: #selector(focusAgent), keyEquivalent: "j")
     // Key equivalents here are purely the right-aligned shortcut HINT in the menu.
     // The shortcuts fire globally via the CGEvent tap (HotkeyMonitor), since a
     // menu-bar accessory holds no keyboard focus while its menu is closed. While
@@ -90,6 +90,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         skipItem.keyEquivalentModifierMask = Self.chordMask   // ⌘⌃N (hint only; tap fires it)
         menu.addItem(skipItem)
         focusAgentItem.target = self
+        focusAgentItem.keyEquivalentModifierMask = Self.chordMask   // ⌘⌃J (hint only; tap fires it)
         menu.addItem(focusAgentItem)
         menu.addItem(.separator())
         narrationMenuItem.target = self
@@ -155,11 +156,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         loginMenuItem.state = (launchAtLoginState?() ?? false) ? .on : .off
         announceBlocksItem.state = (announceBlocksState?() ?? false) ? .on : .off
         if let agent = focusAgentProvider?() {
-            focusAgentItem.title = "Focus \(agent.name)"
+            focusAgentItem.title = "Focus last speaker (\(agent.name))"
             focusAgentItem.representedObject = agent.sessionKey
             focusAgentItem.isEnabled = true
         } else {
-            focusAgentItem.title = "Focus (no agent yet)"
+            focusAgentItem.title = "Focus last speaker (none yet)"
             focusAgentItem.representedObject = nil
             focusAgentItem.isEnabled = false
         }

@@ -21,6 +21,17 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     /// Accepted transcriptions of the "skip" verb (drops the clip that was
     /// playing when this command began, so playback advances to the next update).
     private static let skipVerbs: Set<String> = ["skip", "skips", "skipped"]
+    /// Accepted transcriptions of the "ask" verb (question the low-context Haiku
+    /// summarizer about an update; everything after the verb is the spoken
+    /// message). Distinct from a future "send" verb that would push a message to
+    /// the real Claude Code session — "ask" is read-only, "send" would mutate.
+    private static let askVerbs: Set<String> = ["ask", "asks", "asked"]
+
+    /// Every word that can BEGIN a command. Grammar is name-first
+    /// ("[name] <command> [args]"), so a leading token that isn't one of these is
+    /// treated as the call-sign to address.
+    private static let commandHeads: Set<String> =
+        focusVerbs.union(repeatVerbs).union(skipVerbs).union(askVerbs).union(["more"])
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching")
@@ -90,6 +101,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboardOrHalt() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         hotkey.onSkip = { [weak self] in self?.arbiter.skipCurrent() }
+        hotkey.onFocusLast = { [weak self] in self?.focusLastAgent() }
         installHotkeyWhenTrusted()
 
         // Voice commands: a dictation that is a "<verb> [name]" command (rather
@@ -146,39 +158,62 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     // MARK: - Voice commands
 
-    /// Parse a finished dictation as a "<verb> [name]" command. Returns true if it
-    /// was a command (so it isn't pasted). Grammar (punctuation ignored):
-    ///   • raise/surface [name]   → raise a surface
-    ///   • more detail(s) [name]  → elaborate on an update
-    /// A verb with no name targets the last-played update (generalized so future
-    /// voice tools inherit the same last-target fallback).
+    /// Parse a finished dictation as a "[name] <command> [args]" command. Returns
+    /// true if it was a command (so it isn't pasted). Grammar (punctuation
+    /// ignored) is name-FIRST — an optional leading call-sign, then the verb:
+    ///   • [name] focus            → raise a surface
+    ///   • [name] repeat           → replay the latest update
+    ///   • [name] more detail(s)   → elaborate on an update
+    ///   • [name] ask <message>    → question the summarizer about an update
+    ///   • [name]                  → a bare call-sign is shorthand for "focus"
+    ///   • skip                    → global; drops whatever is playing now
+    /// Omitting the name targets the last-referenced update, so every command
+    /// inherits the same last-target fallback.
     private func handleVoiceCommand(_ transcript: String) async -> Bool {
         let words = transcript.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
-        guard let verb = words.first else { return false }
+        guard let first = words.first else { return false }
 
-        // "more detail(s) [name]"
-        if verb == "more", words.count >= 2, words[1] == "detail" || words[1] == "details" {
-            guard words.count <= 3 else { return false }        // verb (+ one name) only
-            await runMoreDetails(name: words.count == 3 ? words[2] : nil)
+        // Peel an optional leading call-sign: present only when the first token
+        // isn't itself a command word. The remainder is the command + its args.
+        let name: String? = Self.commandHeads.contains(first) ? nil : first
+        let rest = name == nil ? words : Array(words.dropFirst())
+        guard let head = rest.first else {
+            // A bare call-sign (name with no command word) is shorthand for "focus".
+            if let name { await runSurface(name: name); return true }
+            return false
+        }
+
+        // "[name] more detail(s)"
+        if head == "more", rest.count >= 2, rest[1] == "detail" || rest[1] == "details" {
+            guard rest.count == 2 else { return false }
+            await runMoreDetails(name: name)
             return true
         }
-        // "focus [name]"
-        if Self.focusVerbs.contains(verb) {
-            guard words.count <= 2 else { return false }
-            await runSurface(name: words.count == 2 ? words[1] : nil)
+        // "[name] focus"
+        if Self.focusVerbs.contains(head) {
+            guard rest.count == 1 else { return false }
+            await runSurface(name: name)
             return true
         }
-        // "repeat [name]"
-        if Self.repeatVerbs.contains(verb) {
-            guard words.count <= 2 else { return false }
-            await runRepeat(name: words.count == 2 ? words[1] : nil)
+        // "[name] repeat"
+        if Self.repeatVerbs.contains(head) {
+            guard rest.count == 1 else { return false }
+            await runRepeat(name: name)
             return true
         }
-        // "skip" — global; no name (it acts on whatever was just playing).
-        if Self.skipVerbs.contains(verb) {
-            guard words.count == 1 else { return false }
+        // "[name] ask <message>" — a free-text payload, so it's sliced from the
+        // ORIGINAL transcript (casing/punctuation preserved), not the tokens.
+        if Self.askVerbs.contains(head) {
+            let message = Self.askPayload(from: transcript)
+            guard !message.isEmpty else { return false }   // bare "ask" isn't actionable
+            await runAsk(name: name, message: message)
+            return true
+        }
+        // "skip" — global; acts on whatever is playing, so any name is ignored.
+        if Self.skipVerbs.contains(head) {
+            guard rest.count == 1 else { return false }
             arbiter.skipQueued()
             return true
         }
@@ -239,6 +274,36 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         } else {
             arbiter.moreDetails(id: nil)        // last-referenced session's latest
         }
+    }
+
+    /// Question the summarizer about a call-sign's latest update, or the
+    /// last-referenced update if no name.
+    private func runAsk(name: String?, message: String) async {
+        if let name {
+            guard let key = await registry.claudeSession(forName: name),
+                  let entry = arbiter.lastTTSEntry(forSessionKey: key) else {
+                Log.log("ask: no update for name '\(name)'"); return
+            }
+            arbiter.ask(id: entry.id, message: message)   // updates last-referenced
+        } else {
+            arbiter.ask(id: nil, message: message)        // last-referenced session's latest
+        }
+    }
+
+    /// Return the free-text message after the "ask" verb, verbatim. Matches the
+    /// FIRST "ask"/"asks"/"asked" (and any trailing separator like ":"), so an
+    /// optional leading call-sign is skipped over naturally. Empty when nothing
+    /// follows the verb.
+    private static func askPayload(from transcript: String) -> String {
+        let pattern = "\\bask(?:s|ed)?\\b[\\s:;,.\\-–—]*"
+        let range = NSRange(transcript.startIndex..., in: transcript)
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = re.firstMatch(in: transcript, range: range),
+              let matched = Range(match.range, in: transcript) else {
+            return ""
+        }
+        return String(transcript[matched.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var trustPollTimer: Timer?

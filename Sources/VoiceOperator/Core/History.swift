@@ -15,6 +15,10 @@ struct TTSHistoryEntry: Identifiable, Sendable, Codable {
     /// Every summary spoken in this depth chain, including `body` — fed back to
     /// the summarizer so "More details" adds new info without repeating.
     var priorSummaries: [String] = []
+    /// The running "Ask" dialogue for this update: alternating user message /
+    /// assistant answer turns, replayed so each ask continues the same
+    /// conversation with the summarizer. Empty until the first ask.
+    var asks: [Turn] = []
 
     var utterance: Utterance {
         Utterance(name: name, body: body, voiceID: voiceID, sessionKey: sessionKey)
@@ -37,6 +41,7 @@ extension TTSHistoryEntry {
         date = try c.decode(Date.self, forKey: .date)
         context = try c.decodeIfPresent([Turn].self, forKey: .context) ?? []
         priorSummaries = try c.decodeIfPresent([String].self, forKey: .priorSummaries) ?? []
+        asks = try c.decodeIfPresent([Turn].self, forKey: .asks) ?? []
     }
 }
 

@@ -105,7 +105,12 @@ final class AudioArbiter {
     private(set) var lastReferencedSessionKey: String?
 
     /// Note a session as referenced (for tools that don't play audio, e.g. surface).
-    func referenceSession(_ key: String?) { if let key { lastReferencedSessionKey = key } }
+    /// Persisted so "Focus last speaker" / ⌘⌃J survive a restart.
+    func referenceSession(_ key: String?) {
+        guard let key, key != lastReferencedSessionKey else { return }
+        lastReferencedSessionKey = key
+        saveState()
+    }
 
     private(set) var ttsHistory: [TTSHistoryEntry] = []
     private(set) var sttHistory: [STTHistoryEntry] = []
@@ -137,12 +142,20 @@ final class AudioArbiter {
         ttsHistory = loaded.tts
         sttHistory = loaded.stt
         commandHistory = loaded.commands
+        lastReferencedSessionKey = loaded.lastReferencedSessionKey   // restore "Focus last speaker"
         reapExpiredClips()   // clips may have aged past retention while the app was closed
+    }
+
+    /// Persist all durable arbiter state — the history lists plus the
+    /// last-referenced session (so "Focus last speaker" survives a restart).
+    private func saveState() {
+        historyStore.save(.init(tts: ttsHistory, stt: sttHistory, commands: commandHistory,
+                                lastReferencedSessionKey: lastReferencedSessionKey))
     }
 
     /// Persist + notify whenever any history list changes.
     private func historyChanged() {
-        historyStore.save(.init(tts: ttsHistory, stt: sttHistory, commands: commandHistory))
+        saveState()
         onHistoryChanged?()
     }
 
@@ -565,6 +578,41 @@ final class AudioArbiter {
             let next = TTSHistoryEntry(name: entry.name, body: detail, voiceID: entry.voiceID,
                                        sessionKey: entry.sessionKey, date: Date(),
                                        context: entry.context, priorSummaries: entry.priorSummaries + [detail])
+            insertTTS(next)
+            playOneOff(next.utterance)
+        }
+    }
+
+    /// Question the summarizer about an update: answer a spoken "ask" grounded in
+    /// the original context + what was said, then append the Q&A and speak the
+    /// answer as a new (further-askable) entry. With an explicit id, targets that
+    /// entry; with nil, the latest update of the last-referenced session.
+    func ask(id: UUID?, message: String) {
+        let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !msg.isEmpty else { Log.log("ask: empty message"); return }
+        let target: TTSHistoryEntry? = id.flatMap { tid in ttsHistory.first { $0.id == tid } }
+            ?? lastReferencedSessionKey.flatMap { lastTTSEntry(forSessionKey: $0) }
+        guard let entry = target else { Log.log("ask: no target entry"); return }
+        referenceSession(entry.sessionKey)
+        Task {
+            guard let answer = await ClaudeSummarizer.ask(context: entry.context,
+                                                          spoken: entry.priorSummaries,
+                                                          dialogue: entry.asks,
+                                                          message: msg) else {
+                Log.log("ask: no answer for \(entry.name)")
+                // Speak a short apology; don't extend the thread with a non-answer.
+                playOneOff(Utterance(name: entry.name, body: "Sorry, I couldn't answer that.",
+                                     voiceID: entry.voiceID, sessionKey: entry.sessionKey))
+                return
+            }
+            let dialogue = entry.asks + [
+                Turn(role: "user", text: msg, pos: 0, stopReason: nil),
+                Turn(role: "assistant", text: answer, pos: 0, stopReason: nil),
+            ]
+            let next = TTSHistoryEntry(name: entry.name, body: answer, voiceID: entry.voiceID,
+                                       sessionKey: entry.sessionKey, date: Date(),
+                                       context: entry.context, priorSummaries: entry.priorSummaries,
+                                       asks: dialogue)
             insertTTS(next)
             playOneOff(next.utterance)
         }

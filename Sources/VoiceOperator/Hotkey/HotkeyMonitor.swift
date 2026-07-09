@@ -45,6 +45,8 @@ final class HotkeyMonitor {
     var onSummarizeClipboard: (() -> Void)?
     /// Fired on ⌘⌃N — skip the clip playing now (no-op when nothing is playing).
     var onSkip: (() -> Void)?
+    /// Fired on ⌘⌃J — focus the surface of the last agent that spoke.
+    var onFocusLast: (() -> Void)?
 
     /// Suppresses the ⌘⌃ chord shortcuts while the status-bar menu is open. Those
     /// items carry real menu key equivalents (for the right-aligned shortcut hint),
@@ -66,6 +68,8 @@ final class HotkeyMonitor {
     private static let aKeycode: Int64 = 0
     // ⌘⌃N: N is keycode 45 (kVK_ANSI_N); requires Command + Control.
     private static let nKeycode: Int64 = 45
+    // ⌘⌃J: J is keycode 38 (kVK_ANSI_J); requires Command + Control.
+    private static let jKeycode: Int64 = 38
 
     // Fn (Globe): keycode 63 (kVK_Function), flagged by kCGEventFlagMaskSecondaryFn.
     private static let triggerKeycode: Int64 = 63
@@ -127,6 +131,7 @@ final class HotkeyMonitor {
                 case Self.sKeycode: onSpeakClipboard?()
                 case Self.aKeycode: onSummarizeClipboard?()
                 case Self.nKeycode: onSkip?()
+                case Self.jKeycode: onFocusLast?()
                 default: break
                 }
             }

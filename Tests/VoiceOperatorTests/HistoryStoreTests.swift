@@ -19,8 +19,8 @@ final class HistoryStoreTests: XCTestCase {
     }
 
     func testOlderFileWithoutNewFieldsStillLoads() {
-        // Pre-"More details" + pre-"Recent Commands": entries lack context/
-        // priorSummaries and the file has no `commands` list. Must load, not drop.
+        // An early file predating the context/priorSummaries fields and the
+        // `commands` list: entries lack those keys. Must load, not drop.
         let json = """
         {"version": 1, "stt": [],
          "tts": [{"id":"00000000-0000-0000-0000-000000000001","name":"Waldo",

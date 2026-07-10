@@ -9,11 +9,12 @@ struct TTSHistoryEntry: Identifiable, Sendable, Codable {
     let voiceID: String
     let sessionKey: String?
     let date: Date
-    /// The original Claude turns this summary was generated from — kept so
-    /// "More details" can re-run the summarizer on the same context.
+    /// The original Claude turns this summary was generated from — kept so an
+    /// "aside" can question the summarizer against the same context.
     var context: [Turn] = []
-    /// Every summary spoken in this depth chain, including `body` — fed back to
-    /// the summarizer so "More details" adds new info without repeating.
+    /// The summary spoken aloud for this update — fed to an "aside" as the prior
+    /// spoken context. Preserved unchanged across an aside chain, so a follow-up
+    /// aside is still grounded in the original narration rather than an answer.
     var priorSummaries: [String] = []
     /// The running "Ask" dialogue for this update: alternating user message /
     /// assistant answer turns, replayed so each ask continues the same

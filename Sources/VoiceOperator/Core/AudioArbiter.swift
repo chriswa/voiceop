@@ -411,8 +411,9 @@ final class AudioArbiter {
 
     // MARK: - TTS queue
 
-    /// New narration from the watcher: record a depth-able history entry (keeping
-    /// the original context for "More details") and add it to the unread list.
+    /// New narration from the watcher: record a history entry (keeping the
+    /// original context and the spoken summary so an "aside" can be grounded in
+    /// them) and add it to the unread list.
     /// Plays now if unmuted, otherwise becomes backlog.
     func narrate(_ utterance: Utterance, context: [Turn]) {
         let entry = TTSHistoryEntry(name: utterance.name, body: utterance.body,
@@ -554,33 +555,6 @@ final class AudioArbiter {
         guard let entry = ttsHistory.first(where: { $0.id == id }) else { return }
         referenceSession(entry.sessionKey)
         playOneOff(entry.utterance)
-    }
-
-    /// Ask for more depth on an update. With an explicit id, targets that entry;
-    /// with nil, the latest update of the last-referenced session. Re-runs the
-    /// summarizer on the original context + everything already spoken; adds a new
-    /// depth-able entry, or speaks the escape-hatch when exhausted.
-    func moreDetails(id: UUID?) {
-        let target: TTSHistoryEntry? = id.flatMap { tid in ttsHistory.first { $0.id == tid } }
-            ?? lastReferencedSessionKey.flatMap { lastTTSEntry(forSessionKey: $0) }
-        guard let entry = target else { Log.log("more-details: no target entry"); return }
-        referenceSession(entry.sessionKey)
-        Task {
-            let detail = await ClaudeSummarizer.elaborate(context: entry.context,
-                                                          alreadySpoken: entry.priorSummaries)
-            if ClaudeSummarizer.isNoMoreInfo(detail) {
-                Log.log("more-details: chain exhausted for \(entry.name)")
-                // Speak the escape-hatch once; don't create a depth-able entry.
-                playOneOff(Utterance(name: entry.name, body: detail, voiceID: entry.voiceID,
-                                     sessionKey: entry.sessionKey))
-                return
-            }
-            let next = TTSHistoryEntry(name: entry.name, body: detail, voiceID: entry.voiceID,
-                                       sessionKey: entry.sessionKey, date: Date(),
-                                       context: entry.context, priorSummaries: entry.priorSummaries + [detail])
-            insertTTS(next)
-            playOneOff(next.utterance)
-        }
     }
 
     /// Question the summarizer about an update: answer a spoken "ask" grounded in

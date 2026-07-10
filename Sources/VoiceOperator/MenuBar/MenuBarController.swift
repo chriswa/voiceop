@@ -3,7 +3,7 @@ import AppKit
 /// Owns the menu bar status item: a bullhorn silhouette that tints red while
 /// recording and green while playing audio. Hosts the dropdown menu: status,
 /// two independent toggles (dictation pause / narration mute), the recent-updates
-/// and recent-dictations history, and Quit.
+/// and recent-dictations history, a read-only "Command Patterns" reference, and Quit.
 ///
 /// History submenus are rebuilt on open from the supplied providers.
 @MainActor
@@ -61,7 +61,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var ttsReplayStateProvider: ((UUID) -> TTSEngine.AudioState)?
     var onReplayTTS: ((UUID) -> Void)?
     var onSurfaceTTS: ((UUID) -> Void)?
-    var onMoreDetailsTTS: ((UUID) -> Void)?
     var onRetrySTT: ((UUID) -> Void)?
     var onCopySTT: ((UUID) -> Void)?
     var commandHistoryProvider: (() -> [CommandHistoryEntry])?
@@ -74,6 +73,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     /// The ⌘⌃ chord shared by every hinted shortcut (Mute, Speak, Summarize).
     private static let chordMask: NSEvent.ModifierFlags = [.command, .control]
+
+    /// Read-only documentation of the voice-command grammar for the "Command
+    /// Patterns" menu — these items do nothing when clicked. Prose mirror of
+    /// `AppCoordinator.handleVoiceCommand`; keep it in sync when the grammar changes.
+    /// `⟨…⟩` marks a spoken placeholder (an agent call-sign or free text).
+    private static let commandPatterns: [(pattern: String, help: String)] = [
+        ("⟨name⟩", "Focus that agent's surface"),
+        ("⟨name⟩ repeat", "Replay its latest update"),
+        ("⟨name⟩ ⟨message⟩", "Ask the summarizer about the update"),
+        ("skip", "Drop the clip playing now"),
+    ]
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -104,6 +114,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(sttHistoryItem)
         cmdHistoryItem.submenu = NSMenu()
         menu.addItem(cmdHistoryItem)
+        let patternsItem = NSMenuItem(title: "Command Patterns", action: nil, keyEquivalent: "")
+        patternsItem.submenu = buildCommandPatternsMenu()   // static; documentation only
+        menu.addItem(patternsItem)
         menu.addItem(.separator())
         // Clipboard actions. The key equivalents render the right-aligned shortcut
         // hint; the shortcuts themselves fire via the CGEvent tap (HotkeyMonitor).
@@ -192,11 +205,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 replay.target = self; replay.representedObject = e.id
                 let surface = NSMenuItem(title: "Focus", action: #selector(surfaceTTS(_:)), keyEquivalent: "")
                 surface.target = self; surface.representedObject = e.id
-                let more = NSMenuItem(title: "More details", action: #selector(moreDetailsTTS(_:)), keyEquivalent: "")
-                more.target = self; more.representedObject = e.id
                 actions.addItem(replay)
                 actions.addItem(surface)
-                actions.addItem(more)
                 item.submenu = actions
                 sub.addItem(item)
             }
@@ -256,6 +266,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         cmdHistoryItem.submenu = sub
     }
 
+    /// Build the static "Command Patterns" reference submenu: every item is
+    /// disabled (documentation, not actions). Framed by a name-first reminder and
+    /// the omit-the-name fallback so the grammar reads top to bottom.
+    private func buildCommandPatternsMenu() -> NSMenu {
+        let sub = NSMenu()
+        sub.addItem(disabledItem("Say the agent's name first:  ⟨name⟩ …"))
+        sub.addItem(.separator())
+        for p in Self.commandPatterns {
+            sub.addItem(disabledItem("\(p.pattern)  —  \(p.help)"))
+        }
+        sub.addItem(.separator())
+        sub.addItem(disabledItem("No name → your words go to the last agent"))
+        return sub
+    }
+
     private func disabledItem(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
@@ -269,9 +294,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
     @objc private func surfaceTTS(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? UUID { onSurfaceTTS?(id) }
-    }
-    @objc private func moreDetailsTTS(_ sender: NSMenuItem) {
-        if let id = sender.representedObject as? UUID { onMoreDetailsTTS?(id) }
     }
     @objc private func retryCommand(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? UUID { onRetryCommand?(id) }

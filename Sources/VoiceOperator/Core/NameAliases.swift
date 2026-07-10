@@ -70,6 +70,7 @@ enum NameAliases {
         "harvy": "harvey",
         "hazil": "hazel",
         "hazl": "hazel",
+        "heaven": "evan",
         "heidy": "heidi",
         "hendry": "henry",
         "hennry": "henry",

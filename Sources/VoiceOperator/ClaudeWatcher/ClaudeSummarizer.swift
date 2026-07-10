@@ -20,19 +20,6 @@ struct ClaudeSummarizer {
     no code, no preamble, no quotation marks. Output ONLY the spoken update.
     """
 
-    private static let elaborateInstruction = """
-    You are elaborating on a coding agent's turn that has ALREADY been summarized \
-    aloud for the user. You are given the full conversation turn plus a list of \
-    everything already spoken aloud about it. In one or two short sentences of \
-    plain spoken English, provide ADDITIONAL detail that has NOT already been \
-    spoken — go deeper: specifics, caveats, reasoning, or next steps not yet \
-    mentioned. Do NOT repeat or rephrase anything in the already-spoken list. If \
-    there is genuinely no further meaningful detail to add beyond what was already \
-    said, respond with EXACTLY: No more information to summarize. No markdown, no \
-    lists, no code, no preamble, no quotation marks. Output ONLY the spoken \
-    elaboration (or the exact no-more-information sentence).
-    """
-
     // A pending block is NOT a completed turn: the agent has paused and is
     // waiting on the user. The summary must relay the ask itself — including the
     // real multiple-choice options (the model may summarize them) — but it must
@@ -65,10 +52,10 @@ struct ClaudeSummarizer {
     ONLY the summary.
     """
 
-    // Unlike `elaborate`, an ask is a genuine back-and-forth: the user may ask to
-    // repeat something already said, or dig into a specific point. So this
-    // instruction explicitly PERMITS repetition and answers the message directly,
-    // rather than forbidding overlap with what was already spoken.
+    // An ask is a genuine back-and-forth: the user may ask to repeat something
+    // already said, or dig into a specific point. So this instruction explicitly
+    // PERMITS repetition and answers the message directly, rather than forbidding
+    // overlap with what was already spoken.
     private static let askInstruction = """
     You already summarized a coding agent's recent turn aloud for the user, and \
     the user is now asking spoken questions about it — a continuing conversation. \
@@ -102,26 +89,12 @@ struct ClaudeSummarizer {
                                userContent: userContent(context: context, spoken: [])) ?? fallback
     }
 
-    /// The escape-hatch sentence the model returns when a depth chain is exhausted.
-    static let noMoreInfoPhrase = "No more information to summarize."
-    static func isNoMoreInfo(_ text: String) -> Bool {
-        text.lowercased().contains("no more information")
-    }
-
     /// `context` is the turns since the previous end-of-turn; `spoken` are recent
     /// summaries already read aloud (so Haiku doesn't repeat itself).
     static func summarize(context: [Turn], spoken: [String]) async -> String {
         let latest = context.last?.text ?? ""
         return await callHaiku(instruction: instruction,
                                userContent: userContent(context: context, spoken: spoken)) ?? latest
-    }
-
-    /// Re-run the summarizer on the same context to add NEW detail beyond what was
-    /// already spoken. On failure, returns the no-more-information sentence so a
-    /// dead end never fabricates content or extends the chain.
-    static func elaborate(context: [Turn], alreadySpoken: [String]) async -> String {
-        await callHaiku(instruction: elaborateInstruction,
-                        userContent: userContent(context: context, spoken: alreadySpoken)) ?? noMoreInfoPhrase
     }
 
     /// Answer a spoken ask as a multi-turn conversation: the agent's original

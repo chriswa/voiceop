@@ -9,8 +9,8 @@ import Foundation
 struct HistoryStore {
     /// Bump only for an INCOMPATIBLE shape change. Additive fields don't count —
     /// TTSHistoryEntry decodes new fields leniently (decodeIfPresent), so older
-    /// files (e.g. pre-"More details", which lacked context/priorSummaries) still
-    /// load. Kept at 1 for that reason.
+    /// files (e.g. early ones that lacked context/priorSummaries) still load.
+    /// Kept at 1 for that reason.
     private static let version = 1
 
     /// Shared app-support directory (also used for the STT clip store).

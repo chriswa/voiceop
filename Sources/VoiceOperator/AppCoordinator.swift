@@ -14,24 +14,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var permissionWatcher: PermissionWatcher?
     private var lastSpeaking: Utterance?
 
-    /// Accepted transcriptions of the "focus" verb (raises a spaceterm surface).
+    /// The three reserved single-word commands. A lone one of these (after an
+    /// optional call-sign) is that command; ANY other words are a free-text aside.
+    /// Each keeps its ‑s/‑ed transcription variants to absorb STT wobble.
     private static let focusVerbs: Set<String> = ["focus", "focuses", "focused"]
-    /// Accepted transcriptions of the "repeat" verb (re-plays the cached audio).
     private static let repeatVerbs: Set<String> = ["repeat", "repeats", "repeated"]
-    /// Accepted transcriptions of the "skip" verb (drops the clip that was
-    /// playing when this command began, so playback advances to the next update).
+    /// "skip" drops the clip that was playing when this command began, so playback
+    /// advances to the next update.
     private static let skipVerbs: Set<String> = ["skip", "skips", "skipped"]
-    /// Accepted transcriptions of the "ask" verb (question the low-context Haiku
-    /// summarizer about an update; everything after the verb is the spoken
-    /// message). Distinct from a future "send" verb that would push a message to
-    /// the real Claude Code session — "ask" is read-only, "send" would mutate.
-    private static let askVerbs: Set<String> = ["ask", "asks", "asked"]
-
-    /// Every word that can BEGIN a command. Grammar is name-first
-    /// ("[name] <command> [args]"), so a leading token that isn't one of these is
-    /// treated as the call-sign to address.
-    private static let commandHeads: Set<String> =
-        focusVerbs.union(repeatVerbs).union(skipVerbs).union(askVerbs).union(["more"])
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching")
@@ -87,7 +77,6 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                   let key = self.arbiter.ttsHistory.first(where: { $0.id == id })?.sessionKey else { return }
             self.focusSurface(key: key, source: "history")
         }
-        menuBar.onMoreDetailsTTS = { [weak self] id in self?.arbiter.moreDetails(id: id) }
         menuBar.onRetrySTT = { [weak self] id in self?.arbiter.retrySTT(id: id) }
         menuBar.onCopySTT = { [weak self] id in self?.arbiter.copySTT(id: id) }
         menuBar.commandHistoryProvider = { [weak self] in self?.arbiter.commandHistory ?? [] }
@@ -111,7 +100,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
 
         // Claude Code narration. The watcher runs off-main and hops to main to
-        // record + play each update (with its context, for "More details").
+        // record + play each update (with its context, so an "aside" can question it).
         let arbiter = self.arbiter
         // Shared "waiting on Claude" signal: both watchers turn the icon blue (and
         // sound the entry cue) around their Haiku summarization, matching the
@@ -158,66 +147,47 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     // MARK: - Voice commands
 
-    /// Parse a finished dictation as a "[name] <command> [args]" command. Returns
-    /// true if it was a command (so it isn't pasted). Grammar (punctuation
-    /// ignored) is name-FIRST — an optional leading call-sign, then the verb:
-    ///   • [name] focus            → raise a surface
-    ///   • [name] repeat           → replay the latest update
-    ///   • [name] more detail(s)   → elaborate on an update
-    ///   • [name] ask <message>    → question the summarizer about an update
-    ///   • [name]                  → a bare call-sign is shorthand for "focus"
-    ///   • skip                    → global; drops whatever is playing now
-    /// Omitting the name targets the last-referenced update, so every command
-    /// inherits the same last-target fallback.
+    /// Parse a finished command-mode dictation. Returns true if it resolved to an
+    /// action (false plays the "unrecognized" cue). Grammar (punctuation ignored),
+    /// name-FIRST — an optional leading call-sign, then either a reserved word or
+    /// free text:
+    ///   • [name]                 → focus that agent's surface (bare call-sign)
+    ///   • [name] focus           → the same, said explicitly
+    ///   • [name] repeat          → replay the agent's latest update
+    ///   • [name] <anything else> → an aside: question the summarizer about it
+    ///   • skip                   → global; drops whatever is playing now
+    /// The leading token is a call-sign ONLY if it's a currently-active agent name
+    /// (resolved via the registry, homophones included); otherwise there is no name
+    /// and the whole utterance — a lone message with no reserved word — becomes an
+    /// aside to the last-referenced agent.
     private func handleVoiceCommand(_ transcript: String) async -> Bool {
         let words = transcript.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
         guard let first = words.first else { return false }
 
-        // Peel an optional leading call-sign: present only when the first token
-        // isn't itself a command word. The remainder is the command + its args.
-        let name: String? = Self.commandHeads.contains(first) ? nil : first
-        let rest = name == nil ? words : Array(words.dropFirst())
-        guard let head = rest.first else {
-            // A bare call-sign (name with no command word) is shorthand for "focus".
-            if let name { await runSurface(name: name); return true }
-            return false
+        // Name-first: the leading token addresses an agent only if it's a known,
+        // active call-sign. Otherwise there's no name and the entire utterance
+        // targets the last-referenced agent (so free text falls through to aside).
+        let named = await registry.claudeSession(forName: first) != nil
+        let name: String? = named ? first : nil
+        let rest = named ? Array(words.dropFirst()) : words
+
+        // Bare call-sign (name with nothing after it) → focus.
+        guard let verb = rest.first else { return await runSurface(name: name) }
+
+        // A LONE reserved word is that command; anything else is a free-text aside.
+        if rest.count == 1 {
+            if Self.focusVerbs.contains(verb) { return await runSurface(name: name) }
+            if Self.repeatVerbs.contains(verb) { return await runRepeat(name: name) }
+            if Self.skipVerbs.contains(verb) { arbiter.skipQueued(); return true }
         }
 
-        // "[name] more detail(s)"
-        if head == "more", rest.count >= 2, rest[1] == "detail" || rest[1] == "details" {
-            guard rest.count == 2 else { return false }
-            await runMoreDetails(name: name)
-            return true
-        }
-        // "[name] focus"
-        if Self.focusVerbs.contains(head) {
-            guard rest.count == 1 else { return false }
-            await runSurface(name: name)
-            return true
-        }
-        // "[name] repeat"
-        if Self.repeatVerbs.contains(head) {
-            guard rest.count == 1 else { return false }
-            await runRepeat(name: name)
-            return true
-        }
-        // "[name] ask <message>" — a free-text payload, so it's sliced from the
-        // ORIGINAL transcript (casing/punctuation preserved), not the tokens.
-        if Self.askVerbs.contains(head) {
-            let message = Self.askPayload(from: transcript)
-            guard !message.isEmpty else { return false }   // bare "ask" isn't actionable
-            await runAsk(name: name, message: message)
-            return true
-        }
-        // "skip" — global; acts on whatever is playing, so any name is ignored.
-        if Self.skipVerbs.contains(head) {
-            guard rest.count == 1 else { return false }
-            arbiter.skipQueued()
-            return true
-        }
-        return false
+        // Everything else → an aside. The message is the ORIGINAL transcript
+        // (casing/punctuation preserved) with the leading call-sign, if any, dropped.
+        let message = Self.asideMessage(from: transcript, droppingLeadingName: name)
+        guard !message.isEmpty else { return false }
+        return await runAside(name: name, message: message)
     }
 
     /// The session a tool targets: the named call-sign, or the last-referenced
@@ -228,10 +198,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     /// Raise a surface by call-sign, or the last-referenced session if no name.
-    private func runSurface(name: String?) async {
+    /// Returns false (→ "unrecognized" cue) when there's no such target.
+    private func runSurface(name: String?) async -> Bool {
         let label = name ?? "last-referenced"
-        guard let key = await targetSessionKey(name) else { Log.log("surface: no target (\(label))"); return }
+        guard let key = await targetSessionKey(name) else { Log.log("surface: no target (\(label))"); return false }
         focusSurface(key: key, source: "voice: \(label)")
+        return true
     }
 
     /// Focus the surface of the last agent that spoke (⌘⌃J) — the same
@@ -254,56 +226,41 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     /// Replay a call-sign's latest update (free, from cache), or the
-    /// last-referenced session if no name.
-    private func runRepeat(name: String?) async {
+    /// last-referenced session if no name. Returns false when there's no update.
+    private func runRepeat(name: String?) async -> Bool {
         guard let key = await targetSessionKey(name),
               let entry = arbiter.lastTTSEntry(forSessionKey: key) else {
-            Log.log("repeat: no target (\(name ?? "last-referenced"))"); return
+            Log.log("repeat: no target (\(name ?? "last-referenced"))"); return false
         }
         arbiter.replayTTS(id: entry.id)   // updates last-referenced
-    }
-
-    /// Elaborate on a call-sign's latest update, or the last-referenced if no name.
-    private func runMoreDetails(name: String?) async {
-        if let name {
-            guard let key = await registry.claudeSession(forName: name),
-                  let entry = arbiter.lastTTSEntry(forSessionKey: key) else {
-                Log.log("more-details: no update for name '\(name)'"); return
-            }
-            arbiter.moreDetails(id: entry.id)   // updates last-referenced
-        } else {
-            arbiter.moreDetails(id: nil)        // last-referenced session's latest
-        }
+        return true
     }
 
     /// Question the summarizer about a call-sign's latest update, or the
-    /// last-referenced update if no name.
-    private func runAsk(name: String?, message: String) async {
-        if let name {
-            guard let key = await registry.claudeSession(forName: name),
-                  let entry = arbiter.lastTTSEntry(forSessionKey: key) else {
-                Log.log("ask: no update for name '\(name)'"); return
-            }
-            arbiter.ask(id: entry.id, message: message)   // updates last-referenced
-        } else {
-            arbiter.ask(id: nil, message: message)        // last-referenced session's latest
+    /// last-referenced update if no name. Returns false when there's no update to
+    /// question (unknown name, or nothing referenced yet).
+    private func runAside(name: String?, message: String) async -> Bool {
+        guard let key = await targetSessionKey(name),
+              let entry = arbiter.lastTTSEntry(forSessionKey: key) else {
+            Log.log("aside: no target (\(name ?? "last-referenced"))"); return false
         }
+        arbiter.ask(id: entry.id, message: message)   // updates last-referenced
+        return true
     }
 
-    /// Return the free-text message after the "ask" verb, verbatim. Matches the
-    /// FIRST "ask"/"asks"/"asked" (and any trailing separator like ":"), so an
-    /// optional leading call-sign is skipped over naturally. Empty when nothing
-    /// follows the verb.
-    private static func askPayload(from transcript: String) -> String {
-        let pattern = "\\bask(?:s|ed)?\\b[\\s:;,.\\-–—]*"
-        let range = NSRange(transcript.startIndex..., in: transcript)
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = re.firstMatch(in: transcript, range: range),
-              let matched = Range(match.range, in: transcript) else {
-            return ""
+    /// The free-text aside message, taken from the ORIGINAL transcript so casing
+    /// and punctuation survive. When a call-sign led the utterance it's dropped
+    /// (along with the separator it left, e.g. "Apollo, …"); otherwise the whole
+    /// transcript is the message.
+    private static func asideMessage(from transcript: String, droppingLeadingName name: String?) -> String {
+        var text = transcript
+        if let name, let r = text.range(of: name, options: [.caseInsensitive]) {
+            text = String(text[r.upperBound...])   // drop the leading call-sign
         }
-        return String(transcript[matched.upperBound...])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip whatever separator/whitespace the name left in front of the message.
+        let leading = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ":;,.-–—"))
+        while let c = text.unicodeScalars.first, leading.contains(c) { text.unicodeScalars.removeFirst() }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var trustPollTimer: Timer?

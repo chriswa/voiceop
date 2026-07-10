@@ -80,6 +80,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// `⟨…⟩` marks a spoken placeholder (an agent call-sign or free text).
     private static let commandPatterns: [(pattern: String, help: String)] = [
         ("⟨name⟩", "Focus that agent's surface"),
+        ("⟨name⟩ focus", "Focus it (explicit synonym)"),
         ("⟨name⟩ repeat", "Replay its latest update"),
         ("⟨name⟩ ⟨message⟩", "Ask the summarizer about the update"),
         ("skip", "Drop the clip playing now"),

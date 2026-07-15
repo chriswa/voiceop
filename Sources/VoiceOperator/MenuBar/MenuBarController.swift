@@ -1,4 +1,5 @@
 import AppKit
+import Carbon   // IsSecureEventInputEnabled()
 
 /// Owns the menu bar status item: a bullhorn silhouette that tints red while
 /// recording and green while playing audio. Hosts the dropdown menu: status,
@@ -11,6 +12,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private let statusMenuItem = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
+    /// Shown only while another app holds macOS Secure Event Input — which blocks
+    /// our global CGEvent tap, so every hotkey (Fn dictation + the ⌘⌃ chords) is
+    /// silently dead until the holder releases it. See `pollSecureInput`.
+    private let secureInputItem = NSMenuItem(
+        title: "⚠︎ Secure input active — hotkeys blocked", action: nil, keyEquivalent: "")
     private let skipItem = NSMenuItem(title: "Skip", action: #selector(skip), keyEquivalent: "n")
     private let focusAgentItem = NSMenuItem(title: "Focus last speaker", action: #selector(focusAgent), keyEquivalent: "j")
     // Key equivalents here are purely the right-aligned shortcut HINT in the menu.
@@ -70,6 +76,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private(set) var isNarrationMuted = false
     private var currentStatus: OperatorStatus = .idle
     private var unreadCount = 0
+    /// Live Secure Event Input state, polled on a timer (there's no change
+    /// notification for it). Drives the lock overlay + the `secureInputItem`.
+    private var secureInputActive = false
+    private var secureInputTimer: Timer?
 
     /// The ⌘⌃ chord shared by every hinted shortcut (Mute, Speak, Summarize).
     private static let chordMask: NSEvent.ModifierFlags = [.command, .control]
@@ -91,12 +101,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         super.init()
         buildMenu()
         refreshIcon()
+        // Poll Secure Event Input (no notification exists); ~1s is imperceptible
+        // yet catches a stuck holder quickly. pollSecureInput no-ops on no change.
+        secureInputTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollSecureInput() }
+        }
+        pollSecureInput()   // reflect the state at launch, not one tick later
     }
 
     private func buildMenu() {
         menu.delegate = self
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        secureInputItem.isEnabled = false
+        secureInputItem.isHidden = true
+        secureInputItem.toolTip = "Another app (often 1Password, or a password/sudo prompt) has turned on "
+            + "macOS Secure Event Input, which blocks Voice Operator's global hotkeys. "
+            + "Dismiss that field, or lock and unlock the screen, to clear it."
+        menu.addItem(secureInputItem)
         skipItem.target = self
         skipItem.keyEquivalentModifierMask = Self.chordMask   // ⌘⌃N (hint only; tap fires it)
         menu.addItem(skipItem)
@@ -163,6 +185,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // Rebuild history submenus each time the menu opens (fresh ages/entries).
     func menuWillOpen(_ menu: NSMenu) {
         onMenuOpenChanged?(true)   // menu handles its own key equivalents now; mute the tap's copy
+        pollSecureInput()          // freshen the warning row the instant the menu opens
         rebuildTTSHistory()
         rebuildSTTHistory()
         rebuildCommandHistory()
@@ -372,9 +395,25 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
     }
 
+    /// Sample Secure Event Input and, on a change, update the lock overlay and the
+    /// menu warning row. When ON, some app has redirected keyboard input to a
+    /// protected field and macOS stops delivering keystrokes to session event taps
+    /// — so our hotkeys go dead through no fault of ours. It flips on legitimately
+    /// (any password field / sudo prompt), so the overlay reflects the raw state;
+    /// a lit lock while you're NOT typing a password means a holder is stuck on.
+    private func pollSecureInput() {
+        let active = IsSecureEventInputEnabled()
+        guard active != secureInputActive else { return }
+        secureInputActive = active
+        Log.log("secure event input \(active ? "ON — global hotkeys blocked by another app" : "OFF")")
+        secureInputItem.isHidden = !active
+        refreshIcon()
+    }
+
     private func refreshIcon() {
         guard let button = statusItem.button else { return }
-        button.image = Self.icon(status: currentStatus, muted: isNarrationMuted, unread: unreadCount)
+        button.image = Self.icon(status: currentStatus, muted: isNarrationMuted,
+                                 unread: unreadCount, secureInput: secureInputActive)
         button.image?.accessibilityDescription = currentStatus.accessibilityLabel
         statusMenuItem.title = currentStatus.accessibilityLabel
     }
@@ -389,11 +428,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Every state renders onto the same canvas (the symbol's natural size) so
     /// the menu-bar item never changes width — a width change here shifts every
     /// icon to its left in the menu bar.
-    private static func icon(status: OperatorStatus, muted: Bool, unread: Int) -> NSImage {
+    private static func icon(status: OperatorStatus, muted: Bool, unread: Int, secureInput: Bool) -> NSImage {
         let base = bullhornBase()
         let hasBadge = unread > 0
-        // Pure idle, unmuted, no badge → template (adapts to light/dark menu bar).
-        let isTemplate = status.tint == nil && !muted && !hasBadge
+        // Pure idle, unmuted, no badge, no lock → template (adapts to light/dark
+        // menu bar). The lock is drawn in its own fixed colors, so it forces the
+        // non-template path just like a tint/badge does.
+        let isTemplate = status.tint == nil && !muted && !hasBadge && !secureInput
         let color = status.tint ?? .labelColor
         let img = NSImage(size: base.size, flipped: false) { rect in
             base.draw(in: rect)
@@ -407,6 +448,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 drawProhibition(in: square, color: color)
             }
             if hasBadge { drawBadge(unread, centeredAtBottomOf: rect) }
+            // Drawn last so it sits atop any tint fill and reads at a glance.
+            if secureInput { drawSecureInputLock(topRightOf: rect) }
             return true
         }
         img.isTemplate = isTemplate
@@ -434,6 +477,37 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         line.line(to: NSPoint(x: c.x + k, y: c.y - k))
         line.lineWidth = 1.6
         line.stroke()
+    }
+
+    /// A small amber lock disc in the top-right corner, signalling that Secure
+    /// Event Input is active (our hotkeys are being blocked). Top-right keeps it
+    /// clear of the centered mute prohibition and the bottom-centered unread badge.
+    /// Amber (not red): it lights up during ordinary password entry too, so it's a
+    /// "heads up" state, not an error. White glyph on a filled disc guarantees
+    /// contrast over the megaphone regardless of menu-bar appearance.
+    private static func drawSecureInputLock(topRightOf canvas: NSRect) {
+        let config = NSImage.SymbolConfiguration(pointSize: 7, weight: .bold)
+        guard let lock = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Secure input active")?
+            .withSymbolConfiguration(config) else { return }
+        let glyph = tinted(lock, .white)
+        let d = glyph.size.height + 3
+        let disc = NSRect(x: canvas.maxX - d, y: canvas.maxY - d, width: d, height: d)
+        NSColor.systemOrange.setFill()
+        NSBezierPath(ovalIn: disc).fill()
+        let origin = NSPoint(x: disc.midX - glyph.size.width / 2, y: disc.midY - glyph.size.height / 2)
+        glyph.draw(at: origin, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+
+    /// A recolored copy of a (template) symbol image — fill the symbol's alpha with
+    /// `color` and return a standalone image, so it composites without bleeding the
+    /// tint onto whatever it's later drawn over.
+    private static func tinted(_ image: NSImage, _ color: NSColor) -> NSImage {
+        NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
     }
 
     /// A small red badge with the unread count, bottom-centered in the canvas.

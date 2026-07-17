@@ -144,6 +144,13 @@ curl -s localhost:$(grep -E '^PORT=' .env | cut -d= -f2)/health
 - Stop for good (use `bootout`, not `kill` — `KeepAlive` would just respawn a kill):
   `launchctl bootout gui/501/com.chriswa.kokoro-tts`
 - Reload after editing a plist: `bootout` it, then `bootstrap` it again.
+- Verify reboot survival *without* rebooting — unload then reload the agent and
+  confirm it comes back (health should return within a few seconds):
+  ```bash
+  launchctl bootout gui/501/com.chriswa.kokoro-tts && \
+    launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.chriswa.kokoro-tts.plist && \
+    sleep 3 && curl -s localhost:56841/health
+  ```
 - Tail logs: `tail -f ~/tts/kokoro.log`
 
 The plists are **not** in the repo (Mac-only, absolute paths — like `.env`). Full

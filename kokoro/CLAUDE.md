@@ -41,8 +41,12 @@ the box you're on before changing anything, and keep changes portable across bot
 - **Port:** **56841** — a fixed high port chosen because the 3000 range is
   crowded with other local services here. Standardize other local services on
   56841. Set via `.env` (see below), NOT by editing the code default.
-- **Run it:** `./venv_kokoro/bin/python kokoro_server.py` (reads `.env`
-  automatically). Nothing is set up to survive reboot — it's launched manually.
+- **Run it:** managed by **launchd** — starts at login, survives reboot, and
+  auto-restarts on crash (see "Boot persistence & daily restart (Mac)" below).
+  For ad-hoc debugging you can still run it in the foreground with
+  `./venv_kokoro/bin/python kokoro_server.py` (reads `.env` automatically) — but
+  `launchctl bootout gui/501/com.chriswa.kokoro-tts` first so the two don't fight
+  over the port.
 
 ---
 
@@ -99,6 +103,129 @@ PYTORCH_ENABLE_MPS_FALLBACK=1
 
 ---
 
+## Boot persistence & daily restart (Mac)
+
+The Mac instance runs under **launchd**, not a terminal. Two user LaunchAgents in
+`~/Library/LaunchAgents/` (UID here is **501** — check yours with `id -u` and
+adjust the `gui/<uid>` targets and the plist's `gui/501/...` line if different):
+
+- **`com.chriswa.kokoro-tts.plist`** — the server. `RunAtLoad` (starts at login /
+  after reboot) + `KeepAlive` (respawns within ~5 s on crash or kill). launchd
+  owns the process (PPID 1). Logs → `~/tts/kokoro.log`. `PORT` / `KOKORO_DEVICE`
+  still come from `.env`, so the plist stays device-agnostic.
+- **`com.chriswa.kokoro-tts-restart.plist`** — a `StartCalendarInterval` trigger
+  at **02:00** daily that runs `launchctl kickstart -k` on the server. If the Mac
+  is asleep (lid closed) at 2am, launchd coalesces the missed interval and fires
+  it on the **next wake**. Logs → `~/tts/kokoro-restart.log`.
+
+**Why the daily restart:** on MPS, PyTorch leaks memory via a shape-keyed
+MPSGraph cache with no eviction (pytorch/pytorch #181213, #164299). A long-lived
+server synthesizing variable-length text grows unbounded — observed **~19 GB
+after 4 days**. `torch.mps.empty_cache()` does *not* reclaim it. The server code
+itself is clean (one shared `KModel`, one `KPipeline` per language, cached
+voicepacks), so recycling the process daily is the reliable mitigation; it resets
+to the ~1.8 GB baseline. CPU has no such leak but is ~3.7× slower (RTF 0.15 vs
+0.042 measured here), so we stay on MPS and just restart.
+
+**Set it up (fresh Mac, or after wiping `~/Library/LaunchAgents`):**
+```bash
+pkill -f kokoro_server.py                      # stop any manual instance (frees the port)
+# ...create the two plists in ~/Library/LaunchAgents/ (full bodies below)...
+plutil -lint ~/Library/LaunchAgents/com.chriswa.kokoro-tts*.plist   # sanity-check XML
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.chriswa.kokoro-tts.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.chriswa.kokoro-tts-restart.plist
+# verify:
+launchctl print gui/$(id -u)/com.chriswa.kokoro-tts | grep -E 'state|pid'
+curl -s localhost:$(grep -E '^PORT=' .env | cut -d= -f2)/health
+```
+
+**Manage it:**
+- Restart now: `launchctl kickstart -k gui/501/com.chriswa.kokoro-tts`
+- Stop for good (use `bootout`, not `kill` — `KeepAlive` would just respawn a kill):
+  `launchctl bootout gui/501/com.chriswa.kokoro-tts`
+- Reload after editing a plist: `bootout` it, then `bootstrap` it again.
+- Tail logs: `tail -f ~/tts/kokoro.log`
+
+The plists are **not** in the repo (Mac-only, absolute paths — like `.env`). Full
+bodies for reproduction:
+
+<details><summary><code>com.chriswa.kokoro-tts.plist</code></summary>
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chriswa.kokoro-tts</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/chriswaddell/tts/venv_kokoro/bin/python</string>
+        <string>-W</string>
+        <string>ignore</string>
+        <string>/Users/chriswaddell/tts/kokoro_server.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/chriswaddell/tts</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_CA.UTF-8</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/chriswaddell/tts/kokoro.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chriswaddell/tts/kokoro.log</string>
+</dict>
+</plist>
+```
+</details>
+
+<details><summary><code>com.chriswa.kokoro-tts-restart.plist</code></summary>
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chriswa.kokoro-tts-restart</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>echo "[$(date)] daily restart -&gt; kickstart com.chriswa.kokoro-tts"; exec /bin/launchctl kickstart -k gui/501/com.chriswa.kokoro-tts</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/chriswaddell/tts/kokoro-restart.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chriswaddell/tts/kokoro-restart.log</string>
+</dict>
+</plist>
+```
+</details>
+
+---
+
 ## Portability rules (learned the hard way)
 
 The server was CUDA-only and crashed on the Mac. Keep it working on **both**:
@@ -141,4 +268,6 @@ curl -s -X POST localhost:$PORT/synthesize -H 'Content-Type: application/json' \
 - **Python 3.14 has no torch wheels** — use 3.13 for the venv.
 - Startup downloads the Kokoro model from HF (unauthenticated rate limits; set
   `HF_TOKEN` for faster/higher-limit pulls). First run is slower.
-- The Mac process is foreground/manual; there's no launchd unit yet.
+- The Mac process runs under launchd (see "Boot persistence & daily restart
+  (Mac)"), not foreground. Stop the agent (`launchctl bootout`) before running
+  manually, or the two fight over the port.

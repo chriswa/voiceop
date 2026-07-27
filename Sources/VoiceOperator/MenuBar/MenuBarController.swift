@@ -354,6 +354,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func toggleNarrationMute() {
         isNarrationMuted.toggle()
         narrationMenuItem.title = isNarrationMuted ? "Unmute" : "Mute"
+        (isNarrationMuted ? SoundEffect.narrationMuted : .narrationUnmuted).play()
         onToggleNarration?(isNarrationMuted)
         refreshIcon()   // show/hide the prohibition overlay immediately
     }

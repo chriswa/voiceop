@@ -1,13 +1,18 @@
 import AVFoundation
 
-/// The three dictation cues, synthesized in-process as short chirps (no bundled
-/// assets). Distinct shapes so they're recognizable without looking:
-///   • listeningStarted  — rising two-tone  (capture began)
-///   • listeningFinished — falling two-tone (capture ended)
-///   • pasted            — quick high double-blip (text inserted)
+/// Every audible cue, synthesized in-process as short chirps (no bundled assets).
+/// Distinct shapes so they're recognizable without looking (e.g. rising vs.
+/// falling two-tone for capture start/stop, a low descending pair for muting).
 ///
-/// These must play *outside* the dictation output-mute window (see AudioArbiter),
-/// otherwise the system-output mute would swallow them.
+/// This enum is the single source of truth for the cues: each case declares its
+/// own `segments` (the notes it plays), `volume`, and `menuLabel` via exhaustive
+/// switches, so the compiler forces every case to be fully defined. `SoundBank`
+/// builds a WAV for *every* `allCases` entry, and the debug "Play Tone" menu lists
+/// `allCases` too — so a cue can never be referenced without also being audible
+/// and testable from that menu.
+///
+/// Capture/mute cues must play *outside* the dictation output-mute window (see
+/// AudioArbiter), otherwise the system-output mute would swallow them.
 enum SoundEffect: CaseIterable {
     case listeningStarted           // Fn (paste) capture began
     case listeningFinished          // Fn (paste) capture ended
@@ -22,8 +27,62 @@ enum SoundEffect: CaseIterable {
     case clipRequested              // started fetching a TTS clip (very short)
     case clipStarted                // TTS playback began (very short)
     case clipFinished               // TTS playback finished (very short)
+    case narrationMuted             // narration muted — low descending slide
+    case narrationUnmuted           // narration unmuted — low ascending slide
 
     @MainActor func play() { SoundBank.shared.play(self) }
+
+    /// The tone's note segments: `(frequency Hz, duration seconds)`; a frequency
+    /// of 0 is silence. Written at natural (1×) durations — `SoundBank.speedup`
+    /// scales the whole set. Exhaustive by design: adding a case forces a sound.
+    var segments: [(freq: Double, dur: Double)] {
+        switch self {
+        // Paste mode: low-ish rising/falling two-tone.
+        case .listeningStarted:  return [(660, 0.09), (990, 0.11)]
+        case .listeningFinished: return [(990, 0.09), (660, 0.11)]
+        // Command mode: brighter, higher-pitched rising/falling — clearly
+        // distinct from paste so you can hear which mode you're in.
+        case .commandListeningStarted:  return [(988, 0.08), (1319, 0.11)]
+        case .commandListeningFinished: return [(1319, 0.08), (988, 0.11)]
+        // Cheerful rising major arpeggio (C5–E5–G5–C6) — text inserted.
+        case .pasted: return [(523, 0.09), (659, 0.09), (784, 0.09), (1047, 0.14)]
+        // Gentle low descending two-tone (G4→C4) — recording was silent, so
+        // transcription was skipped. A soft "deflating" cue, distinct from
+        // the command "unrecognized" and the harsher error tone.
+        case .silenceSkipped: return [(392, 0.12), (262, 0.22)]
+        // Rising three-tone "swoop" — a voice tool matched + ran.
+        case .surfaceRaised: return [(700, 0.06), (950, 0.06), (1300, 0.11)]
+        // Descending low two-tone — "sad": command matched no tool.
+        case .unrecognized: return [(415, 0.13), (311, 0.22)]
+        // Descending minor three-tone — something went wrong (e.g. the
+        // transcription request failed). Longer/lower than "unrecognized"
+        // so an error is audibly distinct from a mere no-match.
+        case .transcriptionFailed: return [(523, 0.10), (392, 0.10), (262, 0.22)]
+        // Soft ascending double-blip — Claude/Haiku summarization began.
+        // Distinct from the single-blip clip cues so a "waiting on Claude"
+        // beat is audibly its own state before any TTS fetch.
+        case .summarizing: return [(784, 0.04), (1046, 0.05)]
+        // Very short single blips around each TTS clip's lifecycle.
+        case .clipRequested: return [(1200, 0.04)]
+        case .clipStarted:   return [(1600, 0.04)]
+        case .clipFinished:  return [(900, 0.05)]
+        // Mute/unmute: a quick low descending/ascending three-note slide, well
+        // below every other cue's register so muting the app is unmistakable.
+        // Mute drops low→lower (A3→E3→A2); unmute climbs very-low→low (A2→E3→A3).
+        case .narrationMuted:   return [(220, 0.05), (165, 0.05), (110, 0.11)]
+        case .narrationUnmuted: return [(110, 0.05), (165, 0.05), (220, 0.11)]
+        }
+    }
+
+    /// Per-cue synthesis volume (0–1), applied on top of `SoundBank`'s output
+    /// gain. Most cues play at full scale; the very short "background" blips are
+    /// quieter so they don't dominate.
+    var volume: Double {
+        switch self {
+        case .summarizing, .clipRequested, .clipStarted, .clipFinished: return 0.5
+        default: return 1.0
+        }
+    }
 
     /// Human-readable name for the debug "Play Tone" menu.
     var menuLabel: String {
@@ -41,6 +100,8 @@ enum SoundEffect: CaseIterable {
         case .clipRequested:            return "Clip requested"
         case .clipStarted:              return "Clip started"
         case .clipFinished:             return "Clip finished"
+        case .narrationMuted:           return "Narration muted"
+        case .narrationUnmuted:         return "Narration unmuted"
         }
     }
 }
@@ -53,37 +114,14 @@ final class SoundBank {
     private let wavs: [SoundEffect: Data]
 
     private init() {
-        wavs = [
-            // Paste mode: low-ish rising/falling two-tone.
-            .listeningStarted:  Self.chirp([(660, 0.09), (990, 0.11)]),
-            .listeningFinished: Self.chirp([(990, 0.09), (660, 0.11)]),
-            // Command mode: brighter, higher-pitched rising/falling — clearly
-            // distinct from paste so you can hear which mode you're in.
-            .commandListeningStarted:  Self.chirp([(988, 0.08), (1319, 0.11)]),
-            .commandListeningFinished: Self.chirp([(1319, 0.08), (988, 0.11)]),
-            // Cheerful rising major arpeggio (C5–E5–G5–C6) — text inserted.
-            .pasted:            Self.chirp([(523, 0.09), (659, 0.09), (784, 0.09), (1047, 0.14)]),
-            // Gentle low descending two-tone (G4→C4) — recording was silent, so
-            // transcription was skipped. A soft "deflating" cue, distinct from
-            // the command "unrecognized" and the harsher error tone.
-            .silenceSkipped:    Self.chirp([(392, 0.12), (262, 0.22)]),
-            // Rising three-tone "swoop" — a voice tool matched + ran.
-            .surfaceRaised:     Self.chirp([(700, 0.06), (950, 0.06), (1300, 0.11)]),
-            // Descending low two-tone — "sad": command matched no tool.
-            .unrecognized:      Self.chirp([(415, 0.13), (311, 0.22)]),
-            // Descending minor three-tone — something went wrong (e.g. the
-            // transcription request failed). Longer/lower than "unrecognized"
-            // so an error is audibly distinct from a mere no-match.
-            .transcriptionFailed: Self.chirp([(523, 0.10), (392, 0.10), (262, 0.22)]),
-            // Soft ascending double-blip — Claude/Haiku summarization began.
-            // Distinct from the single-blip clip cues so a "waiting on Claude"
-            // beat is audibly its own state before any TTS fetch.
-            .summarizing:       Self.chirp([(784, 0.04), (1046, 0.05)], volume: 0.5),
-            // Very short single blips around each TTS clip's lifecycle.
-            .clipRequested:     Self.chirp([(1200, 0.04)], volume: 0.5),
-            .clipStarted:       Self.chirp([(1600, 0.04)], volume: 0.5),
-            .clipFinished:      Self.chirp([(900, 0.05)], volume: 0.5),
-        ]
+        // Build a WAV for *every* effect from its own declared segments, so no
+        // case can exist without an audible tone. The definitions live on
+        // `SoundEffect` itself (see `segments`/`volume`) — this is just synthesis.
+        var wavs: [SoundEffect: Data] = [:]
+        for effect in SoundEffect.allCases {
+            wavs[effect] = Self.chirp(effect.segments, volume: effect.volume)
+        }
+        self.wavs = wavs
     }
 
     func play(_ effect: SoundEffect) {

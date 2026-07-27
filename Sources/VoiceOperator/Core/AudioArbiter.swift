@@ -247,15 +247,16 @@ final class AudioArbiter {
         session.offset += slice.count
         let index = session.texts.count + 1
 
-        // Per-chunk silence gate (same idea as the whole-clip gate below):
-        // don't pay a request — or risk a Whisper hallucination — for a chunk
-        // with no voice energy in it.
-        if Self.isSilent(pcm16: slice) {
-            Log.log("dictation: live chunk \(index) is silent — skipping request")
-            session.texts.append("")
-            return
-        }
-
+        // No per-chunk silence gate: mirroring Wispr Flow, every chunk of a
+        // recording is transcribed. Wispr sends its whole packet buffer and only
+        // uses silence for auto-stop / dead-mic watchdogs — never to drop audio.
+        // A per-chunk gate here judged each 28 s slice in isolation (RMS averaged
+        // over the whole slice), so a soft word or a word split across a chunk
+        // boundary fell under the bar and that chunk's speech was lost even though
+        // the clip as a whole was clearly voiced. The whole-clip gate in
+        // endDictation() is the single silence decision — and since it measures
+        // the entire recording, "the clip is silent" already means "every chunk
+        // was silent."
         Log.log("dictation: transcribing live chunk \(index) mid-recording")
         session.task = Task { [weak self, transcriber] in
             do {
@@ -269,23 +270,6 @@ final class AudioArbiter {
             session.task = nil
             self?.pumpLiveChunks()   // a further chunk may already be waiting
         }
-    }
-
-    /// Whole-clip silence thresholds applied to a single s16le chunk.
-    private static func isSilent(pcm16: Data) -> Bool {
-        var peak: Float = 0
-        var sumSquares: Double = 0
-        let n = pcm16.count / 2
-        guard n > 0 else { return true }
-        pcm16.withUnsafeBytes { raw in
-            for s in raw.bindMemory(to: Int16.self) {
-                let v = Float(s) / 32768
-                peak = max(peak, abs(v))
-                sumSquares += Double(v) * Double(v)
-            }
-        }
-        let rms = Float((sumSquares / Double(n)).squareRoot())
-        return peak < silencePeak && rms < silenceRMS
     }
 
     func endDictation() {

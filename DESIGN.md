@@ -74,6 +74,18 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   `AudioArbiter.pumpLiveChunks`), and only the short tail is transcribed at stop, so paste
   latency is flat regardless of dictation length. `WisprTranscriber.transcribe` also chunks
   any >28 s WAV it's handed (retries of stored clips take that path).
+- **Silence never drops audio (decoded 2026-07-15).** Flow's send loop pushes *every*
+  captured packet through transcription — there is no per-chunk volume/silence gate in the
+  send path. Its silence tracking (`silentStreamStreakMs`, `longestSilentStreakMs`,
+  `silenceAccruedMs`, `numConsecutiveSilentFrames`) drives only (a) **auto-stop** — a 30 s
+  silent streak / 10 min accrued-silence "arm" ends the recording (`RecordingStoppedSilence`,
+  `noteAutoStop("silence")`) — and (b) **dead-mic watchdogs** (`firstFrameWatchdog`,
+  `silentWatchdog`). Audio quality (`SNR<5dB`, `volume<-70dB`, `alignment<0.15`) is judged
+  *after* transcription and only raises a `poorAudioQuality` user notice; it never discards
+  text. We mirror this: `pumpLiveChunks` transcribes every chunk, and the single silence
+  decision is the whole-clip peak/RMS gate in `endDictation` (i.e. skip only when the entire
+  recording — every chunk — was silent). An earlier per-chunk gate that dropped individual
+  28 s slices judged in isolation lost soft words and boundary-split words and was removed.
 - **Formatting / cleanup**: other `/llm/*` REST endpoints, e.g. `/llm/extract_asr_words`,
   `/llm/flow_state_2025`. Proper-noun/punctuation/formatting live here (client dictionary +
   server LLM). Exact request bodies still to be decoded in the spike.

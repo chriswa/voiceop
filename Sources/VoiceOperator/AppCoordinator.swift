@@ -20,8 +20,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private static let focusVerbs: Set<String> = ["focus", "focuses", "focused"]
     private static let repeatVerbs: Set<String> = ["repeat", "repeats", "repeated"]
     /// "skip" drops the clip that was playing when this command began, so playback
-    /// advances to the next update.
-    private static let skipVerbs: Set<String> = ["skip", "skips", "skipped"]
+    /// advances to the next update. "skeptics" is a synonym — a common STT mishearing
+    /// of "skip" that we accept rather than fight.
+    private static let skipVerbs: Set<String> = ["skip", "skips", "skipped", "skeptics"]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching")

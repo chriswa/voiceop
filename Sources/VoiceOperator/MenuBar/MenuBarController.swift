@@ -93,7 +93,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         ("⟨name⟩ focus", "Focus it (explicit synonym)"),
         ("⟨name⟩ repeat", "Replay its latest update"),
         ("⟨name⟩ ⟨message⟩", "Ask the summarizer about the update"),
-        ("skip", "Drop the clip playing now"),
+        ("skip / skeptics", "Drop the clip playing now"),
     ]
 
     override init() {

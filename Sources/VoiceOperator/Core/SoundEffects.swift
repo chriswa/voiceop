@@ -23,6 +23,7 @@ enum SoundEffect: CaseIterable {
     case surfaceRaised              // a voice tool matched + ran
     case unrecognized               // command matched no tool ("sad")
     case transcriptionFailed        // transcription request errored
+    case transcriptionPending       // transcription is still in progress
     case summarizing                // started waiting on Claude/Haiku (very short)
     case clipRequested              // started fetching a TTS clip (very short)
     case clipStarted                // TTS playback began (very short)
@@ -31,6 +32,7 @@ enum SoundEffect: CaseIterable {
     case narrationUnmuted           // narration unmuted — low ascending slide
 
     @MainActor func play() { SoundBank.shared.play(self) }
+    @MainActor func stop() { SoundBank.shared.stop(self) }
 
     /// The tone's note segments: `(frequency Hz, duration seconds)`; a frequency
     /// of 0 is silence. Written at natural (1×) durations — `SoundBank.speedup`
@@ -58,6 +60,11 @@ enum SoundEffect: CaseIterable {
         // transcription request failed). Longer/lower than "unrecognized"
         // so an error is audibly distinct from a mere no-match.
         case .transcriptionFailed: return [(523, 0.10), (392, 0.10), (262, 0.22)]
+        // One plain tone repeated five times, with short gaps. The individual
+        // repetitions decay through `segmentVolumes` below rather than changing
+        // pitch, creating the requested echo without sounding melodic.
+        // This adds up to three natural seconds, or 1.5 seconds at `speedup`.
+        case .transcriptionPending: return [(660, 0.48), (0, 0.12), (660, 0.48), (0, 0.12), (660, 0.48), (0, 0.12), (660, 0.48), (0, 0.12), (660, 0.48), (0, 0.12)]
         // Soft ascending double-blip — Claude/Haiku summarization began.
         // Distinct from the single-blip clip cues so a "waiting on Claude"
         // beat is audibly its own state before any TTS fetch.
@@ -74,11 +81,21 @@ enum SoundEffect: CaseIterable {
         }
     }
 
+    /// Relative amplitude per segment. All normal cues use a uniform level;
+    /// the pending transcription cue decays each repetition like an echo.
+    var segmentVolumes: [Double] {
+        switch self {
+        case .transcriptionPending: return [1.0, 0, 0.50, 0, 0.25, 0, 0.12, 0, 0.06, 0]
+        default: return Array(repeating: 1.0, count: segments.count)
+        }
+    }
+
     /// Per-cue synthesis volume (0–1), applied on top of `SoundBank`'s output
     /// gain. Most cues play at full scale; the very short "background" blips are
     /// quieter so they don't dominate.
     var volume: Double {
         switch self {
+        case .transcriptionPending: return 0.18
         case .summarizing, .clipRequested, .clipStarted, .clipFinished: return 0.5
         default: return 1.0
         }
@@ -96,6 +113,7 @@ enum SoundEffect: CaseIterable {
         case .surfaceRaised:            return "Surface raised (tool ran)"
         case .unrecognized:             return "Unrecognized (no match)"
         case .transcriptionFailed:      return "Transcription failed"
+        case .transcriptionPending:     return "Transcription pending"
         case .summarizing:              return "Summarizing (waiting on Claude)"
         case .clipRequested:            return "Clip requested"
         case .clipStarted:              return "Clip started"
@@ -109,7 +127,7 @@ enum SoundEffect: CaseIterable {
 @MainActor
 final class SoundBank {
     static let shared = SoundBank()
-    private var players: [AVAudioPlayer] = []   // keep alive during playback
+    private var players: [(effect: SoundEffect, player: AVAudioPlayer)] = [] // keep alive during playback
 
     private let wavs: [SoundEffect: Data]
 
@@ -119,18 +137,27 @@ final class SoundBank {
         // `SoundEffect` itself (see `segments`/`volume`) — this is just synthesis.
         var wavs: [SoundEffect: Data] = [:]
         for effect in SoundEffect.allCases {
-            wavs[effect] = Self.chirp(effect.segments, volume: effect.volume)
+            wavs[effect] = Self.chirp(effect.segments, segmentVolumes: effect.segmentVolumes, volume: effect.volume)
         }
         self.wavs = wavs
     }
 
     func play(_ effect: SoundEffect) {
         guard let data = wavs[effect], let player = try? AVAudioPlayer(data: data) else { return }
-        players.removeAll { !$0.isPlaying }
+        players.removeAll { !$0.player.isPlaying }
         player.volume = 0.35
         player.prepareToPlay()
         player.play()
-        players.append(player)
+        players.append((effect, player))
+    }
+
+    /// Stops every active instance of one effect. This is used for the pending
+    /// transcription cue so a returned result cuts the current echo off at once.
+    func stop(_ effect: SoundEffect) {
+        for entry in players where entry.effect == effect {
+            entry.player.stop()
+        }
+        players.removeAll { !$0.player.isPlaying }
     }
 
     // MARK: - Synthesis
@@ -144,10 +171,14 @@ final class SoundBank {
     /// Build a 16-bit mono 44.1 kHz WAV from a sequence of (frequency, seconds)
     /// segments. A frequency of 0 is silence. Each tone gets a short fade to
     /// avoid clicks. Durations are scaled by `speedup`.
-    private static func chirp(_ segments: [(freq: Double, dur: Double)], volume: Double = 1.0) -> Data {
+    private static func chirp(
+        _ segments: [(freq: Double, dur: Double)],
+        segmentVolumes: [Double],
+        volume: Double = 1.0
+    ) -> Data {
         let sampleRate = 44_100.0
         var samples: [Int16] = []
-        for seg in segments {
+        for (seg, segmentVolume) in zip(segments, segmentVolumes) {
             let n = Int(seg.dur / speedup * sampleRate)
             let fade = max(1, Int(0.005 * sampleRate))
             for i in 0..<n {
@@ -156,7 +187,7 @@ final class SoundBank {
                 else if i > n - fade { env = Double(n - i) / Double(fade) }
                 let value: Double = seg.freq == 0 ? 0
                     : env * sin(2 * .pi * seg.freq * Double(i) / sampleRate)
-                samples.append(Int16(max(-1, min(1, value)) * volume * 32000))
+                samples.append(Int16(max(-1, min(1, value)) * segmentVolume * volume * 32000))
             }
         }
         let bytes = samples.withUnsafeBufferPointer { Data(buffer: $0) }

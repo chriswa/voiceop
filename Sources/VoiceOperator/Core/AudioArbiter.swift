@@ -24,6 +24,15 @@ final class AudioArbiter {
     private var isDictating = false
     private var mode: DictationMode = .paste
     private var commandContext: DictationContext?
+    private var transcriptionProgressTask: Task<Void, Never>?
+
+    /// Tunable timing for the audible indication that transcription is ongoing.
+    /// The cue itself is synthesized to last `cueDuration` (see SoundEffects).
+    private enum TranscriptionProgressCue {
+        static let initialDelay: Duration = .milliseconds(1_500)
+        static let cueDuration: Duration = .milliseconds(1_500)
+        static let repeatGap: Duration = .seconds(1)
+    }
 
     init(transcriber: Transcriber = WisprFlowTranscriber()) {
         self.transcriber = transcriber
@@ -80,10 +89,12 @@ final class AudioArbiter {
         }
         (mode == .command ? SoundEffect.commandListeningFinished : .listeningFinished).play()
         onStatus?(.transcribing)
+        startTranscriptionProgressCue()
         Task { [weak self] in
             guard let self else { return }
             do {
                 let text = try await self.transcriber.transcribe(wavURL: wav, language: "en")
+                self.stopTranscriptionProgressCue()
                 let command = self.mode == .command
                 self.record(wav: wav, duration: duration, transcript: text, command: command, error: nil)
                 if command {
@@ -93,6 +104,7 @@ final class AudioArbiter {
                     self.pasteAndRemember(text)
                 }
             } catch {
+                self.stopTranscriptionProgressCue()
                 Log.log("transcribe failed: \(error)")
                 SoundEffect.transcriptionFailed.play()
                 self.record(wav: wav, duration: duration, transcript: "", command: self.mode == .command,
@@ -130,10 +142,14 @@ final class AudioArbiter {
     func copyCommand(id: UUID) { if let e = commandHistory.first(where: { $0.id == id }) { copy(e.transcript) } }
 
     private func retry(_ url: URL, id: UUID, command: Bool) {
+        onStatus?(.transcribing)
+        startTranscriptionProgressCue()
         Task { [weak self] in
             guard let self else { return }
+            defer { self.onStatus?(.idle) }
             do {
                 let text = try await self.transcriber.transcribe(wavURL: url, language: "en")
+                self.stopTranscriptionProgressCue()
                 if command {
                     if let i = self.commandHistory.firstIndex(where: { $0.id == id }) { self.commandHistory[i].transcript = text; self.commandHistory[i].error = nil }
                 } else {
@@ -141,17 +157,47 @@ final class AudioArbiter {
                     self.pasteAndRemember(text)
                 }
                 self.save()
-            } catch { SoundEffect.transcriptionFailed.play() }
+            } catch {
+                self.stopTranscriptionProgressCue()
+                SoundEffect.transcriptionFailed.play()
+            }
         }
     }
 
     private func finishDictation() {
+        stopTranscriptionProgressCue()
         onStatus?(.idle)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self else { return }
             self.isDictating = false
             self.onDictationEnded?()
         }
+    }
+
+    /// Starts after a short grace period so quick transcriptions stay quiet,
+    /// then repeats once the previous cue has fully played plus its pause.
+    private func startTranscriptionProgressCue() {
+        stopTranscriptionProgressCue()
+        transcriptionProgressTask = Task {
+            do {
+                try await Task.sleep(for: TranscriptionProgressCue.initialDelay)
+                while !Task.isCancelled {
+                    SoundEffect.transcriptionPending.play()
+                    try await Task.sleep(for: TranscriptionProgressCue.cueDuration)
+                    try await Task.sleep(for: TranscriptionProgressCue.repeatGap)
+                }
+            } catch is CancellationError {
+                // Transcription completed or failed while the task was asleep.
+            } catch {
+                Log.log("transcription progress cue failed: \(error)")
+            }
+        }
+    }
+
+    private func stopTranscriptionProgressCue() {
+        transcriptionProgressTask?.cancel()
+        transcriptionProgressTask = nil
+        SoundEffect.transcriptionPending.stop()
     }
 
     private func pasteAndRemember(_ text: String) { lastPastedText = text; TextInserter.paste(text); SoundEffect.pasted.play() }

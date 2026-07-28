@@ -1,51 +1,5 @@
 import Foundation
 
-/// A spoken Claude update, retained for the menu-bar "Recent Updates" list.
-/// Replay reuses the audio cache, so it's free.
-struct TTSHistoryEntry: Identifiable, Sendable, Codable {
-    var id = UUID()
-    let name: String
-    let body: String
-    let voiceID: String
-    let sessionKey: String?
-    let date: Date
-    /// The original Claude turns this summary was generated from — kept so an
-    /// "aside" can question the summarizer against the same context.
-    var context: [Turn] = []
-    /// The summary spoken aloud for this update — fed to an "aside" as the prior
-    /// spoken context. Preserved unchanged across an aside chain, so a follow-up
-    /// aside is still grounded in the original narration rather than an answer.
-    var priorSummaries: [String] = []
-    /// The running "Ask" dialogue for this update: alternating user message /
-    /// assistant answer turns, replayed so each ask continues the same
-    /// conversation with the summarizer. Empty until the first ask.
-    var asks: [Turn] = []
-
-    var utterance: Utterance {
-        Utterance(name: name, body: body, voiceID: voiceID, sessionKey: sessionKey)
-    }
-    var menuTitle: String { "\(name): \(body.vo_truncated(60))" }
-}
-
-extension TTSHistoryEntry {
-    // Lenient decode: `context`/`priorSummaries` were added later, so entries
-    // written before then simply lack those keys — treat as empty rather than
-    // failing the whole file (which would drop all history). In an extension so
-    // the memberwise initializer is preserved.
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        name = try c.decode(String.self, forKey: .name)
-        body = try c.decode(String.self, forKey: .body)
-        voiceID = try c.decode(String.self, forKey: .voiceID)
-        sessionKey = try c.decodeIfPresent(String.self, forKey: .sessionKey)
-        date = try c.decode(Date.self, forKey: .date)
-        context = try c.decodeIfPresent([Turn].self, forKey: .context) ?? []
-        priorSummaries = try c.decodeIfPresent([String].self, forKey: .priorSummaries) ?? []
-        asks = try c.decodeIfPresent([Turn].self, forKey: .asks) ?? []
-    }
-}
-
 /// A dictation attempt, retained for the "Recent Dictations" list. The WAV is
 /// kept so the transcription can be retried; `transcript` is replaced in place
 /// when a retry produces new text.

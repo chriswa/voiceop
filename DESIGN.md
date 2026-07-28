@@ -1,5 +1,70 @@
 # Voice Operator — Design
 
+## Current scope (2026-07-27)
+
+Voice Operator is now deliberately a small dictation and local speech service.
+It no longer watches Claude transcripts, summarizes agent work, assigns names or
+voices to agents, or pushes agent-update state to Spaceterm.
+
+### Local speech API
+
+At launch the app binds a loopback TCP listener on a kernel-assigned ephemeral
+port and atomically writes `~/Library/Application Support/VoiceOperator/speech-service.json`:
+
+```json
+{"version":1,"port":58432,"pid":12345}
+```
+
+There is no bearer token: this is a same-user, loopback service. Clients read
+the discovery file (and re-read it after a connection failure).
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `POST` | `/v1/speech` | Queue `{text, voice?}` and return `202` + job id. |
+| `GET` | `/v1/speech/{id}?wait=0..30` | Inspect or long-poll a job. Pending is `202`; complete is `200`; a dictation barge-in is `409`; cancellation/mute flush is `410`; synthesis failure is `500`. |
+| `DELETE` | `/v1/speech/{id}` | Halt immediately if audible, otherwise retract it. |
+| `GET` | `/v1/voices` | Return the currently available external Kokoro voices. |
+
+Speech is FIFO. Input is split using Foundation sentence boundaries. The
+`character_offset` in every terminal response is a zero-based, end-exclusive
+Unicode-scalar offset into the original input and advances only after an entire
+sentence completed. The current sentence plus the next two are synthesized/
+cached ahead of playback to avoid sentence-boundary gaps. Dictation halts the
+current sentence and holds the queue until transcription finishes. Muting
+immediately halts/cancels every live or queued job; new queue attempts receive
+`503 speech_muted`.
+
+### Dictation and command mode
+
+Fn dictation still transcribes and pastes into the frontmost app. Ctrl+Fn is
+command mode: the app identity is captured when recording stops. If it is
+Spaceterm (`com.spaceterm.app`), Voice Operator sends the verbatim transcription
+as newline-delimited JSON to `~/.spaceterm/hooks.sock`:
+
+```json
+{"type":"voice-command","text":"<transcription>"}
+```
+
+Spaceterm owns the meaning of that event. Any other focused app records the
+command transcription but plays the unrecognized/error cue and performs no
+action. Clipboard speech and clipboard summarization remain user-facing tools;
+the latter is an independent Haiku clipboard utility, not transcript tracking.
+
+### English transcription preference (2026-07-27)
+
+The current Wispr Flow bundle's `transcribeOpenAIAudio` derives a single
+selected language and sends it as the string `language` in `/llm/asr` (for
+English, `"en"`). Voice Operator supplies `"en"` for dictation. Its historical
+gRPC replica has an unresolved protobuf `Language` enum and therefore cannot
+reliably send that preference; when a language is requested it deliberately
+uses the confirmed raw `/llm/asr` path rather than silently language-detecting.
+This trades server formatting for correct language selection until the current
+formatted Flow request is fully ported.
+
+The historical design notes below describe the retired agent-narration system;
+they are retained only as reverse-engineering history and are superseded by this
+section.
+
 FEATURE: A native macOS menu-bar app that unifies dictation (replacing Wispr Flow) and
 spoken Claude Code updates (replacing `transcript-reader.py`) under one audio coordinator,
 so dictation always mutes/halts TTS and no spoken update is ever missed.

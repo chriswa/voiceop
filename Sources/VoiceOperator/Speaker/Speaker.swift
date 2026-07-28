@@ -1,21 +1,12 @@
 import Foundation
 
-/// One thing to say. `name` is the call-sign and `body` the summary; the text
-/// actually sent to TTS is "⟨name⟩ here. ⟨body⟩". `voiceID` is the TTS provider's
-/// voice id; `sessionKey` identifies the originating Claude surface for spaceterm
-/// speaking events. Keeping name/body separate lets the history show them nicely.
-///
-/// A `verbatim` utterance (⌘⌃S speak-the-clipboard) is spoken exactly as its
-/// `body` — no call-sign prefix — since it's the user's own text, not an agent
-/// update.
+/// One thing to say. Voice Operator deliberately knows no agent/session identity:
+/// callers supply ordinary text plus a provider voice id.
 struct Utterance: Sendable, Equatable {
-    let name: String
-    let body: String
+    let text: String
     let voiceID: String
-    let sessionKey: String?
-    var verbatim: Bool = false
 
-    var spokenText: String { verbatim ? body : "\(name) here. \(body)" }
+    var spokenText: String { text }
 }
 
 /// Text→audio provider, swappable like `Transcriber`. Streams raw PCM as it's

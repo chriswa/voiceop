@@ -9,40 +9,6 @@ struct ClaudeSummarizer {
     private static let url = URL(string: "https://api.anthropic.com/v1/messages")!
     private static let keychainService = "Claude Code-credentials"
 
-    private static let instruction = """
-    You are turning a coding agent's just-completed turn into a very short SPOKEN \
-    audio update for the user. You are given the agent's most recent turn — the \
-    user's latest message and everything the agent said in response, ending with \
-    its concluding message — plus a list of updates already spoken aloud to the \
-    user. In one or two short sentences of plain spoken English, say what the \
-    agent communicated or accomplished in this turn — focus on the genuinely NEW \
-    information and don't restate what was already spoken. No markdown, no lists, \
-    no code, no preamble, no quotation marks. Output ONLY the spoken update.
-    """
-
-    // A pending block is NOT a completed turn: the agent has paused and is
-    // waiting on the user. The summary must relay the ask itself — including the
-    // real multiple-choice options (the model may summarize them) — but it must
-    // NOT answer the question or fabricate options that weren't offered.
-    private static let questionInstruction = """
-    A coding agent has PAUSED and is waiting for the user to answer a question. \
-    You are given what the agent did leading up to it, ending with the question \
-    it is asking and its multiple-choice options. In one or two short sentences \
-    of plain spoken English, say what the agent has been doing and what it is now \
-    asking. State the question, and briefly convey the options when that helps the \
-    user decide. Do NOT answer the question yourself, do NOT guess or state the \
-    user's answer, and do NOT invent options that weren't listed. No markdown, no \
-    lists, no code, no preamble, no quotation marks. Output ONLY the spoken update.
-    """
-
-    private static let planInstruction = """
-    A coding agent has finished planning and is presenting a plan for the user's \
-    approval. You are given what the agent did leading up to it, ending with the \
-    proposed plan. In one or two short sentences of plain spoken English, say what \
-    the agent has been doing and what its plan proposes to do, at a high level. Do \
-    NOT invent specifics that aren't in the plan. No markdown, no lists, no code, \
-    no preamble, no quotation marks. Output ONLY the spoken update.
-    """
 
     private static let clipboardInstruction = """
     You are summarizing a piece of text the user has on their clipboard. In one \
@@ -52,22 +18,6 @@ struct ClaudeSummarizer {
     ONLY the summary.
     """
 
-    // An ask is a genuine back-and-forth: the user may ask to repeat something
-    // already said, or dig into a specific point. So this instruction explicitly
-    // PERMITS repetition and answers the message directly, rather than forbidding
-    // overlap with what was already spoken.
-    private static let askInstruction = """
-    You already summarized a coding agent's recent turn aloud for the user, and \
-    the user is now asking spoken questions about it — a continuing conversation. \
-    Answer the user's latest question directly, in one or two short sentences of \
-    plain spoken English, grounded in the conversation provided. You MAY repeat or \
-    restate things you already said if the user asks, and you may go deeper on \
-    anything you summarized. If the answer genuinely isn't in the material, say so \
-    briefly rather than inventing it. No markdown, no lists, no code, no preamble, \
-    no quotation marks. Output ONLY the spoken answer.
-    """
-
-    enum PendingKind { case question, plan }
 
     /// Summarize arbitrary clipboard text into one or two sentences. Returns nil on
     /// auth/HTTP/parse failure so the caller can leave the clipboard untouched
@@ -76,57 +26,6 @@ struct ClaudeSummarizer {
         await callHaiku(instruction: clipboardInstruction, userContent: text)
     }
 
-    /// Summarize a pending block (an unanswered question or a plan awaiting
-    /// approval). Unlike `summarize`, this instructs the model to relay the ask
-    /// without answering it or fabricating answer options. On failure it falls
-    /// back to a safe short line (never the multi-KB raw plan).
-    static func summarizePending(context: [Turn], kind: PendingKind) async -> String {
-        let instruction = kind == .plan ? planInstruction : questionInstruction
-        let fallback = kind == .plan
-            ? "The agent has a plan ready for your review."
-            : (context.last?.text ?? "The agent is asking you a question.")
-        return await callHaiku(instruction: instruction,
-                               userContent: userContent(context: context, spoken: [])) ?? fallback
-    }
-
-    /// `context` is the turns since the previous end-of-turn; `spoken` are recent
-    /// summaries already read aloud (so Haiku doesn't repeat itself).
-    static func summarize(context: [Turn], spoken: [String]) async -> String {
-        let latest = context.last?.text ?? ""
-        return await callHaiku(instruction: instruction,
-                               userContent: userContent(context: context, spoken: spoken)) ?? latest
-    }
-
-    /// Answer a spoken ask as a multi-turn conversation: the agent's original
-    /// turns and what was spoken aloud become the opening exchange, any earlier
-    /// ask Q&A (`dialogue`, alternating user/assistant turns) is replayed, then
-    /// the new `message` is delivered. Returns nil on failure so the caller can
-    /// speak a short apology instead of a fabricated answer.
-    static func ask(context: [Turn], spoken: [String],
-                    dialogue: [Turn], message: String) async -> String? {
-        let transcript = context.map { "\($0.role.uppercased()): \($0.text)" }.joined(separator: "\n\n")
-        var messages: [[String: Any]] = [
-            ["role": "user",
-             "content": "Here is the coding agent turn you summarized aloud for me:\n\n"
-                + "--- AGENT CONVERSATION ---\n\n\(transcript)"],
-            ["role": "assistant",
-             "content": spoken.isEmpty ? "(the earlier spoken summary)" : spoken.joined(separator: " ")],
-        ]
-        // `dialogue` is always stored in user/assistant pairs, preserving the
-        // strict alternation the Messages API requires.
-        for turn in dialogue {
-            messages.append(["role": turn.role == "assistant" ? "assistant" : "user",
-                             "content": turn.text])
-        }
-        messages.append(["role": "user", "content": message])
-        return await callHaiku(instruction: askInstruction, messages: messages)
-    }
-
-    private static func userContent(context: [Turn], spoken: [String]) -> String {
-        let transcript = context.map { "\($0.role.uppercased()): \($0.text)" }.joined(separator: "\n\n")
-        let already = spoken.isEmpty ? "(nothing yet)" : spoken.map { "- \($0)" }.joined(separator: "\n")
-        return "ALREADY SPOKEN ALOUD (do not repeat these):\n\(already)\n\n--- CONVERSATION ---\n\n\(transcript)"
-    }
 
     /// Shared Haiku call for a single user message. Returns trimmed text, or nil
     /// on auth/HTTP/parse failure.

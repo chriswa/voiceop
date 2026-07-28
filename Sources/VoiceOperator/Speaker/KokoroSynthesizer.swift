@@ -25,6 +25,24 @@ struct KokoroSynthesizer: SpeechSynthesizer {
 
     private static let defaultBaseURL = "http://localhost:56841"
 
+    /// The small, provider-neutral catalogue exposed by Voice Operator's local
+    /// API. Kokoro's response has varied between builds, so accept both a bare
+    /// string list and objects carrying an `id`/`name` field.
+    static func availableVoiceIDs() async throws -> [String] {
+        let base = ProcessInfo.processInfo.environment["VOICEOP_KOKORO_URL"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? defaultBaseURL
+        let url = URL(string: base.hasSuffix("/") ? "\(base)voices" : "\(base)/voices")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw SpeakerError.synthesis("voice list unavailable") }
+        if let strings = try? JSONSerialization.jsonObject(with: data) as? [String] { return strings.sorted() }
+        if let objects = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            return objects.compactMap { ($0["id"] ?? $0["name"]) as? String }.sorted()
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let voices = object["voices"] as? [String] { return voices.sorted() }
+        throw SpeakerError.synthesis("unrecognized voice list")
+    }
+
     private var synthesizeURL: URL {
         let base = ProcessInfo.processInfo.environment["VOICEOP_KOKORO_URL"]
             .flatMap { $0.isEmpty ? nil : $0 } ?? Self.defaultBaseURL

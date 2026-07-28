@@ -166,4 +166,25 @@ final class TTSEngine {
         if inFlight[key] != nil { return .synthesizing }
         return cache.contains(text: u.spokenText, voiceID: u.voiceID) ? .ready : .needsSynthesis
     }
+
+    /// Stop whatever is currently audible. The speech-service coordinator uses
+    /// this for a user barge-in and for explicit cancellation.
+    func stop() { halt() }
+
+    /// Fill the audio cache without making sound for sentence prefetch.
+    func prefetch(text: String, voiceID: String) {
+        guard cache.cached(text: text, voiceID: voiceID) == nil else { return }
+        let key = cache.key(text: text, voiceID: voiceID)
+        guard inFlight[key] == nil else { return }
+        let task = Task<URL, Error> {
+            var acc = Data()
+            for try await pcm in self.synth.synthesizeStream(text: text, voiceID: voiceID) { acc.append(pcm) }
+            guard !acc.isEmpty else { throw SpeakerError.synthesis("no audio") }
+            let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: self.synth.sampleRate)
+            let url = try self.cache.store(wav, text: text, voiceID: voiceID)
+            self.inFlight[key] = nil
+            return url
+        }
+        inFlight[key] = task
+    }
 }

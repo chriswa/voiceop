@@ -55,6 +55,17 @@ struct WisprFlowTranscriber: Transcriber {
     /// One ≤28 s segment: the gRPC flow path, falling back to raw `/llm/asr` when
     /// the Baseten key is absent or the gRPC call fails.
     private func transcribeSegment(_ wav: WAVFile, language: String) async throws -> String {
+        // The current Flow bundle serializes the user's selected language as a
+        // string (`language: prefs.user.selectedLanguages`) on its HTTP request.
+        // Our older, reverse-engineered gRPC proto has an unresolved Language
+        // enum, so it cannot faithfully encode "en". Never silently discard an
+        // explicit language preference: use the confirmed raw endpoint, whose
+        // body is `{ language: "en" }`, until the current formatted Flow request
+        // is fully decoded and ported.
+        if !language.isEmpty {
+            Log.log("flow: using raw /llm/asr to honor language=\(language)")
+            return try await fallback.transcribe(wavData: wav.data, language: language)
+        }
         guard let apiKey = WisprBasetenKey.value else {
             Log.log("flow: no Baseten key — using raw /llm/asr")
             return try await fallback.transcribe(wavData: wav.data, language: language)

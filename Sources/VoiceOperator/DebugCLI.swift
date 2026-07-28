@@ -115,14 +115,8 @@ enum DebugCLI {
 
     /// Summarize a small synthetic turn via Haiku (Keychain OAuth). One request.
     static func runSummarizeTest() async {
-        let context = [
-            Turn(role: "user", text: "Can you add retry logic to the uploader?", pos: 0, stopReason: nil),
-            Turn(role: "assistant",
-                 text: "I added exponential backoff with three retries to the uploader and a unit test covering the failure path. All tests pass.",
-                 pos: 1, stopReason: "end_turn"),
-        ]
-        let summary = await ClaudeSummarizer.summarize(context: context, spoken: [])
-        print("summary: \(summary)")
+        let summary = await ClaudeSummarizer.summarizeText("I added exponential backoff with three retries to the uploader and a unit test covering the failure path. All tests pass.")
+        print("summary: \(summary ?? "(failed)")")
     }
 
     /// Synthesize one utterance via the TTS engine and play it, streaming as it arrives.
@@ -130,10 +124,9 @@ enum DebugCLI {
     /// starts long before synthesis finishes. Uses the default voice.
     @MainActor
     static func runTTSTest(text: String) async {
-        let voice = NameVoiceTable.defaultVoice
-        let utterance = Utterance(name: voice.name, body: text, voiceID: voice.voiceID, sessionKey: nil)
+        let utterance = Utterance(text: text, voiceID: "af_heart")
         func note(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
-        note("speaking as \(voice.name): \(utterance.spokenText)")
+        note("speaking: \(utterance.spokenText)")
         let engine = TTSEngine()
         let t0 = Date()
         let ok = await engine.play(utterance, onStart: {

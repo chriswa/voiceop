@@ -40,6 +40,10 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         }
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let voices = object["voices"] as? [String] { return voices.sorted() }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let voices = object["voices"] as? [[String: Any]] {
+            return voices.compactMap { ($0["id"] ?? $0["name"]) as? String }.sorted()
+        }
         throw SpeakerError.synthesis("unrecognized voice list")
     }
 

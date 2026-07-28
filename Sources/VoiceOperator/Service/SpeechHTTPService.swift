@@ -91,7 +91,8 @@ final class SpeechHTTPService: @unchecked Sendable {
         return .init(status: 405, object: ["error": "method_not_allowed"])
     }
     private func object(_ r: SpeechJobManager.Result) -> [String: Any] {
-        ["id": r.id, "state": r.state.rawValue, "character_offset": r.characterOffset, "error": r.error as Any]
+        ["id": r.id, "state": r.state.rawValue, "playback_state": r.playbackState?.rawValue as Any,
+         "character_offset": r.characterOffset, "error": r.error as Any]
     }
     private func status(_ r: SpeechJobManager.Result) -> Int {
         switch r.state { case .completed: return 200; case .interruptedByUser: return 409; case .cancelledByClient: return 410; case .synthesisFailed: return 500; default: return 202 }

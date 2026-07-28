@@ -13,7 +13,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
-            play: { _, _ in await gate.play() },
+            play: { _, _, onStart in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: {})
 
@@ -21,6 +21,10 @@ final class SpeechJobManagerTests: XCTestCase {
         XCTAssertEqual(accepted.state, .inProgress)
         await gate.waitForStarts(1)
 
+        let waitingForFirstAudio = await manager.result(id: accepted.id)
+        XCTAssertEqual(waitingForFirstAudio?.playbackState, .queued)
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
         let firstPlayback = await manager.result(id: accepted.id)
         XCTAssertEqual(firstPlayback?.state, .inProgress)
         XCTAssertEqual(firstPlayback?.playbackState, .speaking)
@@ -31,6 +35,10 @@ final class SpeechJobManagerTests: XCTestCase {
 
         await gate.finishNext()
         await gate.waitForStarts(2)
+        let waitingForSecondAudio = await manager.result(id: accepted.id)
+        XCTAssertEqual(waitingForSecondAudio?.playbackState, .queued)
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
         let secondPlayback = await manager.result(id: accepted.id)
         XCTAssertEqual(secondPlayback?.state, .inProgress)
         XCTAssertEqual(secondPlayback?.playbackState, .speaking)
@@ -50,15 +58,22 @@ private actor PlaybackGate {
     private var starts = 0
     private var startWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var completions: [CheckedContinuation<Bool, Never>] = []
+    private var onStarts: [@Sendable () -> Void] = []
 
-    func play() async -> Bool {
+    func play(onStart: @escaping @Sendable () -> Void) async -> Bool {
         await withCheckedContinuation { continuation in
             completions.append(continuation)
+            onStarts.append(onStart)
             starts += 1
             let ready = startWaiters.filter { $0.0 <= starts }
             startWaiters.removeAll { $0.0 <= starts }
             ready.forEach { $0.1.resume() }
         }
+    }
+
+    func startNext() {
+        precondition(!onStarts.isEmpty)
+        onStarts.removeFirst()()
     }
 
     func waitForStarts(_ count: Int) async {

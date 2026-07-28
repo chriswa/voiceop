@@ -214,9 +214,13 @@ final class AudioArbiter {
     }
     private func save() { historyStore.save(.init(stt: sttHistory, commands: commandHistory)); onHistoryChanged?() }
 
-    func playSentence(text: String, voiceID: String) async -> Bool {
+    func playSentence(text: String, voiceID: String,
+                      onStart: @escaping @Sendable () -> Void = {}) async -> Bool {
         onStatus?(.requestingTTS)
-        let result = await tts.play(Utterance(text: text, voiceID: voiceID), onStart: { [weak self] in self?.onStatus?(.speaking) })
+        let result = await tts.play(Utterance(text: text, voiceID: voiceID), onStart: { [weak self] in
+            self?.onStatus?(.speaking)
+            onStart()
+        })
         if !isDictating { onStatus?(.idle) }
         return result
     }

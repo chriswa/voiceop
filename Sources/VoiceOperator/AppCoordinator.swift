@@ -20,7 +20,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await SpeechJobManager.shared.configure(
-                play: { [weak self] text, voice in await self?.arbiter.playSentence(text: text, voiceID: voice) ?? false },
+                play: { [weak self] text, voice, onStart in
+                    await self?.arbiter.playSentence(text: text, voiceID: voice, onStart: onStart) ?? false
+                },
                 prefetch: { [weak self] text, voice in Task { @MainActor in self?.arbiter.prefetchSentence(text: text, voiceID: voice) } },
                 halt: { [weak self] in Task { @MainActor in self?.arbiter.haltSpeech() } })
         }

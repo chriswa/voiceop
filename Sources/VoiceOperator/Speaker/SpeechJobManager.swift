@@ -26,12 +26,12 @@ actor SpeechJobManager {
     private var dictating = false
     private var muted = false
     private var configured = false
-    private var play: (@Sendable (String, String) async -> Bool)?
+    private var play: (@Sendable (String, String, @escaping @Sendable () -> Void) async -> Bool)?
     private var prefetch: (@Sendable (String, String) -> Void)?
     private var halt: (@Sendable () -> Void)?
     private var terminalWaiters: [String: [CheckedContinuation<Result, Never>]] = [:]
 
-    func configure(play: @escaping @Sendable (String, String) async -> Bool,
+    func configure(play: @escaping @Sendable (String, String, @escaping @Sendable () -> Void) async -> Bool,
                    prefetch: @escaping @Sendable (String, String) -> Void,
                    halt: @escaping @Sendable () -> Void) {
         self.play = play; self.prefetch = prefetch; self.halt = halt; configured = true; pump()
@@ -94,7 +94,7 @@ actor SpeechJobManager {
             guard var job = jobs[id] else { order.removeFirst(); continue }
             if terminal(job.state) { order.removeFirst(); continue }
             guard job.next < job.segments.count else { job.state = .completed; job.playbackState = nil; jobs[id] = job; order.removeFirst(); signalTerminal(job); continue }
-            current = id; job.playbackState = .speaking; jobs[id] = job
+            current = id; job.playbackState = .queued; jobs[id] = job
             let segment = job.segments[job.next]
             if let prefetch {
                 for index in (job.next + 1)..<min(job.segments.count, job.next + 3) {
@@ -102,11 +102,18 @@ actor SpeechJobManager {
                 }
             }
             Task { [weak self] in
-                let completed = await play(segment.text, job.voice)
+                let completed = await play(segment.text, job.voice) { [weak self] in
+                    Task { await self?.startedSentence(id: id) }
+                }
                 await self?.finishedSentence(id: id, completed: completed)
             }
             return
         }
+    }
+    private func startedSentence(id: String) {
+        guard current == id, var job = jobs[id], !terminal(job.state) else { return }
+        job.playbackState = .speaking
+        jobs[id] = job
     }
     private func finishedSentence(id: String, completed: Bool) {
         guard current == id, var job = jobs[id] else { return }

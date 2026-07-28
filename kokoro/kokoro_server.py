@@ -150,9 +150,23 @@ def _active_voices():
 # reused across a lazily-built KPipeline per language (cheap G2P wrapper).
 # This is what lets 41 voices across 7 languages share a single ~550MB VRAM
 # footprint instead of multiplying it per language.
-_lock = threading.Lock()
+_pipeline_lock = threading.Lock()
+# PyTorch MPS is not safe to enter concurrently from multiple Python worker
+# threads. The crash report from 2026-07-28 showed two synthesis workers in
+# MetalShaderLibrary's unary-kernel cache when one segfaulted. Keep network
+# streaming concurrent, but serialize only the next() call that executes model
+# work. CUDA and CPU are also safe with this conservative policy.
+_inference_lock = threading.Lock()
+_request_lock = threading.Lock()
+_next_request_id = 0
 _model = None
 _pipelines = {}
+
+def _new_request_id():
+    global _next_request_id
+    with _request_lock:
+        _next_request_id += 1
+        return _next_request_id
 
 def _pick_device():
     # Allow explicit override (e.g. KOKORO_DEVICE=cpu on a flaky MPS backend).
@@ -180,7 +194,7 @@ def _get_model():
     return _model
 
 def _get_pipeline(lang_code: str):
-    with _lock:
+    with _pipeline_lock:
         if lang_code not in _pipelines:
             from kokoro import KPipeline
             _pipelines[lang_code] = KPipeline(lang_code=lang_code, repo_id=REPO_ID, model=_get_model())
@@ -293,6 +307,8 @@ async def synthesize(request: Request):
 
     lang_code = voice[0]
     pipeline = _get_pipeline(lang_code)
+    request_id = _new_request_id()
+    request_started = time.monotonic()
 
     # ── egress pacing ────────────────────────────────────────────────────────
     # Measured with test_streaming.py: Kokoro generates far faster than real
@@ -341,13 +357,22 @@ async def synthesize(request: Request):
     gen_exhausted = False
 
     def _next_result():
-        return next(gen, None)
+        # Holding this lock only during one generator advance permits other
+        # requests to stream/pacing-sleep concurrently while preventing MPS
+        # shader-cache races during model execution.
+        wait_started = time.monotonic()
+        with _inference_lock:
+            waited_ms = (time.monotonic() - wait_started) * 1000
+            result = next(gen, None)
+        return result, waited_ms
 
     async def _pull_more(buf: bytearray) -> bool:
         """Advance the pipeline by one chunk (one blocking model call, run
         off the event loop). Returns False once the pipeline is exhausted."""
         nonlocal gen_exhausted
-        result = await run_in_threadpool(_next_result)
+        (result, waited_ms) = await run_in_threadpool(_next_result)
+        if waited_ms >= 10:
+            print(f"[tts {request_id}] inference lock wait={waited_ms:.0f}ms", flush=True)
         if result is None:
             gen_exhausted = True
             return False
@@ -359,47 +384,52 @@ async def synthesize(request: Request):
         return True
 
     async def generate():
-        yield _wav_stream_header(SAMPLE_RATE)
+        print(f"[tts {request_id}] start chars={len(text)} voice={voice} speed={speed}", flush=True)
+        try:
+            yield _wav_stream_header(SAMPLE_RATE)
 
-        bytes_per_ms = SAMPLE_RATE * 2 / 1000  # int16 mono
+            bytes_per_ms = SAMPLE_RATE * 2 / 1000  # int16 mono
 
-        def _aligned(n_bytes):
-            n = int(n_bytes)
-            return n - (n % 2)  # keep on a 16-bit sample boundary
+            def _aligned(n_bytes):
+                n = int(n_bytes)
+                return n - (n % 2)  # keep on a 16-bit sample boundary
 
-        buf = bytearray()
+            buf = bytearray()
 
         # Accumulate chunks until we have enough for the initial burst (or
         # the whole utterance is shorter than that and the pipeline's done).
-        initial_n_target = _aligned(INITIAL_BUFFER_MS * bytes_per_ms)
-        while len(buf) < initial_n_target and not gen_exhausted:
-            if await request.is_disconnected():
-                return
-            await _pull_more(buf)
-
-        if not buf:
-            return
-
-        initial_n = _aligned(min(initial_n_target, len(buf)))
-        yield bytes(buf[:initial_n])
-        del buf[:initial_n]
-
-        chunk_n = _aligned(PACE_CHUNK_MS * bytes_per_ms) or 2
-        while buf or not gen_exhausted:
-            if await request.is_disconnected():
-                return
-            if len(buf) < chunk_n and not gen_exhausted:
+            initial_n_target = _aligned(INITIAL_BUFFER_MS * bytes_per_ms)
+            while len(buf) < initial_n_target and not gen_exhausted:
+                if await request.is_disconnected():
+                    return
                 await _pull_more(buf)
-                continue
-            end = min(chunk_n, len(buf))
-            if end == 0:
-                continue
-            chunk = bytes(buf[:end])
-            del buf[:end]
-            yield chunk
-            if buf or not gen_exhausted:
-                chunk_duration_sec = len(chunk) / 2 / SAMPLE_RATE
-                await asyncio.sleep(chunk_duration_sec * PACE_FACTOR)
+
+            if not buf:
+                return
+
+            initial_n = _aligned(min(initial_n_target, len(buf)))
+            yield bytes(buf[:initial_n])
+            del buf[:initial_n]
+
+            chunk_n = _aligned(PACE_CHUNK_MS * bytes_per_ms) or 2
+            while buf or not gen_exhausted:
+                if await request.is_disconnected():
+                    return
+                if len(buf) < chunk_n and not gen_exhausted:
+                    await _pull_more(buf)
+                    continue
+                end = min(chunk_n, len(buf))
+                if end == 0:
+                    continue
+                chunk = bytes(buf[:end])
+                del buf[:end]
+                yield chunk
+                if buf or not gen_exhausted:
+                    chunk_duration_sec = len(chunk) / 2 / SAMPLE_RATE
+                    await asyncio.sleep(chunk_duration_sec * PACE_FACTOR)
+        finally:
+            elapsed_ms = (time.monotonic() - request_started) * 1000
+            print(f"[tts {request_id}] finish elapsed={elapsed_ms:.0f}ms", flush=True)
 
     return StreamingResponse(generate(), media_type="audio/wav",
         headers={**_cors(request), "X-Streaming": "true", "X-Model": "kokoro-82m", "X-Voice": voice,

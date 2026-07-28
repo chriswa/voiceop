@@ -51,7 +51,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { speechService.stop() }
 
     private func routeCommand(_ text: String, context: DictationContext) {
-        guard context.bundleIdentifier == "com.spaceterm.app" else { SoundEffect.unrecognized.play(); return }
+        Log.log("command: captured frontmost bundleID=\(context.bundleIdentifier ?? "(none)")")
+        Log.log("command: forwarding \(text.count)-char transcript to Spaceterm")
         SpacetermSocket.voiceCommand(text) { ok in
             guard !ok else { return }
             Task { @MainActor in SoundEffect.unrecognized.play() }

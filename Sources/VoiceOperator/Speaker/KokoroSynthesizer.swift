@@ -126,10 +126,21 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         return req
     }
 
+    /// Join `path` onto the configured base URL. `config.json` is hand-edited, so
+    /// a malformed or scheme-less value is expected rather than exceptional —
+    /// fall back to the local default instead of trapping on a nil `URL`.
     static func endpoint(_ path: String) -> URL {
+        func join(_ base: String) -> URL? {
+            let root = base.hasSuffix("/") ? String(base.dropLast()) : base
+            guard let url = URL(string: "\(root)/\(path)"),
+                  url.scheme != nil, url.host != nil else { return nil }
+            return url
+        }
         let base = Config.ttsBaseURL
-        let root = base.hasSuffix("/") ? String(base.dropLast()) : base
-        return URL(string: "\(root)/\(path)")!
+        if let url = join(base) { return url }
+        Log.log("tts: unusable base URL \(base.isEmpty ? "(empty)" : base) — falling back to \(Config.defaultTTSBaseURL)")
+        // Safe to force-unwrap: a known-good compile-time constant.
+        return join(Config.defaultTTSBaseURL)!
     }
 
     private static func applyTTSHeaders(to request: inout URLRequest) {

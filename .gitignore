@@ -4,3 +4,9 @@ build/
 *.xcodeproj
 .swiftpm/
 __pycache__/
+
+# Secrets. These live in ~/Library/Application Support/VoiceOperator/ and should
+# never be inside the repo — this is a backstop in case a copy lands here while
+# testing. config.json holds Cloudflare Access service-token credentials.
+config.json
+baseten-key

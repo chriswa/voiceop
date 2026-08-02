@@ -6,6 +6,60 @@ coordinator, so dictation always mutes/halts TTS and no spoken update is missed.
 
 See `DESIGN.md` for architecture, reverse-engineering findings, and the phased plan.
 
+## Requirements
+
+All three are hard requirements — the build fails without them.
+
+| Requirement | Why |
+|---|---|
+| **macOS 15 (Sequoia) or newer** | `Package.swift` sets a `.macOS(.v15)` deployment target. The floor comes from grpc-swift 2.x, whose generated client is `@available(macOS 15.0, *)` — not from the app's own code, which uses only AppKit/Carbon/AVFoundation APIs available much earlier. |
+| **Apple Silicon (arm64)** | `Sources/COpus/lib/libopus.a` is a prebuilt **arm64-only** static archive. Intel Macs fail at the link step; see `Sources/COpus/README.md` to rebuild it for x86_64. |
+| **Full Xcode 16 or newer** | `swift-tools-version: 6.0` requires Swift 6.0+. The Command Line Tools alone are **not** sufficient: SwiftPM invokes `xcrun --show-sdk-platform-path`, which only resolves inside a full Xcode installation. |
+
+Verify before building:
+
+```bash
+sw_vers -productVersion   # want 15.0+
+uname -m                  # want arm64
+swift --version           # want 6.0+
+xcode-select -p           # want /Applications/Xcode.app/Contents/Developer
+```
+
+If `xcode-select -p` reports `/Library/Developer/CommandLineTools`, install Xcode
+and point the toolchain at it:
+
+```bash
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+```
+
+Optional: `protoc` (`brew install protobuf`) — only needed to regenerate the
+gRPC/protobuf Swift via `scripts/gen-proto.sh`. The generated sources are
+checked in, so a normal build doesn't need it.
+
+### Troubleshooting
+
+- **`xcrun: error: unable to lookup item 'PlatformPath' … in SDK
+  '/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk'`** — full Xcode isn't
+  selected. See `xcode-select -s` above.
+- **`package … is using Swift tools version 6.0.0 but the installed version is
+  5.x`** — your toolchain predates Swift 6. Xcode 16+ is required, which in turn
+  requires macOS 14.5+.
+- **A link error naming `libopus.a` and a mismatched architecture** — the
+  vendored archive is arm64; rebuild it for your CPU per `Sources/COpus/README.md`.
+
+## Transcription backends
+
+`WisprFlowTranscriber` (the default) uses Wispr's gRPC path, which returns
+**formatted** text honouring your Wispr dictionary. It needs Wispr's Baseten
+API key, read at runtime from `$VOICEOP_BASETEN_KEY` or
+`~/Library/Application Support/VoiceOperator/baseten-key`. **Never commit it.**
+
+Without the key the app silently falls back to `WisprTranscriber` (raw
+`/llm/asr`). That fallback is plain Whisper: still punctuated and capitalized,
+but with **no dictionary biasing and no formatting pass**, so proper nouns and
+jargon come back misspelled ("kubectl", "Coda" and friends). If dictation is
+mangling your custom vocabulary, check the key first.
+
 ## Build & run
 
 ```bash

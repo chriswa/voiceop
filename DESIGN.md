@@ -50,16 +50,28 @@ command transcription but plays the unrecognized/error cue and performs no
 action. Clipboard speech and clipboard summarization remain user-facing tools;
 the latter is an independent Haiku clipboard utility, not transcript tracking.
 
-### English transcription preference (2026-07-27)
+### English transcription preference (2026-07-27, reversed 2026-08-02)
 
 The current Wispr Flow bundle's `transcribeOpenAIAudio` derives a single
 selected language and sends it as the string `language` in `/llm/asr` (for
-English, `"en"`). Voice Operator supplies `"en"` for dictation. Its historical
-gRPC replica has an unresolved protobuf `Language` enum and therefore cannot
-reliably send that preference; when a language is requested it deliberately
-uses the confirmed raw `/llm/asr` path rather than silently language-detecting.
-This trades server formatting for correct language selection until the current
-formatted Flow request is fully ported.
+English, `"en"`). Voice Operator supplies `"en"` for dictation. Its gRPC replica
+has an unresolved protobuf `Language` enum and therefore cannot reliably send
+that preference.
+
+**Original (2026-07-27):** when a language was requested, `WisprFlowTranscriber`
+used the confirmed raw `/llm/asr` path rather than silently language-detecting —
+trading server formatting for correct language selection.
+
+**Reversed (2026-08-02):** that gate made the formatted path *unreachable*.
+`AudioArbiter` passes `"en"` at every call site, so `!language.isEmpty` was
+always true and the Baseten-key branch below it never ran — the app silently
+served raw Whisper no matter how it was configured. Voice Operator is
+single-user and English-only, so server-side language detection is reliable
+here and the formatted result is worth more than the explicit preference. The
+gate is gone; `language` now applies to the fallback path only.
+
+Confirm which path a dictation took with `grep "flow:" ~/Library/Logs/VoiceOperator.log`
+— `flow: gRPC ok — N chars` is the formatted path.
 
 The historical design notes below describe the retired agent-narration system;
 they are retained only as reverse-engineering history and are superseded by this

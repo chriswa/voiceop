@@ -50,8 +50,17 @@ API key, read at runtime from `$VOICEOP_BASETEN_KEY` or
 Without the key the app silently falls back to `WisprTranscriber` (raw
 `/llm/asr`). That fallback is plain Whisper: still punctuated and capitalized,
 but with **no dictionary biasing and no formatting pass**, so proper nouns and
-jargon come back misspelled ("kubectl", "Coda" and friends). If dictation is
-mangling your custom vocabulary, check the key first.
+jargon come back misspelled ("kubectl", "Coda" and friends).
+
+Since both paths return plausible-looking text, check the log to see which one
+actually ran:
+
+```bash
+grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
+```
+
+`flow: gRPC ok — N chars` is the formatted path. `flow: no Baseten key` or
+`flow: gRPC failed (…)` means you're on the raw fallback.
 
 ## TTS endpoint
 

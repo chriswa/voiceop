@@ -8,25 +8,21 @@ See `DESIGN.md` for architecture, reverse-engineering findings, and the phased p
 
 ## Requirements
 
-All three are hard requirements — the build fails without them.
+**Runtime:** macOS 13 (Ventura) or newer, Apple Silicon or Intel. Distributable
+builds are universal (`arm64` + `x86_64`); see [`docs/RELEASING.md`](docs/RELEASING.md).
 
-| Requirement | Why |
-|---|---|
-| **macOS 15 (Sequoia) or newer** | `Package.swift` sets a `.macOS(.v15)` deployment target. The floor comes from grpc-swift 2.x, whose generated client is `@available(macOS 15.0, *)` — not from the app's own code, which uses only AppKit/Carbon/AVFoundation APIs available much earlier. |
-| **Apple Silicon (arm64)** | `Sources/COpus/lib/libopus.a` is a prebuilt **arm64-only** static archive. Intel Macs fail at the link step; see `Sources/COpus/README.md` to rebuild it for x86_64. |
-| **Full Xcode 16 or newer** | `swift-tools-version: 6.0` requires Swift 6.0+. The Command Line Tools alone are **not** sufficient: SwiftPM invokes `xcrun --show-sdk-platform-path`, which only resolves inside a full Xcode installation. |
-
-Verify before building:
+**Building from source** still needs a full Xcode 16+ toolchain on an Apple Silicon
+Mac (Swift 6 / `swift-tools-version: 6.0`). The Intel machine never compiles —
+it receives a cross-compiled release. The Command Line Tools alone are **not**
+sufficient: SwiftPM invokes `xcrun --show-sdk-platform-path`, which only resolves
+inside a full Xcode installation.
 
 ```bash
-sw_vers -productVersion   # want 15.0+
-uname -m                  # want arm64
 swift --version           # want 6.0+
 xcode-select -p           # want /Applications/Xcode.app/Contents/Developer
 ```
 
-If `xcode-select -p` reports `/Library/Developer/CommandLineTools`, install Xcode
-and point the toolchain at it:
+If `xcode-select -p` reports `/Library/Developer/CommandLineTools`:
 
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -42,10 +38,7 @@ checked in, so a normal build doesn't need it.
   '/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk'`** — full Xcode isn't
   selected. See `xcode-select -s` above.
 - **`package … is using Swift tools version 6.0.0 but the installed version is
-  5.x`** — your toolchain predates Swift 6. Xcode 16+ is required, which in turn
-  requires macOS 14.5+.
-- **A link error naming `libopus.a` and a mismatched architecture** — the
-  vendored archive is arm64; rebuild it for your CPU per `Sources/COpus/README.md`.
+  5.x`** — your toolchain predates Swift 6. Xcode 16+ is required.
 
 ## Transcription backends
 
@@ -60,14 +53,50 @@ but with **no dictionary biasing and no formatting pass**, so proper nouns and
 jargon come back misspelled ("kubectl", "Coda" and friends). If dictation is
 mangling your custom vocabulary, check the key first.
 
+## TTS endpoint
+
+Kokoro TTS defaults to `http://localhost:56841`. A GUI app launched via `open`
+does **not** inherit the shell environment, so durable overrides live in
+`~/Library/Application Support/VoiceOperator/config.json`:
+
+```json
+{
+  "tts": {
+    "url": "https://tts.chriswa.com",
+    "headers": {
+      "CF-Access-Client-Id": "…",
+      "CF-Access-Client-Secret": "…"
+    }
+  }
+}
+```
+
+Precedence: `$VOICEOP_KOKORO_URL` → `config.json` → localhost. The `headers`
+block is for Cloudflare Access service tokens on a remote TTS host — without
+them the app would follow Access's login redirect and try to play HTML as audio
+(guarded against, but speech still fails).
+
+## Install
+
+Runs on **macOS 13 (Ventura) or later**, on both Apple Silicon and Intel Macs.
+
+1. Download `VoiceOperator.zip` from the [latest release](../../releases/latest).
+2. Unzip it and drag **Voice Operator.app** into `/Applications`.
+3. Open it. It's signed and notarized by Apple, so it launches without warnings
+   (on first open macOS confirms it was downloaded from the internet — click
+   **Open**).
+
 ## Build & run
 
 ```bash
-swift build                 # compile
+swift build                 # compile (host arch)
 swift test                  # unit tests
 ./scripts/make-app.sh       # build "build/Voice Operator.app" (menu-bar accessory)
 open "build/Voice Operator.app"
 ```
+
+For a notarized universal release binary, see [`docs/RELEASING.md`](docs/RELEASING.md)
+(`./scripts/make-release.sh`).
 
 ### Iterating on changes
 

@@ -1,8 +1,8 @@
 # Compatibility plan — Intel/macOS 13 support + configurable TTS
 
-Status: **approved, not yet implemented.** Written 2026-08-02 from an
-investigation session on the Intel machine. Implementation happens on the Apple
-Silicon machine (the only one with Xcode).
+Status: **implemented (2026-08-02).** Workstreams 1–3 landed: universal macOS 13
+binary (grpc-swift 1.x + fat libopus), configurable TTS via `config.json`,
+release tooling ported from `claudeusagetray`, docs updated.
 
 ## Goal
 

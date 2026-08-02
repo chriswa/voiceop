@@ -1,19 +1,22 @@
 import Foundation
 
-/// Kokoro TTS (kokoro-82m), a local HTTP server (DESIGN.md). The streaming path
+/// Kokoro TTS (kokoro-82m) over HTTP (DESIGN.md). The streaming path
 /// (`POST /synthesize`) returns a single `audio/wav` body — a 44-byte PCM WAV
 /// header (with placeholder `0xffffffff` sizes, since the length isn't knowable
 /// up front) followed by raw **s16le PCM, mono, 24000 Hz**, flushed as it's
 /// generated so playback can start on the first chunk:
 ///
-///     POST http://localhost:56841/synthesize
+///     POST <base>/synthesize
 ///     Content-Type: application/json
 ///     { "text": <string>, "voice": <voice id>, "speed": <0.5–2.0> }
+///
+/// Base URL precedence: `$VOICEOP_KOKORO_URL` → `config.json` `tts.url` →
+/// `http://localhost:56841`. Optional `tts.headers` (e.g. Cloudflare Access
+/// service-token pair) are attached to every request — see `Config`.
 ///
 /// To fit the app's f32le streaming pipeline (`TTSEngine`/`PCMReframer`), this
 /// strips the WAV header and converts the s16le samples to `pcm_f32le` before
 /// yielding them. Unlike Cartesia there is no API key and no volume control.
-/// Override the base URL with `$VOICEOP_KOKORO_URL` (default the local server).
 struct KokoroSynthesizer: SpeechSynthesizer {
     /// Kokoro's native output rate (s16le, mono). See `TTSEngine.streamFormat`.
     let sampleRate = 24_000
@@ -23,17 +26,19 @@ struct KokoroSynthesizer: SpeechSynthesizer {
     /// always emits a canonical 44-byte PCM header (RIFF/WAVE/fmt /data).
     private static let wavHeaderSize = 44
 
-    private static let defaultBaseURL = "http://localhost:56841"
-
     /// The small, provider-neutral catalogue exposed by Voice Operator's local
     /// API. Kokoro's response has varied between builds, so accept both a bare
     /// string list and objects carrying an `id`/`name` field.
     static func availableVoiceIDs() async throws -> [String] {
-        let base = ProcessInfo.processInfo.environment["VOICEOP_KOKORO_URL"]
-            .flatMap { $0.isEmpty ? nil : $0 } ?? defaultBaseURL
-        let url = URL(string: base.hasSuffix("/") ? "\(base)voices" : "\(base)/voices")!
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw SpeakerError.synthesis("voice list unavailable") }
+        var req = URLRequest(url: endpoint("voices"))
+        req.httpMethod = "GET"
+        req.timeoutInterval = 30
+        applyTTSHeaders(to: &req)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw SpeakerError.synthesis("voice list unavailable")
+        }
+        try rejectNonJSON(http)
         if let strings = try? JSONSerialization.jsonObject(with: data) as? [String] { return strings.sorted() }
         if let objects = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             return objects.compactMap { ($0["id"] ?? $0["name"]) as? String }.sorted()
@@ -45,12 +50,6 @@ struct KokoroSynthesizer: SpeechSynthesizer {
             return voices.compactMap { ($0["id"] ?? $0["name"]) as? String }.sorted()
         }
         throw SpeakerError.synthesis("unrecognized voice list")
-    }
-
-    private var synthesizeURL: URL {
-        let base = ProcessInfo.processInfo.environment["VOICEOP_KOKORO_URL"]
-            .flatMap { $0.isEmpty ? nil : $0 } ?? Self.defaultBaseURL
-        return URL(string: base.hasSuffix("/") ? "\(base)synthesize" : "\(base)/synthesize")!
     }
 
     // MARK: - Streaming
@@ -69,6 +68,7 @@ struct KokoroSynthesizer: SpeechSynthesizer {
                         throw SpeakerError.http(
                             status: (resp as? HTTPURLResponse)?.statusCode ?? -1, body: "")
                     }
+                    try Self.requireAudioContentType(http)
                     var headerRemaining = Self.wavHeaderSize
                     var s16 = [UInt8]()
                     s16.reserveCapacity(8192)
@@ -101,6 +101,7 @@ struct KokoroSynthesizer: SpeechSynthesizer {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             throw SpeakerError.http(status: status, body: String(decoding: data.prefix(300), as: UTF8.self))
         }
+        try Self.requireAudioContentType(http)
         // The server's streaming header carries placeholder (0xffffffff) sizes,
         // which `AVAudioPlayer` can't derive a duration from. Rebuild a canonical
         // WAV from the real sample bytes instead of replaying the raw body.
@@ -109,19 +110,59 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         return WAVFile(sampleRate: sampleRate, samples: samples).data
     }
 
-    // MARK: - Shared request
+    // MARK: - Shared request / URL helpers
 
     private func makeRequest(text: String, voiceID: String) -> URLRequest {
-        var req = URLRequest(url: synthesizeURL)
+        var req = URLRequest(url: Self.endpoint("synthesize"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 30
+        Self.applyTTSHeaders(to: &req)
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "text": text,
             "voice": voiceID,
             "speed": speed,
         ])
         return req
+    }
+
+    static func endpoint(_ path: String) -> URL {
+        let base = Config.ttsBaseURL
+        let root = base.hasSuffix("/") ? String(base.dropLast()) : base
+        return URL(string: "\(root)/\(path)")!
+    }
+
+    private static func applyTTSHeaders(to request: inout URLRequest) {
+        for (name, value) in Config.ttsHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+    }
+
+    /// Reject Cloudflare Access (and similar) HTML login pages that arrive as
+    /// HTTP 200 after `URLSession` follows a 302. Without this guard the app
+    /// strips 44 bytes as a WAV header and plays the remaining HTML as PCM noise.
+    static func requireAudioContentType(_ http: HTTPURLResponse) throws {
+        let mime = mediaType(of: http)
+        guard mime.hasPrefix("audio/") else {
+            let shown = mime.isEmpty ? "(missing)" : mime
+            throw SpeakerError.synthesis("expected audio response, got Content-Type: \(shown)")
+        }
+    }
+
+    private static func rejectNonJSON(_ http: HTTPURLResponse) throws {
+        let mime = mediaType(of: http)
+        // Some local Kokoro builds omit Content-Type; accept that. Reject HTML
+        // (Access login) and other clearly-wrong types.
+        if mime.isEmpty { return }
+        if mime.contains("json") || mime.hasPrefix("text/plain") { return }
+        throw SpeakerError.synthesis("expected JSON voice list, got Content-Type: \(mime)")
+    }
+
+    private static func mediaType(of http: HTTPURLResponse) -> String {
+        let raw = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+        return raw.split(separator: ";").first
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            ?? ""
     }
 
     // MARK: - PCM conversion

@@ -33,11 +33,17 @@ something new, record it in `DESIGN.md` + `spike/` so it's never lost.
 `WisprFlowTranscriber` (the `AudioArbiter` default) transcribes over Wispr's
 primary **gRPC** path (`flow_api.v1.TranscriptionService` on Baseten), which
 returns **formatted** text with the user's dictionary — see DESIGN.md Milestone C
-and `proto/flow_api_v1.proto`. It needs Wispr's Baseten `Api-Key`, read at runtime
-from `$VOICEOP_BASETEN_KEY` or `~/Library/Application Support/VoiceOperator/baseten-key`
-(**never commit it**). Without the key, it falls back to `WisprTranscriber`
-(raw `/llm/asr`). Regenerate the gRPC/protobuf Swift with `scripts/gen-proto.sh`.
-Live-test either path with `--flow-grpc-test` / `--asr-test`.
+and `proto/flow_api_v1.proto`. Client is **grpc-swift 1.x** (not 2.x) so the app
+can target macOS 13 / universal. It needs Wispr's Baseten `Api-Key`, read at
+runtime from `$VOICEOP_BASETEN_KEY` or
+`~/Library/Application Support/VoiceOperator/baseten-key` (**never commit it**).
+Without the key, it falls back to `WisprTranscriber` (raw `/llm/asr`). Regenerate
+the gRPC/protobuf Swift with `scripts/gen-proto.sh`. Live-test either path with
+`--flow-grpc-test` / `--asr-test`.
+
+TTS base URL / Access headers: `$VOICEOP_KOKORO_URL` or
+`~/Library/Application Support/VoiceOperator/config.json` (see `Config.swift`).
+**Never commit** Cloudflare Access secrets.
 
 ## Building — `swift build` alone is NOT enough
 
@@ -54,7 +60,8 @@ Then have the app restart — either the user clicks the menu-bar
 **Restart Voice Operator** item, or kill the running `VoiceOperator` process and
 `open "build/Voice Operator.app"`.
 
-`swift test` runs the unit tests.
+`swift test` runs the unit tests. Notarized universal releases:
+`docs/RELEASING.md` / `./scripts/make-release.sh`.
 
 ## Debugging
 

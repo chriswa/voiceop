@@ -83,10 +83,26 @@ gRPC/WebSocket streaming path; **we replicate the JSON HTTP path.**
 
 Note `status: "raw_transcript"` with `llm_text: null`: this call returned only the
 first pipeline stage. "Claude" already spells correctly here via `dictionary_context`
-(the win). The ALIGN/FORMAT casing ("kubectl"/"Coda") is expected to arrive via
-`llm_text`/`pipeline_text` — **OPEN: confirm how the JSON path surfaces the formatted
-result** (further response, or a follow-up `/llm/*` formatting call) before wiring the
-Swift transcriber's response handling.
+(the win).
+
+**Resolved (2026-08-02, from Wispr bundle `getFinalTranscriptionResult`):** the JSON
+`/llm/asr_audio_chunks` path does **not** surface a formatted English result.
+For English it returns `[RawTranscript, asrText]`. The only follow-up formatting
+call is `formatNonEnglish` → `/llm/format_non_english`, gated on the language *not*
+being English. Status enum: `Formatted="formatted"`, `RawTranscript="raw_transcript"`,
+`Empty="transcription_empty"`, `Fallback="http_fallback"`.
+
+Two HTTP endpoints that would transcribe-and-format exist as **dead code** (one
+definition each, zero call sites) — do not build on them without new bundle evidence:
+
+| Symbol | Endpoint |
+|---|---|
+| `transcribeAndFormat` | `POST /llm/api` |
+| `formatEnglish` | `POST /llm/formatting` |
+
+`status: "formatted"` + `llm_text` only arrives from the Baseten gRPC response.
+See `COMPATIBILITY-PLAN.md` ("Ground truth: why we keep gRPC") and DESIGN.md
+Milestone C.
 
 ## Repro
 

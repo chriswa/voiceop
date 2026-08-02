@@ -344,22 +344,32 @@ optional-name peel and last-referenced fallback apply uniformly.
   `dictionary_context` path below (the correct biasing channel). **Read the app, don't probe the
   live API** (see `CLAUDE.md`).
 
-- **Milestone C — SHIPPED: formatted gRPC dictation (Wispr parity) (2026-07-08).**
+- **Milestone C — SHIPPED: formatted gRPC dictation (Wispr parity) (2026-07-08; client
+  on grpc-swift 1.x as of 2026-08-02 for macOS 13 / universal).**
   Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest` + the
   `flow_api.v1` protobuf), captured in `spike/flow_request.md`, `spike/flow_spike.py`, and
   `proto/flow_api_v1.proto`. Three transports Wispr uses, in fallback order:
   1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowTranscriber`).** Unary
      `flow_api.v1.TranscriptionService/Transcribe` on `model-v31pl413.grpc.api.baseten.co:443`
-     (TLS, grpc-swift v2). Sends a protobuf `Request {init{metadata,preferences.vocabulary=dictionary},
-     context, payload.audio_packets=opus, commit}`; metadata headers `authorization: Bearer <jwt>`,
+     (TLS, grpc-swift **1.x** — 2.x floors the deployment target at macOS 15). Sends a protobuf
+     `Request {init{metadata,preferences.vocabulary=dictionary}, context,
+     payload.audio_packets=opus, commit}`; metadata headers `authorization: Bearer <jwt>`,
      `baseten-authorization: Api-Key <key>`, `baseten-model-id`, `x-baseten-environment: production`,
      `disable-formatting: false`. Returns **formatted** `result.output.plaintext` (→ we use
      `llm_text || asr_text`). **Validated live end to end** — "kubectl"/"Coda" correctly spelled/cased.
-     Opus via the vendored `COpus`/`OpusEncoder` (16 kHz mono, 20 ms / 320-sample frames).
+     Opus via the vendored universal `COpus`/`OpusEncoder` (16 kHz mono, 20 ms / 320-sample frames).
      The Baseten `Api-Key` is read at runtime from `VOICEOP_BASETEN_KEY` or
      `~/Library/Application Support/VoiceOperator/baseten-key` and is **not committed**.
   2. **Baseten `run_remote` HTTP (msgpack)** — decoded but rejected `input is malformed` (server
      schema not in the bundle); superseded by the gRPC path, not implemented.
   3. **`/llm/asr_audio_chunks` / `/llm/asr` (raw fallback)** — `WisprTranscriber`. gRPC falls back
-     here when the Baseten key is absent or the call fails. Raw Whisper; never formats.
+     here when the Baseten key is absent or the call fails. Raw Whisper; never formats for English.
+- **Why HTTP never replaces gRPC for formatted English (bundle, 2026-08-02).**
+  Decoded from Wispr's `getFinalTranscriptionResult`: `/llm/asr_audio_chunks` returns
+  `status: "raw_transcript"`. For English that branch falls through to raw `asrText`; the only
+  follow-up formatting call is `formatNonEnglish` → `/llm/format_non_english`. Two endpoints that
+  would transcribe-and-format over plain HTTP (`transcribeAndFormat` → `POST /llm/api`,
+  `formatEnglish` → `POST /llm/formatting`) are **dead code** in the shipped app (definition only,
+  zero call sites) — do not build on them without new bundle evidence. Formatted `llm_text` only
+  arrives from the Baseten gRPC response. See `COMPATIBILITY-PLAN.md`.
 - Opus params (frame size 320 / 20 ms, `OPUS_APPLICATION_VOIP`) confirmed for the chunks/gRPC paths.

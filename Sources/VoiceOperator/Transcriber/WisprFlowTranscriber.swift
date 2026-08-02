@@ -1,6 +1,7 @@
 import Foundation
-import GRPCCore
-import GRPCNIOTransportHTTP2
+import GRPC
+import NIOHPACK
+import NIOPosix
 import FlowAPI
 
 /// Wispr-parity dictation over the **primary** transcription path: the gRPC
@@ -86,22 +87,40 @@ struct WisprFlowTranscriber: Transcriber {
         let audio = try OpusEncoder().encode(pcm: wav.samples)
 
         let request = Self.buildRequest(packets: audio.packets, words: words, token: token)
-        let metadata: Metadata = [
-            "authorization": "Bearer \(token)",
-            "baseten-authorization": "Api-Key \(apiKey)",
-            "baseten-model-id": "model-\(Self.modelId)",
-            "x-baseten-environment": "production",
-            "disable-formatting": "false",
-        ]
 
-        let transport = try HTTP2ClientTransport.Posix(
-            target: .dns(host: Self.host, port: 443),
-            transportSecurity: .tls()
-        )
-        return try await withGRPCClient(transport: transport) { grpc in
-            let service = FlowApi_V1_TranscriptionService.Client(wrapping: grpc)
-            let response = try await service.transcribe(request, metadata: metadata)
+        var headers = HPACKHeaders()
+        headers.add(name: "authorization", value: "Bearer \(token)")
+        headers.add(name: "baseten-authorization", value: "Api-Key \(apiKey)")
+        headers.add(name: "baseten-model-id", value: "model-\(Self.modelId)")
+        headers.add(name: "x-baseten-environment", value: "production")
+        headers.add(name: "disable-formatting", value: "false")
+        let callOptions = CallOptions(customMetadata: headers)
+
+        // grpc-swift 1.x: one-shot channel per call (matches the previous 2.x
+        // withGRPCClient lifetime). The EventLoopGroup must outlive the channel.
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let channel: GRPCChannel
+        do {
+            channel = try GRPCChannelPool.with(
+                target: .host(Self.host, port: 443),
+                transportSecurity: .tls(.makeClientDefault(compatibleWith: group)),
+                eventLoopGroup: group
+            )
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+
+        do {
+            let client = FlowApi_V1_TranscriptionServiceAsyncClient(channel: channel)
+            let response = try await client.transcribe(request, callOptions: callOptions)
+            _ = try await channel.close().get()
+            try await group.shutdownGracefully()
             return Self.text(from: response)
+        } catch {
+            _ = try? await channel.close().get()
+            try? await group.shutdownGracefully()
+            throw error
         }
     }
 
@@ -144,7 +163,7 @@ struct WisprFlowTranscriber: Transcriber {
         request.init_p = initMsg
         request.context = context
         request.payload = payload
-        request.commit = FlowApi_V1_Commit(rawValue: 1) ?? .unspecified   // COMMIT_TRUE
+        request.commit = .true
         return request
     }
 

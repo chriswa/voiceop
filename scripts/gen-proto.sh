@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Regenerate Sources/FlowAPI/Generated from proto/flow_api_v1.proto.
 # Needs `protoc` (brew install protobuf). Builds the Swift plugins from the
-# resolved SwiftPM deps, then runs protoc.
+# resolved SwiftPM deps (grpc-swift 1.x + swift-protobuf), then runs protoc.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 swift build --product protoc-gen-swift --product protoc-gen-grpc-swift
-BIN=.build/debug
+BIN="$(swift build --product protoc-gen-swift --show-bin-path)"
 rm -f Sources/FlowAPI/Generated/*.swift
 protoc --proto_path=proto \
   --plugin=protoc-gen-swift="$BIN/protoc-gen-swift" \

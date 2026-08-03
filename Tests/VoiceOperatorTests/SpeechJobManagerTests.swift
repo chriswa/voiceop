@@ -52,6 +52,56 @@ final class SpeechJobManagerTests: XCTestCase {
         XCTAssertNil(terminal?.playbackState)
         XCTAssertEqual(terminal?.characterOffset, "First sentence. Second sentence.".unicodeScalars.count)
     }
+
+    /// The opt-in counterpart of the test above: a client that passes a cursor
+    /// wants playback transitions, which a terminal-only wait cannot deliver.
+    func testCursorLongPollWakesOnPlaybackTransitions() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        await manager.configure(
+            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in },
+            halt: {})
+
+        let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        let queued = await manager.result(id: accepted.id)!
+        XCTAssertEqual(queued.playbackState, .queued)
+
+        let poll = ResultBox()
+        Task { await poll.store(await manager.wait(id: accepted.id, seconds: 30, since: queued.version)) }
+        try? await Task.sleep(for: .milliseconds(20))
+        let beforeAudio = await poll.current()
+        XCTAssertNil(beforeAudio, "nothing changed yet, so the poll must still be parked")
+
+        await gate.startNext()
+        let speaking = await poll.waitForResult()
+        XCTAssertEqual(speaking?.state, .inProgress)
+        XCTAssertEqual(speaking?.playbackState, .speaking)
+        XCTAssertGreaterThan(speaking!.version, queued.version)
+    }
+
+    /// Without this, a client that was away when the job moved would park for
+    /// the full wait on a transition that had already happened — which is the
+    /// terminal-only behaviour it was trying to escape.
+    func testCursorLongPollReturnsImmediatelyForAChangeAlreadyMissed() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        await manager.configure(
+            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in },
+            halt: {})
+
+        let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        let queued = await manager.result(id: accepted.id)!
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
+
+        // The client only now asks, holding the version from before the change.
+        let missed = await manager.wait(id: accepted.id, seconds: 30, since: queued.version)
+        XCTAssertEqual(missed?.playbackState, .speaking)
+    }
 }
 
 private actor PlaybackGate {

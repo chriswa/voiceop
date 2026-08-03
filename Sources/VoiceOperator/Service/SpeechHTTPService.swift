@@ -85,14 +85,17 @@ final class SpeechHTTPService: @unchecked Sendable {
         }
         if r.method == "GET" {
             let wait = min(30, max(0, UInt64(r.query["wait"] ?? "0") ?? 0))
-            guard let result = wait > 0 ? await SpeechJobManager.shared.wait(id: id, seconds: wait) : await SpeechJobManager.shared.result(id: id) else { return .init(status: 404, object: ["error": "unknown_job"]) }
+            // `since` is opt-in: without it a long poll keeps its original
+            // terminal-only meaning, so existing callers are unaffected.
+            let since = r.query["since"].flatMap { Int($0) }
+            guard let result = wait > 0 ? await SpeechJobManager.shared.wait(id: id, seconds: wait, since: since) : await SpeechJobManager.shared.result(id: id) else { return .init(status: 404, object: ["error": "unknown_job"]) }
             return .init(status: status(result), object: object(result))
         }
         return .init(status: 405, object: ["error": "method_not_allowed"])
     }
     private func object(_ r: SpeechJobManager.Result) -> [String: Any] {
         ["id": r.id, "state": r.state.rawValue, "playback_state": r.playbackState?.rawValue as Any,
-         "character_offset": r.characterOffset, "error": r.error as Any]
+         "character_offset": r.characterOffset, "error": r.error as Any, "version": r.version]
     }
     private func status(_ r: SpeechJobManager.Result) -> Int {
         switch r.state { case .completed: return 200; case .interruptedByUser: return 409; case .cancelledByClient: return 410; case .synthesisFailed: return 500; default: return 202 }

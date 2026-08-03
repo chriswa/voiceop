@@ -10,15 +10,19 @@ actor SpeechJobManager {
     /// state, even while moving between individual sentences.
     enum State: String, Codable { case inProgress = "in_progress", completed, interruptedByUser = "interrupted_by_user", cancelledByClient = "cancelled_by_client", synthesisFailed = "synthesis_failed" }
     enum PlaybackState: String, Codable { case queued, waitingForUser = "waiting_for_user", speaking }
-    struct Result: Codable, Sendable {
+    struct Result: Codable, Sendable, Equatable {
         let id: String
         let state: State
         let playbackState: PlaybackState?
         let characterOffset: Int
         let error: String?
+        /// Monotonic per job, bumped on every observable change. A client that
+        /// echoes it back as `?since=` gets a change feed instead of a
+        /// terminal-only wait; see `wait(id:seconds:since:)`.
+        let version: Int
     }
     private struct Segment: Sendable { let text: String; let end: Int }
-    private struct Job: Sendable { let id: String; let voice: String; let segments: [Segment]; var next = 0; var state: State = .inProgress; var playbackState: PlaybackState? = .queued; var local = false }
+    private struct Job: Sendable { let id: String; let voice: String; let segments: [Segment]; var next = 0; var state: State = .inProgress; var playbackState: PlaybackState? = .queued; var local = false; var version = 0 }
 
     private var jobs: [String: Job] = [:]
     private var order: [String] = []
@@ -29,7 +33,11 @@ actor SpeechJobManager {
     private var play: (@Sendable (String, String, @escaping @Sendable () -> Void) async -> Bool)?
     private var prefetch: (@Sendable (String, String) -> Void)?
     private var halt: (@Sendable () -> Void)?
-    private var terminalWaiters: [String: [CheckedContinuation<Result, Never>]] = [:]
+    /// A parked `GET ?wait=`. `since == nil` is the original contract — wake
+    /// only at a terminal state — and `since == v` widens it to "wake at any
+    /// change after version v". Both kinds coexist on one job.
+    private struct Waiter { let since: Int?; let continuation: CheckedContinuation<Result, Never> }
+    private var waiters: [String: [Waiter]] = [:]
 
     func configure(play: @escaping @Sendable (String, String, @escaping @Sendable () -> Void) async -> Bool,
                    prefetch: @escaping @Sendable (String, String) -> Void,
@@ -38,9 +46,9 @@ actor SpeechJobManager {
     }
 
     func enqueue(text: String, voice: String, local: Bool = false) -> Result? {
-        guard !muted else { return Result(id: "", state: .cancelledByClient, playbackState: nil, characterOffset: 0, error: "speech_muted") }
+        guard !muted else { return Result(id: "", state: .cancelledByClient, playbackState: nil, characterOffset: 0, error: "speech_muted", version: 0) }
         let segments = Self.segments(text)
-        guard !segments.isEmpty else { return Result(id: "", state: .synthesisFailed, playbackState: nil, characterOffset: 0, error: "empty_text") }
+        guard !segments.isEmpty else { return Result(id: "", state: .synthesisFailed, playbackState: nil, characterOffset: 0, error: "empty_text", version: 0) }
         let id = "sp_" + UUID().uuidString.lowercased()
         jobs[id] = Job(id: id, voice: voice, segments: segments, local: local)
         order.append(id); pump()
@@ -50,11 +58,24 @@ actor SpeechJobManager {
     nonisolated func enqueueLocal(text: String) { Task { _ = await self.enqueue(text: text, voice: "af_heart", local: true) } }
 
     func result(id: String) -> Result? { jobs[id].map(result) }
-    func wait(id: String, seconds: UInt64) async -> Result? {
-        guard let job = jobs[id] else { return nil }
-        if terminal(job.state) { return result(job) }
+
+    /// Long-poll a job.
+    ///
+    /// Without `since` this returns only at a terminal state (or after
+    /// `seconds`), which is the job-level lifecycle this type deliberately
+    /// exposes: sentence handoffs are not events a caller has to care about.
+    ///
+    /// With `since` it returns as soon as the job has moved past that version,
+    /// which is the only way to observe `queued` → `speaking` without
+    /// spin-polling. The cursor is what makes that race-free: a client that
+    /// missed a transition while it was away has `job.version > since` already
+    /// true and returns immediately, instead of parking to wait for a change
+    /// that has already happened.
+    func wait(id: String, seconds: UInt64, since: Int? = nil) async -> Result? {
+        guard jobs[id] != nil else { return nil }
+        if let ready = settled(id: id, since: since) { return ready }
         return await withTaskGroup(of: Result?.self) { group in
-            group.addTask { await self.waitForTerminal(id: id) }
+            group.addTask { await self.waitForChange(id: id, since: since) }
             group.addTask { try? await Task.sleep(for: .seconds(Double(seconds))); return nil }
             let first = await group.next()!
             group.cancelAll()
@@ -62,19 +83,28 @@ actor SpeechJobManager {
             return self.result(id: id)
         }
     }
-    private func waitForTerminal(id: String) async -> Result? {
+    /// The answer a waiter would get without waiting, if there is one.
+    private func settled(id: String, since: Int?) -> Result? {
         guard let job = jobs[id] else { return nil }
         if terminal(job.state) { return result(job) }
-        return await withCheckedContinuation { cont in terminalWaiters[id, default: []].append(cont) }
+        if let since, job.version > since { return result(job) }
+        return nil
+    }
+    private func waitForChange(id: String, since: Int?) async -> Result? {
+        guard jobs[id] != nil else { return nil }
+        if let ready = settled(id: id, since: since) { return ready }
+        return await withCheckedContinuation { continuation in
+            waiters[id, default: []].append(Waiter(since: since, continuation: continuation))
+        }
     }
 
     func beginDictation() { dictating = true; interruptCurrent(state: .interruptedByUser) }
     func endDictation() { dictating = false; pump() }
     func cancel(id: String) -> Result? {
-        guard var job = jobs[id] else { return nil }
+        guard let job = jobs[id] else { return nil }
         guard !terminal(job.state) else { return result(job) }
         if current == id { interruptCurrent(state: .cancelledByClient) }
-        else { job.state = .cancelledByClient; job.playbackState = nil; jobs[id] = job; order.removeAll { $0 == id }; signalTerminal(job) }
+        else { update(id) { $0.state = .cancelledByClient; $0.playbackState = nil }; order.removeAll { $0 == id } }
         return jobs[id].map(result)
     }
     func setMuted(_ on: Bool) {
@@ -82,8 +112,8 @@ actor SpeechJobManager {
         guard on else { pump(); return }
         interruptCurrent(state: .cancelledByClient)
         for id in order where id != current {
-            guard var job = jobs[id], !terminal(job.state) else { continue }
-            job.state = .cancelledByClient; job.playbackState = nil; jobs[id] = job; signalTerminal(job)
+            guard let job = jobs[id], !terminal(job.state) else { continue }
+            update(id) { $0.state = .cancelledByClient; $0.playbackState = nil }
         }
         order.removeAll { $0 != current }
     }
@@ -91,10 +121,11 @@ actor SpeechJobManager {
     private func pump() {
         guard configured, !dictating, !muted, current == nil, let play else { return }
         while let id = order.first {
-            guard var job = jobs[id] else { order.removeFirst(); continue }
+            guard let job = jobs[id] else { order.removeFirst(); continue }
             if terminal(job.state) { order.removeFirst(); continue }
-            guard job.next < job.segments.count else { job.state = .completed; job.playbackState = nil; jobs[id] = job; order.removeFirst(); signalTerminal(job); continue }
-            current = id; job.playbackState = .queued; jobs[id] = job
+            guard job.next < job.segments.count else { update(id) { $0.state = .completed; $0.playbackState = nil }; order.removeFirst(); continue }
+            current = id
+            update(id) { $0.playbackState = .queued }
             let segment = job.segments[job.next]
             if let prefetch {
                 for index in (job.next + 1)..<min(job.segments.count, job.next + 3) {
@@ -111,35 +142,69 @@ actor SpeechJobManager {
         }
     }
     private func startedSentence(id: String) {
-        guard current == id, var job = jobs[id], !terminal(job.state) else { return }
-        job.playbackState = .speaking
-        jobs[id] = job
+        guard current == id, let job = jobs[id], !terminal(job.state) else { return }
+        update(id) { $0.playbackState = .speaking }
     }
     private func finishedSentence(id: String, completed: Bool) {
-        guard current == id, var job = jobs[id] else { return }
+        guard current == id, let job = jobs[id] else { return }
         current = nil
         if !completed {
-            if !terminal(job.state) { job.state = .synthesisFailed; job.playbackState = nil; jobs[id] = job; order.removeAll { $0 == id }; signalTerminal(job) }
+            if !terminal(job.state) { update(id) { $0.state = .synthesisFailed; $0.playbackState = nil }; order.removeAll { $0 == id } }
             pump(); return
         }
-        job.next += 1
-        if job.next == job.segments.count {
-            job.state = .completed; job.playbackState = nil; order.removeAll { $0 == id }
-            jobs[id] = job; signalTerminal(job)
+        let next = job.next + 1
+        if next == job.segments.count {
+            update(id) { $0.next = next; $0.state = .completed; $0.playbackState = nil }
+            order.removeAll { $0 == id }
         } else {
-            job.playbackState = dictating ? .waitingForUser : .queued
-            jobs[id] = job; pump()
+            update(id) { $0.next = next; $0.playbackState = dictating ? .waitingForUser : .queued }
+            pump()
         }
     }
     private func interruptCurrent(state: State) {
-        guard let id = current, var job = jobs[id] else { return }
-        job.state = state; job.playbackState = nil; jobs[id] = job; order.removeAll { $0 == id }; current = nil; halt?(); signalTerminal(job)
+        guard let id = current, jobs[id] != nil else { return }
+        // Halt the audio before announcing the state, so a client that reacts
+        // to the terminal result is never racing sound that is still playing.
+        order.removeAll { $0 == id }; current = nil; halt?()
+        update(id) { $0.state = state; $0.playbackState = nil }
     }
     private func result(_ job: Job) -> Result {
         let offset = job.next == 0 ? 0 : job.segments[job.next - 1].end
-        return Result(id: job.id, state: job.state, playbackState: job.playbackState, characterOffset: offset, error: job.state == .synthesisFailed ? "synthesis_failed" : nil)
+        return Result(id: job.id, state: job.state, playbackState: job.playbackState, characterOffset: offset,
+                      error: job.state == .synthesisFailed ? "synthesis_failed" : nil, version: job.version)
     }
-    private func signalTerminal(_ job: Job) { let r = result(job); let list = terminalWaiters.removeValue(forKey: job.id) ?? []; list.forEach { $0.resume(returning: r) } }
+
+    /// The only way a job is written after it is enqueued.
+    ///
+    /// Stamping the version and waking waiters here rather than at each call
+    /// site is the point: a change feed whose producer has to *remember* to
+    /// announce each mutation is one mutation away from silently going stale,
+    /// and the whole reason this exists is that a client could not otherwise
+    /// see `queued` → `speaking` at all.
+    private func update(_ id: String, _ change: (inout Job) -> Void) {
+        guard var job = jobs[id] else { return }
+        let before = result(job)
+        change(&job)
+        // The version advances only on a change a client could actually see,
+        // so `version` means exactly "what you can observe is different" and a
+        // cursor poll is never woken by a write that restates the same thing —
+        // `pump` re-asserting `queued`, for one.
+        guard result(job) != before else { jobs[id] = job; return }
+        job.version += 1
+        jobs[id] = job
+        signal(job)
+    }
+    private func signal(_ job: Job) {
+        guard let parked = waiters[job.id], !parked.isEmpty else { return }
+        let done = terminal(job.state)
+        var ready: [Waiter] = [], remaining: [Waiter] = []
+        for waiter in parked {
+            if waiter.since.map({ job.version > $0 }) ?? done { ready.append(waiter) } else { remaining.append(waiter) }
+        }
+        waiters[job.id] = remaining.isEmpty ? nil : remaining
+        let r = result(job)
+        ready.forEach { $0.continuation.resume(returning: r) }
+    }
     private func terminal(_ s: State) -> Bool { [.completed, .interruptedByUser, .cancelledByClient, .synthesisFailed].contains(s) }
 
     /// Sentence ranges are based on Foundation's linguistic sentence boundary

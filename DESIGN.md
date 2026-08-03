@@ -21,9 +21,23 @@ the discovery file (and re-read it after a connection failure).
 | Method | Path | Meaning |
 | --- | --- | --- |
 | `POST` | `/v1/speech` | Queue `{text, voice?}` and return `202` + job id. |
-| `GET` | `/v1/speech/{id}?wait=0..30` | Inspect or long-poll a job. Pending is `202`; complete is `200`; a dictation barge-in is `409`; cancellation/mute flush is `410`; synthesis failure is `500`. |
+| `GET` | `/v1/speech/{id}?wait=0..30[&since=N]` | Inspect or long-poll a job. Pending is `202`; complete is `200`; a dictation barge-in is `409`; cancellation/mute flush is `410`; synthesis failure is `500`. |
 | `DELETE` | `/v1/speech/{id}` | Halt immediately if audible, otherwise retract it. |
 | `GET` | `/v1/voices` | Return the currently available external Kokoro voices. |
+
+Every speech response carries a `version` that is monotonic per job and bumped
+on **every** observable change, including playback ones. It exists because
+`?wait=` alone wakes only at a *terminal* state — deliberately, since the job
+lifecycle does not mirror the sentence player — which leaves `queued →
+speaking` unobservable without spin-polling. A client that echoes the last
+version back as `?since=N` gets the wider contract: return as soon as the job
+moves past version `N`, still no later than the terminal state or `wait`
+seconds. Passing a cursor is the only way to see playback transitions, and the
+cursor is what makes it race-free — a client that missed a change while it was
+away finds `version > N` already true and returns immediately, rather than
+parking to wait for a change that has already happened. `?wait=` without
+`since` is unchanged, so callers that only want "tell me when it is over" are
+unaffected.
 
 Speech is FIFO. Input is split using Foundation sentence boundaries. The
 `character_offset` in every terminal response is a zero-based, end-exclusive

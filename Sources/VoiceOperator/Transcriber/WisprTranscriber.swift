@@ -30,9 +30,9 @@ import Foundation
 struct WisprTranscriber: Transcriber {
     private let endpoint = URL(string: "https://api.wisprflow.ai/llm/asr")!
 
-    /// Wispr Flow's chunk size (`basetenChunkSizeSeconds` in the Flow app).
+    /// Wispr Flow's chunk size (`basetenChunkSizeSeconds` in the Flow app). Only
+    /// this raw HTTP path needs it — the streaming gRPC path has no such limit.
     static let chunkSeconds: Double = 28
-    var liveChunkSeconds: Double { Self.chunkSeconds }
 
     private struct Response: Decodable {
         let content: String?

@@ -81,6 +81,13 @@ enum SoundEffect: CaseIterable {
         }
     }
 
+    /// How long the cue actually plays for, once `SoundBank.speedup` is applied.
+    /// The dictation start cue now fires *after* the microphone is live (that is
+    /// the whole point of it — it means "safe to talk"), so it is picked up by the
+    /// mic. `AudioRecorder.excludeFromMetering(seconds:)` uses this to keep the cue
+    /// out of the silence-gate measurement.
+    var duration: Double { segments.reduce(0) { $0 + $1.dur } / SoundBank.speedup }
+
     /// Relative amplitude per segment. All normal cues use a uniform level;
     /// the pending transcription cue decays each repetition like an echo.
     var segmentVolumes: [Double] {
@@ -166,7 +173,7 @@ final class SoundBank {
     /// gaps are divided by this, so >1 makes the whole set proportionally
     /// snappier. Segment tables below are written at their natural (1×) values;
     /// bump this single knob to retune overall snappiness.
-    private static let speedup = 2.0
+    static let speedup = 2.0
 
     /// Build a 16-bit mono 44.1 kHz WAV from a sequence of (frequency, seconds)
     /// segments. A frequency of 0 is silence. Each tone gets a short fade to

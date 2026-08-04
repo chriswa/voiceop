@@ -1,29 +1,45 @@
 import Foundation
-import GRPC
-import NIOHPACK
-import NIOPosix
 import FlowAPI
 
-/// Wispr-parity dictation over the **primary** transcription path: the gRPC
-/// `flow_api.v1.TranscriptionService` on Baseten, which returns server-side
-/// *formatted* text (with the user's `dictionary_context`) — unlike the raw
-/// `/llm/asr` fallback. Reverse-engineered from the Wispr Flow app bundle; see
-/// `proto/flow_api_v1.proto`, `spike/flow_request.md`, and DESIGN.md Milestone C.
+/// Wispr-parity dictation over the **primary** transcription path: the duplex
+/// gRPC `flow_api.v1.TranscriptionService/TranscribeStream` on Baseten, which
+/// returns server-side *formatted* text (with the user's `dictionary_context`)
+/// — unlike the raw `/llm/asr` fallback. Reverse-engineered from the Wispr Flow
+/// app bundle; see `proto/flow_api_v1.proto`, `spike/flow_request.md`, and
+/// DESIGN.md Milestone C.
 ///
-///   host   model-<modelId>.grpc.api.baseten.co:443 (TLS)
-///   rpc    /flow_api.v1.TranscriptionService/Transcribe   (unary; we send a
-///          complete clip per call and commit to get the formatted result)
+///   host   model-<modelId>.grpc.api.baseten.co:443 (TLS, one warm connection —
+///          see `FlowChannel`)
+///   rpc    /flow_api.v1.TranscriptionService/TranscribeStream  (bidirectional;
+///          audio uploads while the user speaks, `commit` closes it — see
+///          `FlowSession`)
 ///   auth   authorization: Bearer <wispr jwt>
 ///          baseten-authorization: Api-Key <wispr's baseten key>
 ///          baseten-model-id / x-baseten-environment / disable-formatting: false
 ///
-/// Falls back to `WisprTranscriber` (`/llm/asr`) when the Baseten key is absent
-/// or the gRPC call fails, so dictation always degrades gracefully.
-struct WisprFlowTranscriber: Transcriber {
-    static let modelId = "v31pl413"                       // It.RT in the bundle
-    static let host = "model-\(modelId).grpc.api.baseten.co"
+/// Two entry points:
+///
+///   • `openLiveSession` — what live dictation uses. The arbiter calls it the
+///     instant the trigger key goes down, then streams packets into the session.
+///   • `transcribe(wavData:)` — stored clips (history retry, the debug CLI). Also
+///     a stream, just one that gets all its audio at once. It is deliberately
+///     *not* cut into 28 s segments any more: the old code issued one sequential
+///     unary call per segment, each with its own TLS handshake, which is why a
+///     50 s clip took ten seconds and a four-minute one took thirty. A stream has
+///     no such limit (Wispr's own dictation cap is 21 minutes), so one session
+///     handles the whole clip.
+///
+/// Falls back to `WisprTranscriber` (raw `/llm/asr`) when the Baseten key is
+/// absent or the stream fails, so dictation always degrades gracefully. That
+/// fallback is a genuine failure path, not the normal one — if the log shows it
+/// running routinely, something is broken.
+struct WisprFlowTranscriber: LiveTranscriber {
+    static var modelId: String { FlowChannel.modelId }
+    static var host: String { FlowChannel.host }
 
-    var liveChunkSeconds: Double { WisprTranscriber.chunkSeconds }
+    /// How much audio to put in one request message when replaying a stored clip.
+    /// Only affects framing on the wire — every send goes down the same stream.
+    private static let replayChunkSeconds: Double = 10
 
     private let fallback: WisprTranscriber
     private let dictionary: DictionaryContextProviding
@@ -34,149 +50,73 @@ struct WisprFlowTranscriber: Transcriber {
         self.dictionary = dictionary
     }
 
-    func transcribe(wavData: Data, language: String) async throws -> String {
-        // The gRPC unary Transcribe handles a short clip per call, so cut anything
-        // longer than one chunk into 28 s segments (matching WisprTranscriber and
-        // Wispr's own basetenChunkSizeSeconds) and join the per-segment transcripts.
-        // Live dictation already arrives pre-chunked (one segment); this only fans
-        // out when transcribing a long stored clip (e.g. a history retry).
-        let wav = try WAVFile.parse(wavData)
-        let segments = wav.segments(maxSeconds: WisprTranscriber.chunkSeconds)
-        if segments.count > 1 {
-            Log.log(String(format: "flow: %.1fs clip → %d segments of ≤%.0fs",
-                           wav.duration, segments.count, WisprTranscriber.chunkSeconds))
-        }
-        var texts: [String] = []
-        for segment in segments {
-            texts.append(try await transcribeSegment(segment, language: language))
-        }
-        return WisprTranscriber.joinChunkTexts(texts)
+    // MARK: - Live dictation
+
+    func openLiveSession(app: FlowAppTarget, trace: DictationTrace?) async throws -> FlowSession {
+        guard let apiKey = WisprBasetenKey.value else { throw TranscriberError.noBasetenKey }
+        let token = try await WisprToken.shared.accessToken()
+        trace?.mark("token")
+        let words = await dictionary.contextWords()
+        trace?.mark("dictionary")
+        return try await FlowSession.open(
+            words: words,
+            token: token,
+            apiKey: apiKey,
+            app: FlowSession.app(bundleIdentifier: app.bundleIdentifier, name: app.name),
+            trace: trace)
     }
 
-    /// One ≤28 s segment: the gRPC flow path, falling back to raw `/llm/asr` when
-    /// the Baseten key is absent or the gRPC call fails.
-    ///
+    func transcribeWithoutStreaming(wavData: Data, language: String) async throws -> String {
+        try await fallback.transcribe(wavData: wavData, language: language)
+    }
+
+    // MARK: - Stored clips
+
     /// `language` is honoured on the fallback path only. The reverse-engineered
     /// gRPC proto has an unresolved `Language` enum, so the flow request sends no
     /// language and lets the server detect it. This app is English-only, so
     /// detection is reliable and the formatted result is worth it.
-    ///
-    /// This previously bailed to `/llm/asr` whenever a language was requested,
-    /// which made the formatted path unreachable in practice — `AudioArbiter`
-    /// always passes `"en"`, so the Baseten-key check below was never evaluated.
-    private func transcribeSegment(_ wav: WAVFile, language: String) async throws -> String {
-        guard let apiKey = WisprBasetenKey.value else {
+    func transcribe(wavData: Data, language: String) async throws -> String {
+        let wav = try WAVFile.parse(wavData)
+        guard WisprBasetenKey.value != nil else {
             Log.log("flow: no Baseten key — using raw /llm/asr")
-            return try await fallback.transcribe(wavData: wav.data, language: language)
+            return try await fallback.transcribe(wavData: wavData, language: language)
         }
         do {
-            let text = try await transcribeViaFlow(wav: wav, language: language, apiKey: apiKey)
-            Log.log("flow: gRPC ok — \(text.count) chars")
+            let text = try await replay(wav)
+            Log.log("flow: stream ok — \(text.count) chars")
             return text
         } catch {
-            Log.log("flow: gRPC failed (\(TranscriberError.userMessage(for: error))) — falling back to /llm/asr")
-            return try await fallback.transcribe(wavData: wav.data, language: language)
+            Log.log("flow: stream failed (\(TranscriberError.userMessage(for: error))) — falling back to /llm/asr")
+            return try await fallback.transcribe(wavData: wavData, language: language)
         }
     }
 
-    private func transcribeViaFlow(wav: WAVFile, language: String, apiKey: String) async throws -> String {
-        let token = try await WisprToken.shared.accessToken()
-        let words = await dictionary.contextWords()
-        let audio = try OpusEncoder().encode(pcm: wav.samples)
-
-        let request = Self.buildRequest(packets: audio.packets, words: words, token: token)
-
-        var headers = HPACKHeaders()
-        headers.add(name: "authorization", value: "Bearer \(token)")
-        headers.add(name: "baseten-authorization", value: "Api-Key \(apiKey)")
-        headers.add(name: "baseten-model-id", value: "model-\(Self.modelId)")
-        headers.add(name: "x-baseten-environment", value: "production")
-        headers.add(name: "disable-formatting", value: "false")
-        let callOptions = CallOptions(customMetadata: headers)
-
-        // grpc-swift 1.x: one-shot channel per call (matches the previous 2.x
-        // withGRPCClient lifetime). The EventLoopGroup must outlive the channel.
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let channel: GRPCChannel
+    /// Push a whole stored clip through one streaming session.
+    private func replay(_ wav: WAVFile) async throws -> String {
+        let trace = DictationTrace("replay")
+        defer { trace.flush() }
+        let session = try await openLiveSession(app: FlowAppTarget(), trace: trace)
         do {
-            channel = try GRPCChannelPool.with(
-                target: .host(Self.host, port: 443),
-                transportSecurity: .tls(.makeClientDefault(compatibleWith: group)),
-                eventLoopGroup: group
-            )
-        } catch {
-            try? await group.shutdownGracefully()
-            throw error
-        }
+            let encoder = try OpusEncoder()
+            let packets = try encoder.encode(pcm: wav.samples).packets
+            let perChunk = max(1, Int(Self.replayChunkSeconds / OpusEncoder.frameSeconds))
 
-        do {
-            let client = FlowApi_V1_TranscriptionServiceAsyncClient(channel: channel)
-            let response = try await client.transcribe(request, callOptions: callOptions)
-            _ = try await channel.close().get()
-            try await group.shutdownGracefully()
-            return Self.text(from: response)
-        } catch {
-            _ = try? await channel.close().get()
-            try? await group.shutdownGracefully()
-            throw error
-        }
-    }
-
-    /// Build a complete one-shot flow request (all packets + commit), mirroring
-    /// Wispr's `serializeFlowRequest`/protobuf builder. The dictionary rides in
-    /// `init.preferences.vocabulary` (StaticVocabulary) — the real biasing channel.
-    static func buildRequest(packets: [Data], words: [String], token: String) -> FlowApi_V1_Request {
-        var meta = FlowApi_V1_Metadata()
-        meta.audioEncoding = .opus
-        meta.environment = .production
-        meta.sessionID = UUID().uuidString
-        meta.requestID = UUID().uuidString
-        var client = FlowApi_V1_Client()
-        client.name = "Voice Operator"
-        client.platform = .macos
-        meta.client = client
-
-        var vocab = FlowApi_V1_StaticVocabulary()
-        vocab.dictionaryPersonal = words
-        var prefs = FlowApi_V1_Preferences()
-        prefs.vocabulary = vocab
-
-        var initMsg = FlowApi_V1_Init()
-        initMsg.metadata = meta
-        initMsg.preferences = prefs
-
-        var app = FlowApi_V1_App()
-        app.name = "Terminal"
-        app.bundleID = "com.apple.Terminal"
-        app.type = .other
-        var context = FlowApi_V1_Context()
-        context.app = app
-
-        var audioPackets = FlowApi_V1_AudioPackets()
-        audioPackets.items = packets
-        var payload = FlowApi_V1_Payload()
-        payload.audioPackets = audioPackets
-
-        var request = FlowApi_V1_Request()
-        request.init_p = initMsg
-        request.context = context
-        request.payload = payload
-        request.commit = .true
-        return request
-    }
-
-    /// Prefer the formatted transcript; fall back to raw. Mirrors Wispr's
-    /// `llm_text || asr_text`.
-    static func text(from response: FlowApi_V1_Response) -> String {
-        if response.hasResult, !response.result.output.plaintext.isEmpty {
-            return response.result.output.plaintext
-        }
-        if response.hasState {
-            if response.state.hasFormattedText, !response.state.formattedText.content.isEmpty {
-                return response.state.formattedText.content
+            // Everything but the last chunk streams ahead of the commit, exactly as
+            // a live dictation would, so the server can start before we finish
+            // sending.
+            var index = 0
+            while packets.count - index > perChunk {
+                await session.send(packets: Array(packets[index ..< index + perChunk]))
+                index += perChunk
             }
-            if response.state.hasRawText { return response.state.rawText.content }
+            trace.note(String(format: "%.1fs clip, %ld packets", wav.duration, packets.count))
+            return try await session.commit(packets: Array(packets[index...]),
+                                            timeout: FlowSession.defaultCommitTimeout)
+        } catch {
+            // Encoding blew up after the stream was already open — don't leak it.
+            await session.cancel()
+            throw error
         }
-        return ""
     }
 }

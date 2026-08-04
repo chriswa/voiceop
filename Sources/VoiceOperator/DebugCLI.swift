@@ -31,9 +31,11 @@ enum DebugCLI {
     }
 
     /// Synthesize `text` with `say` and transcribe it through the gRPC flow path
-    /// (`WisprFlowTranscriber`) — the formatted Wispr-parity path. Requires
+    /// (`WisprFlowTranscriber`) — the formatted Wispr-parity path, streamed over
+    /// `TranscribeStream` exactly as live dictation is. Requires
     /// `VOICEOP_BASETEN_KEY`; otherwise it exercises the `/llm/asr` fallback.
-    /// One network request (endpoint etiquette).
+    /// One stream (endpoint etiquette). The `trace …` line it logs shows the
+    /// phase-by-phase timing.
     static func runFlowGRPCTest(text: String) async {
         do {
             let tmp = FileManager.default.temporaryDirectory

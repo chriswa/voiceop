@@ -11,6 +11,13 @@ let package = Package(
         // which lets us ship a universal binary for Intel/Ventura. See
         // COMPATIBILITY-PLAN.md Workstream 1.
         .package(url: "https://github.com/grpc/grpc-swift.git", from: "1.27.0"),
+        // Declared explicitly rather than leaned on transitively through
+        // grpc-swift: the streaming transcription path names NIO types directly
+        // (EventLoopGroup, TimeAmount, HPACKHeaders — see FlowChannel/FlowSession).
+        // grpc-swift 1.x already pins a compatible version, so this adds no new
+        // resolution, it just makes the imports legitimate.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.31.0"),
     ],
     targets: [
         // Vendored libopus (prebuilt universal static lib + public headers) for
@@ -35,6 +42,9 @@ let package = Package(
                 "COpus",
                 "FlowAPI",
                 .product(name: "GRPC", package: "grpc-swift"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHPACK", package: "swift-nio-http2"),
             ],
             path: "Sources/VoiceOperator",
             linkerSettings: [
@@ -43,7 +53,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VoiceOperatorTests",
-            dependencies: ["VoiceOperator"],
+            dependencies: ["VoiceOperator", "FlowAPI"],
             path: "Tests/VoiceOperatorTests"
         ),
     ]

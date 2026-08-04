@@ -6,12 +6,42 @@ import Foundation
 protocol Transcriber: Sendable {
     /// Transcribe a complete 16 kHz mono PCM WAV blob to text.
     /// - Returns: the recognized text (already punctuated for Wispr), possibly empty.
+    ///
+    /// This is the *stored clip* path — history retries and the debug CLI. Live
+    /// dictation does not go through it: it streams audio while the user talks
+    /// via `LiveTranscriber`, so that nothing but the tail is left to do when the
+    /// key comes up.
     func transcribe(wavData: Data, language: String) async throws -> String
+}
 
-    /// Chunk duration for live dictation: the arbiter sends audio in pieces of
-    /// this length while the user is still talking (Wispr Flow's model), so
-    /// only a short tail remains to transcribe when recording stops.
-    var liveChunkSeconds: Double { get }
+/// A transcriber that can upload audio *during* the recording rather than after
+/// it, which is the entire reason dictation feels instant in Wispr Flow.
+///
+/// The arbiter opens a session when the trigger key goes down, feeds it opus
+/// packets as they are encoded, and commits when the key comes up.
+protocol LiveTranscriber: Transcriber {
+    /// Open a streaming session. Called concurrently with microphone start-up, so
+    /// it must not depend on any audio existing yet.
+    func openLiveSession(app: FlowAppTarget, trace: DictationTrace?) async throws -> FlowSession
+
+    /// Transcribe a stored clip *without* attempting the streaming path.
+    ///
+    /// Used when a live stream has just failed: `transcribe(wavData:)` would open
+    /// another stream and could spend its whole hang guard again before giving up,
+    /// so one bad network moment would cost the user two timeouts back to back.
+    func transcribeWithoutStreaming(wavData: Data, language: String) async throws -> String
+}
+
+extension LiveTranscriber {
+    func transcribeWithoutStreaming(wavURL: URL, language: String) async throws -> String {
+        try await transcribeWithoutStreaming(wavData: Data(contentsOf: wavURL), language: language)
+    }
+}
+
+/// The app a dictation is destined for, passed to the server as tone context.
+struct FlowAppTarget: Sendable {
+    var bundleIdentifier: String?
+    var name: String?
 }
 
 extension Transcriber {
@@ -25,6 +55,14 @@ enum TranscriberError: Error {
     case notSignedIn
     case http(status: Int, body: String)
     case badResponse
+    /// No Baseten key, so the streaming path is unavailable.
+    case noBasetenKey
+    /// The server closed the stream without ever sending a result.
+    case streamEnded
+    /// Committed, but no result came back inside the hang guard.
+    case streamTimeout
+    /// The server answered with RESULT_STATUS_ERROR.
+    case serverError(String)
 }
 
 extension TranscriberError {
@@ -42,6 +80,14 @@ extension TranscriberError {
             return "HTTP \(status)"
         case .badResponse:
             return "bad server response"
+        case .noBasetenKey:
+            return "no Baseten key"
+        case .streamEnded:
+            return "stream closed with no result"
+        case .streamTimeout:
+            return "no result after commit"
+        case .serverError(let detail):
+            return detail
         }
     }
 

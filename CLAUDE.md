@@ -33,7 +33,17 @@ something new, record it in `DESIGN.md` + `spike/` so it's never lost.
 `WisprFlowTranscriber` (the `AudioArbiter` default) transcribes over Wispr's
 primary **gRPC** path (`flow_api.v1.TranscriptionService` on Baseten), which
 returns **formatted** text with the user's dictionary — see DESIGN.md Milestone C
-and `proto/flow_api_v1.proto`. Client is **grpc-swift 1.x** (not 2.x) so the app
+and `proto/flow_api_v1.proto`.
+
+**Use `TranscribeStream`, not `Transcribe`.** The unary RPC is Wispr's *fallback*;
+its primary is the duplex stream, opened on key-down and fed opus packets while
+the user is still speaking (`FlowSession`, driven by `AudioArbiter.pumpAudio`), so
+only the tail remains at key-up. Do not "simplify" this back to a single unary
+call — that was the old design and it cost 5–10 s per dictation. The connection is
+process-wide and keepalive'd (`FlowChannel`); never build a channel per call.
+Every dictation logs one `trace …` line with the full phase timeline.
+
+Client is **grpc-swift 1.x** (not 2.x) so the app
 can target macOS 13 / universal. It needs Wispr's Baseten `Api-Key`, read at
 runtime from `$VOICEOP_BASETEN_KEY` or
 `~/Library/Application Support/VoiceOperator/baseten-key` (**never commit it**).

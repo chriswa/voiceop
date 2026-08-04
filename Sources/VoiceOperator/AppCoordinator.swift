@@ -40,13 +40,16 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
 
-        hotkey.onStart = { [weak self] in self?.arbiter.beginDictation(mode: $0) }
+        hotkey.onStart = { [weak self] mode, trace in self?.arbiter.beginDictation(mode: mode, trace: trace) }
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation(context: Self.frontmostContext()) }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         installHotkeyWhenTrusted()
         do { try speechService.start() } catch { Log.log("speech HTTP start failed: \(error)") }
+        // Dial the Baseten connection and fetch the token/dictionary now, so the
+        // first dictation of the session doesn't pay for any of it.
+        arbiter.prewarm()
         menuBar.update(status: .idle)
     }
 

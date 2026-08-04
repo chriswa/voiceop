@@ -111,7 +111,12 @@ struct WisprFlowTranscriber: LiveTranscriber {
                 index += perChunk
             }
             trace.note(String(format: "%.1fs clip, %ld packets", wav.duration, packets.count))
-            return try await session.commit(packets: Array(packets[index...]),
+            // An empty stored clip has no valid array index to slice at. It is
+            // still a well-formed stream commit (and lets the server decide how
+            // to represent no speech), so send an empty final payload instead
+            // of trapping locally before the fallback can run.
+            let finalPackets = index < packets.count ? Array(packets[index...]) : []
+            return try await session.commit(packets: finalPackets,
                                             timeout: FlowSession.defaultCommitTimeout)
         } catch {
             // Encoding blew up after the stream was already open — don't leak it.

@@ -415,12 +415,11 @@ final class AudioArbiter {
             // to open, or committing to it. Either way, routing the fallback back
             // through the normal transcriber would open a *second* stream and could
             // burn its whole hang guard before conceding.
-            var streamWasTried = false
+            let streamWasTried = live.opening != nil
             if live.session == nil {
-                streamWasTried = !(await awaitStreamOpen(live))
+                _ = await awaitStreamOpen(live)
             }
             if live.session != nil, !live.broken {
-                streamWasTried = true
                 do { return try await commit(live) }
                 catch {
                     let reason = TranscriberError.userMessage(for: error)

@@ -159,12 +159,11 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   **28-second chunks** (`basetenChunkSizeSeconds = 28`), transcribes each chunk as it
   accumulates mid-dictation (sequentially, one in flight), and joins per-chunk transcripts
   with a single space (`prevAsrText()`, empty chunks dropped). Cuts are fixed-length — no
-  silence detection. Flow also caps a dictation at 20 min (warning at 19). We replicate the
-  full model: the recorder converts to 16 kHz s16le live in the tap, the arbiter transcribes
-  each full 28 s chunk *while recording continues* (sequential, one in flight — see
-  `AudioArbiter.pumpLiveChunks`), and only the short tail is transcribed at stop, so paste
-  latency is flat regardless of dictation length. `WisprTranscriber.transcribe` also chunks
-  any >28 s WAV it's handed (retries of stored clips take that path).
+  silence detection. Flow also caps a dictation at 20 min (warning at 19).
+  **This 28 s chunking applies only to the raw `/llm/asr` HTTP path** — it exists to dodge that
+  endpoint's 20 s server budget. The primary gRPC stream has no such limit and is never
+  re-cut; see "Streaming dictation" below. `WisprTranscriber.transcribe` still chunks any
+  >28 s WAV it is handed, because that is the endpoint with the budget.
 - **Silence never drops audio (decoded 2026-07-15).** Flow's send loop pushes *every*
   captured packet through transcription — there is no per-chunk volume/silence gate in the
   send path. Its silence tracking (`silentStreamStreakMs`, `longestSilentStreakMs`,
@@ -173,10 +172,30 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   `noteAutoStop("silence")`) — and (b) **dead-mic watchdogs** (`firstFrameWatchdog`,
   `silentWatchdog`). Audio quality (`SNR<5dB`, `volume<-70dB`, `alignment<0.15`) is judged
   *after* transcription and only raises a `poorAudioQuality` user notice; it never discards
-  text. We mirror this: `pumpLiveChunks` transcribes every chunk, and the single silence
+  text. We mirror this: the upload pump sends every encoded packet, and the single silence
   decision is the whole-clip peak/RMS gate in `endDictation` (i.e. skip only when the entire
-  recording — every chunk — was silent). An earlier per-chunk gate that dropped individual
-  28 s slices judged in isolation lost soft words and boundary-split words and was removed.
+  recording was silent). An earlier per-chunk gate that dropped individual 28 s slices judged
+  in isolation lost soft words and boundary-split words and was removed.
+- **Streaming dictation (2026-08-04).** The trigger key going down starts three things at
+  once: the microphone, the duplex gRPC stream, and a 100 ms upload pump
+  (`AudioArbiter.pumpAudio`) that opus-encodes each new slice of captured PCM and pushes it up
+  the open stream. Key-up sends the tail with `commit: TRUE` and closes the request stream, so
+  the only latency the user sees is the tail plus the server's formatting pass — flat
+  regardless of dictation length. This replaced a post-hoc unary call that uploaded nothing
+  until the key came up (and dialled a fresh TLS connection per call, and cut anything over
+  28 s into sequential round trips), which is why a 25 s dictation used to take ~5 s and a 50 s
+  one ~10 s. Timings for every phase land in one `trace …` line per dictation
+  (`DictationTrace`); the numbers that matter are `audio` (when the mic actually went live) and
+  `result - commit` (everything the user waits for).
+- **Trigger-key timing.** Recording begins on key-**down**, never after a hold threshold. The
+  hold-vs-tap-vs-double-tap ambiguity is resolved on the *stop* side instead: a release inside
+  `lockWindow` (500 ms, Wispr's `DICTATION_DEBOUNCE_DELAY`) keeps recording until the window
+  closes, and a second press inside it locks hands-free. Audio we turn out not to need is free;
+  audio we failed to capture is gone. The old 250 ms `holdThreshold` was the main cause of
+  dropped opening words. Consequently the start cue now fires on the first real microphone
+  buffer (`AudioRecorder.onFirstAudio`) rather than on key-down — it means "safe to talk", so
+  it has to be true — and since the mic therefore hears the cue,
+  `AudioRecorder.meteringLeadInSeconds` keeps it out of the silence gate's measurement.
 - **Formatting / cleanup**: other `/llm/*` REST endpoints, e.g. `/llm/extract_asr_words`,
   `/llm/flow_state_2025`. Proper-noun/punctuation/formatting live here (client dictionary +
   server LLM). Exact request bodies still to be decoded in the spike.
@@ -375,11 +394,18 @@ optional-name peel and last-referenced fallback apply uniformly.
   Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest` + the
   `flow_api.v1` protobuf), captured in `spike/flow_request.md`, `spike/flow_spike.py`, and
   `proto/flow_api_v1.proto`. Three transports Wispr uses, in fallback order:
-  1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowTranscriber`).** Unary
-     `flow_api.v1.TranscriptionService/Transcribe` on `model-v31pl413.grpc.api.baseten.co:443`
-     (TLS, grpc-swift **1.x** — 2.x floors the deployment target at macOS 15). Sends a protobuf
+  1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowTranscriber` + `FlowSession`).**
+     Bidirectional `flow_api.v1.TranscriptionService/**TranscribeStream**` on
+     `model-v31pl413.grpc.api.baseten.co:443` (TLS, grpc-swift **1.x** — 2.x floors the
+     deployment target at macOS 15), over one process-wide keepalive'd connection
+     (`FlowChannel`, mirroring Wispr's `ensureClient` + 4 s/2 s/permit-without-calls pings).
+     Note the **unary** `Transcribe` RPC is Wispr's *fallback* (`makeHttpRequest`), not its
+     primary — using it as the primary is what made dictation slow, see "Streaming dictation".
+     Sends a protobuf
      `Request {init{metadata,preferences.vocabulary=dictionary}, context,
-     payload.audio_packets=opus, commit}`; metadata headers `authorization: Bearer <jwt>`,
+     payload.audio_packets=opus, commit}` — `init`+`context` once at open, then packets with
+     `commit: COMMIT_FALSE` as they are encoded, then the tail with `COMMIT_TRUE`; metadata
+     headers `authorization: Bearer <jwt>`,
      `baseten-authorization: Api-Key <key>`, `baseten-model-id`, `x-baseten-environment: production`,
      `disable-formatting: false`. Returns **formatted** `result.output.plaintext` (→ we use
      `llm_text || asr_text`). **Validated live end to end** — "kubectl"/"Coda" correctly spelled/cased.

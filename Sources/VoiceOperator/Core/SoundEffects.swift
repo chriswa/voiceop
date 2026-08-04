@@ -31,6 +31,12 @@ enum SoundEffect: CaseIterable {
     case narrationMuted             // narration muted — low descending slide
     case narrationUnmuted           // narration unmuted — low ascending slide
 
+    /// Global playback-speed multiplier for every cue. This lives with the
+    /// cue definitions, rather than on the main-actor SoundBank, because the
+    /// recorder needs a cue duration from its audio callback to exclude the
+    /// start chirp from metering.
+    static let speedup = 2.0
+
     @MainActor func play() { SoundBank.shared.play(self) }
     @MainActor func stop() { SoundBank.shared.stop(self) }
 
@@ -80,6 +86,13 @@ enum SoundEffect: CaseIterable {
         case .narrationUnmuted: return [(110, 0.05), (165, 0.05), (220, 0.11)]
         }
     }
+
+    /// How long the cue actually plays for, once `speedup` is applied.
+    /// The dictation start cue now fires *after* the microphone is live (that is
+    /// the whole point of it — it means "safe to talk"), so it is picked up by the
+    /// mic. `AudioRecorder.excludeFromMetering(seconds:)` uses this to keep the cue
+    /// out of the silence-gate measurement.
+    var duration: Double { segments.reduce(0) { $0 + $1.dur } / Self.speedup }
 
     /// Relative amplitude per segment. All normal cues use a uniform level;
     /// the pending transcription cue decays each repetition like an echo.
@@ -162,12 +175,6 @@ final class SoundBank {
 
     // MARK: - Synthesis
 
-    /// Global playback-speed multiplier for every cue: all note durations and
-    /// gaps are divided by this, so >1 makes the whole set proportionally
-    /// snappier. Segment tables below are written at their natural (1×) values;
-    /// bump this single knob to retune overall snappiness.
-    private static let speedup = 2.0
-
     /// Build a 16-bit mono 44.1 kHz WAV from a sequence of (frequency, seconds)
     /// segments. A frequency of 0 is silence. Each tone gets a short fade to
     /// avoid clicks. Durations are scaled by `speedup`.
@@ -179,7 +186,7 @@ final class SoundBank {
         let sampleRate = 44_100.0
         var samples: [Int16] = []
         for (seg, segmentVolume) in zip(segments, segmentVolumes) {
-            let n = Int(seg.dur / speedup * sampleRate)
+            let n = Int(seg.dur / SoundEffect.speedup * sampleRate)
             let fade = max(1, Int(0.005 * sampleRate))
             for i in 0..<n {
                 var env = 1.0

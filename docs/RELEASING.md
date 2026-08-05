@@ -56,7 +56,10 @@ build output, so they keep working if the app is renamed. Run them from the repo
    ask the user before releasing.
 
 1. **Bump the version.** In `Resources/Info.plist`, increment `CFBundleShortVersionString`
-   (e.g. `0.1.0` → `0.1.1`) and `CFBundleVersion` (integer, +1). Commit and push:
+   (e.g. `0.1.0` → `0.1.1`) and `CFBundleVersion` (integer, +1). **Edit it as text.**
+   PlistBuddy is fine for *reading* (as below) but `-c Set` rewrites the whole file:
+   it alphabetizes the keys, converts the indentation to tabs, and silently deletes
+   the XML comments. Commit and push:
    ```bash
    git add Resources/Info.plist
    git commit -m "Bump version to X.Y.Z"

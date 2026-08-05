@@ -57,6 +57,34 @@ actor SpeechJobManager {
 
     nonisolated func enqueueLocal(text: String) { Task { _ = await self.enqueue(text: text, voice: "af_heart", local: true) } }
 
+    /// Speak Clipboard toggle: stop any active/queued speech, otherwise enqueue
+    /// `text` as a local job. Empty text is a no-op when nothing is speaking.
+    nonisolated func speakOrStop(text: String) {
+        Task {
+            if await self.stopSpeaking() { return }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            _ = await self.enqueue(text: trimmed, voice: "af_heart", local: true)
+        }
+    }
+
+    /// Halt the current utterance and cancel anything still queued. Returns
+    /// `true` when there was something to stop.
+    func stopSpeaking() -> Bool {
+        let pending = order.contains { id in
+            guard let job = jobs[id] else { return false }
+            return !terminal(job.state)
+        }
+        guard current != nil || pending else { return false }
+        interruptCurrent(state: .interruptedByUser)
+        for id in order {
+            guard let job = jobs[id], !terminal(job.state) else { continue }
+            update(id) { $0.state = .interruptedByUser; $0.playbackState = nil }
+        }
+        order.removeAll()
+        return true
+    }
+
     func result(id: String) -> Result? { jobs[id].map(result) }
 
     /// Long-poll a job.

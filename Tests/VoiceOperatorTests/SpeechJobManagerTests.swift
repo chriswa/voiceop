@@ -9,6 +9,34 @@ final class SpeechJobManagerTests: XCTestCase {
         XCTAssertEqual(result?.error, "speech_muted")
     }
 
+    func testStopSpeakingInterruptsCurrentAndClearsQueue() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let halts = Counter()
+        await manager.configure(
+            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in },
+            halt: { Task { await halts.increment() } })
+
+        let first = await manager.enqueue(text: "First sentence.", voice: "af_heart")!
+        let second = await manager.enqueue(text: "Second sentence.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
+
+        let stopped = await manager.stopSpeaking()
+        XCTAssertTrue(stopped)
+        try? await Task.sleep(for: .milliseconds(20))
+        let haltCount = await halts.value
+        XCTAssertEqual(haltCount, 1)
+        let firstState = await manager.result(id: first.id)?.state
+        let secondState = await manager.result(id: second.id)?.state
+        XCTAssertEqual(firstState, .interruptedByUser)
+        XCTAssertEqual(secondState, .interruptedByUser)
+        let stoppedAgain = await manager.stopSpeaking()
+        XCTAssertFalse(stoppedAgain)
+    }
+
     func testSentenceBoundariesDoNotChangePublicLifecycleOrWakeLongPoll() async {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
@@ -102,6 +130,11 @@ final class SpeechJobManagerTests: XCTestCase {
         let missed = await manager.wait(id: accepted.id, seconds: 30, since: queued.version)
         XCTAssertEqual(missed?.playbackState, .speaking)
     }
+}
+
+private actor Counter {
+    private(set) var value = 0
+    func increment() { value += 1 }
 }
 
 private actor PlaybackGate {

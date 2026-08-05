@@ -553,9 +553,9 @@ final class AudioArbiter {
     // MARK: - Other actions
 
     func speakClipboard() {
-        guard let text = NSPasteboard.general.string(forType: .string)?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
-        SpeechJobManager.shared.enqueueLocal(text: text)
+        // Toggle: stop whatever is speaking/queued; otherwise speak the clipboard.
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        SpeechJobManager.shared.speakOrStop(text: text)
     }
 
     func summarizeClipboard() {

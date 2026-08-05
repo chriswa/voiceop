@@ -6,10 +6,6 @@ import AppKit
 /// The icon is a bullhorn (megaphone) silhouette: **red while recording**,
 /// **yellow while transcribing**, **green while playing audio**, monochrome
 /// otherwise (per product spec).
-/// How a dictation is interpreted: Fn = paste the transcript; Ctrl+Fn = run the
-/// transcript through the voice-tool router (focus/repeat/more-details) only.
-enum DictationMode { case paste, command }
-
 enum OperatorStatus: Equatable {
     case idle
     case listening        // paste dictation capturing the mic    -> RED
@@ -46,4 +42,9 @@ enum OperatorStatus: Equatable {
         case .speaking:         return "Voice Operator — speaking"
         }
     }
+}
+
+extension DictationMode {
+    /// The capture status this mode shows in the menu bar.
+    var listeningStatus: OperatorStatus { self == .command ? .commandListening : .listening }
 }

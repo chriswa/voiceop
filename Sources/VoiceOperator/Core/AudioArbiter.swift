@@ -37,7 +37,6 @@ final class AudioArbiter {
     private(set) var commandHistory: [CommandHistoryEntry] = []
     private var lastPastedText: String?
     private var isDictating = false
-    private var mode: DictationMode = .paste
     private var transcriptionProgressTask: Task<Void, Never>?
     private var live: LiveDictation?
 
@@ -110,7 +109,11 @@ final class AudioArbiter {
     @MainActor
     private final class LiveDictation {
         let trace: DictationTrace
-        let mode: DictationMode
+        /// Paste vs. command for *this* dictation. A decision rather than a value
+        /// because Ctrl+Fn's two halves do not land together and capture must not
+        /// wait for the second one — see `DictationModeDecision`. Read it through
+        /// `whenResolved`/`resolve()`; `decision.mode` on its own is provisional.
+        let modeDecision: DictationModeDecision
         /// One encoder for the whole dictation: opus is stateful across frames,
         /// so a fresh encoder mid-stream would corrupt the audio.
         let encoder: OpusEncoder?
@@ -138,24 +141,23 @@ final class AudioArbiter {
         /// `start()`, which resets the shared capture buffer.
         var tailPCM = Data()
 
-        init(trace: DictationTrace, mode: DictationMode, encoder: OpusEncoder?) {
+        init(trace: DictationTrace, mode decision: DictationModeDecision, encoder: OpusEncoder?) {
             self.trace = trace
-            self.mode = mode
+            self.modeDecision = decision
             self.encoder = encoder
         }
     }
 
     // MARK: - Begin
 
-    func beginDictation(mode: DictationMode, trace: DictationTrace = DictationTrace()) {
+    func beginDictation(mode decision: DictationModeDecision, trace: DictationTrace = DictationTrace()) {
         guard !recorder.isRecording else { return }
-        self.mode = mode
         isDictating = true
         onDictationBegan?()
 
         let encoder = try? OpusEncoder()
         if encoder == nil { Log.log("dictation: opus encoder unavailable — live upload disabled") }
-        let live = LiveDictation(trace: trace, mode: mode, encoder: encoder)
+        let live = LiveDictation(trace: trace, mode: decision, encoder: encoder)
         self.live = live
 
         // The start cue means "it is safe to talk now", so it must wait for the
@@ -176,7 +178,15 @@ final class AudioArbiter {
             onStatus?(.idle)
             return
         }
-        onStatus?(mode == .command ? .commandListening : .listening)
+        // Tint the menu bar the instant capture begins. While Control may still be
+        // on its way the mode is provisional, so this is the paste tint, corrected
+        // when the window closes — inside 200 ms, faster than a menu bar can be read.
+        onStatus?(decision.mode.listeningStatus)
+        decision.whenResolved { [weak self] mode in
+            trace.note("mode=\(mode.rawValue)@\(Int(trace.elapsedMS))ms")
+            guard let self, self.live === live else { return }
+            self.onStatus?(mode.listeningStatus)
+        }
 
         // Open the stream concurrently with microphone start-up — neither waits
         // for the other, and by the time the first packet is encoded the socket
@@ -200,16 +210,24 @@ final class AudioArbiter {
     private func captureBecameLive() {
         guard let live, !live.heardAudio else { return }
         live.heardAudio = true
-        live.trace.mark("chirp")
-        let cue: SoundEffect = live.mode == .command ? .commandListeningStarted : .listeningStarted
-        // Anchor the metering exclusion here, at the instant we ask for the cue,
-        // rather than at a fixed offset from sample zero: how long CoreAudio took
-        // to hand over that first buffer is exactly the thing we cannot predict.
-        recorder.excludeFromMetering(seconds: cue.duration + Self.cueCaptureMargin)
-        cue.play()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self, self.recorder.isRecording else { return }
-            self.muter.mute()
+        // The two start cues name the mode, so this one must not sound until the
+        // mode is final. That wait is normally zero and never more than a few tens
+        // of milliseconds: the mode window closes 200 ms after key-down and
+        // CoreAudio has not been seen to deliver a first buffer sooner than that.
+        live.modeDecision.whenResolved { [weak self] mode in
+            guard let self, self.live === live else { return }
+            live.trace.mark("chirp")
+            let cue = mode.startCue
+            // Anchor the metering exclusion here, at the instant we ask for the
+            // cue, rather than at a fixed offset from sample zero: how long
+            // CoreAudio took to hand over that first buffer is exactly the thing
+            // we cannot predict.
+            self.recorder.excludeFromMetering(seconds: cue.duration + Self.cueCaptureMargin)
+            cue.play()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, self.recorder.isRecording else { return }
+                self.muter.mute()
+            }
         }
     }
 
@@ -320,9 +338,16 @@ final class AudioArbiter {
     /// the user intentionally had selected when they finished speaking.
     func endDictation(context: DictationContext? = nil) {
         guard recorder.isRecording else { return }
-        let isCommand = mode == .command
         let live = self.live
         self.live = nil
+        // Clear `live` first, then latch: resolving fires the observers registered
+        // at begin, and their identity guards must now reject them — this dictation
+        // is ending, so it wants neither a listening tint nor a start cue. In
+        // practice the mode has been settled for at least 300 ms by now (nothing can
+        // stop a dictation sooner than `lockWindow`), and this only makes the
+        // invariant that routing reads a final mode true by construction.
+        let mode = live?.modeDecision.resolve() ?? .paste
+        let isCommand = mode == .command
         live?.trace.mark("key-up")
         live?.pump?.invalidate()
         live?.pump = nil
@@ -369,15 +394,15 @@ final class AudioArbiter {
             return
         }
 
-        (isCommand ? SoundEffect.commandListeningFinished : .listeningFinished).play()
+        mode.finishCue.play()
         onStatus?(.transcribing)
         startTranscriptionProgressCue()
-        // Bind mode and routing context to *this* dictation rather than reading
-        // the arbiter's own `mode`/context when the transcript lands. The user can
-        // start a new dictation while this one is still transcribing, and the
-        // instance properties will by then describe that newer one — which would
-        // paste a command, or dispatch a plain dictation as one, and file either in
-        // the wrong history list.
+        // Bind the routing context to *this* dictation rather than reading shared
+        // state when the transcript lands. The user can start a new dictation while
+        // this one is still transcribing, and anything ambient will by then describe
+        // that newer one — which would paste a command, or dispatch a plain
+        // dictation as one, and file either in the wrong history list. (`mode` is
+        // already per-dictation: it lives on the `LiveDictation`.)
         let routingContext = context
         Task { [weak self] in
             guard let self else { return }

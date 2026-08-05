@@ -64,6 +64,31 @@ command transcription but plays the unrecognized/error cue and performs no
 action. Clipboard speech and clipboard summarization remain user-facing tools;
 the latter is an independent Haiku clipboard utility, not transcript tracking.
 
+**Which mode, and when it is decided.** Capture starts the instant Fn goes down,
+so the mode cannot be read off the Control flag at that one moment: a Ctrl+Fn
+chord is two presses, and Fn habitually lands tens of milliseconds first, which
+made real command dictations paste instead. Instead `DictationModeDecision`
+(`Core/DictationMode.swift`) keeps the question open for **200 ms** after
+key-down while audio already flows:
+
+| Control lands | Result |
+|---|---|
+| before Fn (held) | command, decided at key-down — nothing to wait for |
+| within 200 ms of Fn | command; the decision closes the moment Control arrives |
+| after 200 ms | paste, already latched — Control now belongs to the focused app |
+| never | paste, at the 200 ms deadline |
+
+Once resolved the mode is latched for the whole dictation; releasing Control
+mid-dictation does not downgrade it, and the second press of a double-tap lock
+does not re-open it. Nothing on the capture path (mic, gRPC stream, upload pump)
+consults the mode, so the window costs no recording latency. The only consumers
+are the start cue, menu-bar tint, end cue, and paste-vs-route, and the earliest of
+those — the "safe to talk" chirp — waits for CoreAudio's first buffer, which has
+never arrived sooner than ~175 ms after key-down (`chirp` in the dictation trace).
+The window is therefore all but free; widening it would start delaying that chirp.
+Every dictation's trace records `mode=<paste|command>@<ms>` so a mis-read chord
+is diagnosable from one log line.
+
 ### English transcription preference (2026-07-27, reversed 2026-08-02)
 
 The current Wispr Flow bundle's `transcribeOpenAIAudio` derives a single

@@ -28,6 +28,13 @@ import IOKit.hid
 /// it likewise uses only to recognise a second quick press — never to delay the
 /// start of capture.
 ///
+/// **Ctrl+Fn (command mode) is decided the same way**: on the stop side of the
+/// question, not by blocking the start. Whether Control is part of the gesture
+/// stays open for `DictationModeDecision.window` after key-down, so a chord whose
+/// halves land in either order — Control first, or Fn first by tens of
+/// milliseconds — is read as a chord. See `DictationModeDecision` for why that
+/// window is free.
+///
 /// A keyboard `CGEventTap` needs BOTH Accessibility (to install) and **Input
 /// Monitoring** (to receive un-redacted keycodes — without it, every event
 /// arrives with keycode/flags zeroed). See `AppCoordinator`.
@@ -43,13 +50,14 @@ final class HotkeyMonitor {
     static func requestInputMonitoring() -> Bool {
         IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
     }
-    /// Dictation started. The mode is decided by whether **Control** is held at
-    /// key-down (Ctrl+Fn = command, Fn = paste); chording naturally puts Control
-    /// down first, and its flagsChanged event arrives before Fn's.
+    /// Dictation started. The mode (Ctrl+Fn = command, Fn = paste) arrives as a
+    /// `DictationModeDecision` rather than a value, because at this instant it may
+    /// genuinely not be known yet: capture begins the moment Fn goes down, and the
+    /// Control half of the chord is often still a few tens of milliseconds away.
     ///
     /// The `DictationTrace` is created here, at the key event itself, so every
     /// later phase is measured against the instant the user actually pressed.
-    var onStart: ((DictationMode, DictationTrace) -> Void)?
+    var onStart: ((DictationModeDecision, DictationTrace) -> Void)?
     var onStop: (() -> Void)?
     /// Fired on ⌘⌃V — re-paste the last pasted text.
     var onRepaste: (() -> Void)?
@@ -72,7 +80,11 @@ final class HotkeyMonitor {
 
     /// Live Control-key state, updated from every flagsChanged event.
     private var controlDown = false
-    private var currentMode: DictationMode { controlDown ? .command : .paste }
+
+    /// The mode decision of the dictation now in flight, while it is still open to
+    /// a late Control press. Held until the next dictation replaces it; forwarding
+    /// to an already-latched decision is a no-op, so there is no stale-state hazard.
+    private var modeDecision: DictationModeDecision?
 
     // ⌘⌃V: V is keycode 9 (kVK_ANSI_V); requires Command + Control.
     private static let vKeycode: Int64 = 9
@@ -149,6 +161,7 @@ final class HotkeyMonitor {
             if gesture != .idle {
                 Log.log("hotkey: dictation was in progress across the gap — stopping it")
                 cancelLockTimer()
+                modeDecision = nil
                 gesture = .idle
                 isDown = false
                 onStop?()
@@ -176,9 +189,12 @@ final class HotkeyMonitor {
             return
         }
         guard type == .flagsChanged else { return }
-        // Track Control from every modifier change, so we know at dictation-start
-        // whether this is a Ctrl+Fn (command) or plain Fn (paste) trigger.
+        // Track Control from every modifier change — including the ones that carry
+        // some *other* keycode, which is exactly how the second half of an
+        // Fn-then-Control chord reaches us. A Control press while the current
+        // dictation's mode window is still open promotes it to command mode.
         controlDown = event.flags.contains(.maskControl)
+        if controlDown { modeDecision?.noteControlPressed() }
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
         guard keycode == Self.triggerKeycode else { return }
@@ -192,10 +208,13 @@ final class HotkeyMonitor {
         switch gesture {
         case .idle:
             // Start capturing this instant. Everything else — hold vs. tap vs.
-            // double-tap — is decided later, while audio is already flowing.
+            // double-tap, paste vs. command — is decided later, while audio is
+            // already flowing.
             downTime = Date()
             gesture = .holding
-            onStart?(currentMode, DictationTrace())
+            let decision = DictationModeDecision(controlAlreadyDown: controlDown)
+            modeDecision = decision
+            onStart?(decision, DictationTrace())
         case .awaitingLock:
             // Second press inside the window: hands-free from here on.
             cancelLockTimer()

@@ -38,6 +38,7 @@ final class AudioArbiter {
     private var lastPastedText: String?
     private var isDictating = false
     private var transcriptionProgressTask: Task<Void, Never>?
+    private var ttsWaitCueTask: Task<Void, Never>?
     private var live: LiveDictation?
 
     /// Voice-energy thresholds below which a clip counts as "said nothing".
@@ -79,6 +80,15 @@ final class AudioArbiter {
         static let initialDelay: Duration = .milliseconds(1_500)
         static let cueDuration: Duration = .milliseconds(1_500)
         static let repeatGap: Duration = .seconds(1)
+    }
+
+    /// Sonar echo while a TTS sentence is still synthesizing. Within each 1.5 s
+    /// period: 0.5 s quiet, 0.5 s of `transcriptionPending`, 0.5 s quiet — cut
+    /// the instant playback starts.
+    private enum TTSWaitCue {
+        static let leadQuiet: Duration = .milliseconds(500)
+        static let cueDuration: Duration = .milliseconds(500)
+        static let trailQuiet: Duration = .milliseconds(500)
     }
 
     init(transcriber: Transcriber = WisprFlowTranscriber()) {
@@ -136,6 +146,11 @@ final class AudioArbiter {
         /// identity against `AudioArbiter.live` is not a liveness test.
         var abandoned = false
         var heardAudio = false
+        /// True only after the start cue actually played. Distinct from
+        /// `heardAudio`, which flips earlier — before the mode/`live` guards that
+        /// can still cancel the chirp. Closing cues key off this so a discarded
+        /// tap that already announced "safe to talk" never goes silent.
+        var announcedListening = false
         /// PCM captured but not yet encoded, snapshotted synchronously at key-up.
         /// Read from the recorder later would race the *next* dictation's
         /// `start()`, which resets the shared capture buffer.
@@ -224,6 +239,7 @@ final class AudioArbiter {
             // we cannot predict.
             self.recorder.excludeFromMetering(seconds: cue.duration + Self.cueCaptureMargin)
             cue.play()
+            live.announcedListening = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self, self.recorder.isRecording else { return }
                 self.muter.mute()
@@ -348,6 +364,7 @@ final class AudioArbiter {
         // invariant that routing reads a final mode true by construction.
         let mode = live?.modeDecision.resolve() ?? .paste
         let isCommand = mode == .command
+        let announcedListening = live?.announcedListening ?? false
         live?.trace.mark("key-up")
         live?.pump?.invalidate()
         live?.pump = nil
@@ -377,15 +394,17 @@ final class AudioArbiter {
         let silent = peak < Self.silencePeak && rms < Self.silenceRMS
         if silent {
             if let live { cancelStream(live) }
-            // A stray brush of the trigger key: stay completely quiet about it.
+            // A stray brush of the trigger key: stay completely quiet about it
+            // unless the start cue already told the user we were listening.
             if duration <= Self.accidentalTapSeconds {
                 live?.trace.note(String(format: "discarded silent %.2fs tap", duration))
                 live?.trace.flush()
                 try? FileManager.default.removeItem(at: wav)
+                if announcedListening { playClosingCue(.silenceSkipped, mode: mode) }
                 finishDictation()
                 return
             }
-            SoundEffect.silenceSkipped.play()
+            playClosingCue(.silenceSkipped, mode: mode)
             live?.trace.note("no speech detected")
             live?.trace.flush()
             record(wav: wav, duration: duration, transcript: "", command: isCommand,
@@ -394,7 +413,7 @@ final class AudioArbiter {
             return
         }
 
-        mode.finishCue.play()
+        playClosingCue(mode.finishCue, mode: mode)
         onStatus?(.transcribing)
         startTranscriptionProgressCue()
         // Bind the routing context to *this* dictation rather than reading shared
@@ -612,6 +631,14 @@ final class AudioArbiter {
         }
     }
 
+    /// Stop any in-flight start chirp, then play the closing cue. The start cue is
+    /// short and normally finished by key-up; cutting it avoids rare overlap if
+    /// timings tighten, without changing when capture starts or stops.
+    private func playClosingCue(_ cue: SoundEffect, mode: DictationMode) {
+        mode.startCue.stop()
+        cue.play()
+    }
+
     /// Starts after a short grace period so quick transcriptions stay quiet,
     /// then repeats once the previous cue has fully played plus its pause.
     private func startTranscriptionProgressCue() {
@@ -638,6 +665,34 @@ final class AudioArbiter {
         SoundEffect.transcriptionPending.stop()
     }
 
+    /// Plays during a synthesis wait so a short sentence followed by a long one
+    /// does not sound like the job ended. Separate task from the STT pending cue
+    /// so the two loops never cancel each other.
+    private func startTTSWaitCue() {
+        stopTTSWaitCue()
+        ttsWaitCueTask = Task {
+            do {
+                while !Task.isCancelled {
+                    try await Task.sleep(for: TTSWaitCue.leadQuiet)
+                    SoundEffect.transcriptionPending.play()
+                    try await Task.sleep(for: TTSWaitCue.cueDuration)
+                    SoundEffect.transcriptionPending.stop()
+                    try await Task.sleep(for: TTSWaitCue.trailQuiet)
+                }
+            } catch is CancellationError {
+                // Playback began (or halted) while waiting / echoing.
+            } catch {
+                Log.log("tts wait cue failed: \(error)")
+            }
+        }
+    }
+
+    private func stopTTSWaitCue() {
+        ttsWaitCueTask?.cancel()
+        ttsWaitCueTask = nil
+        SoundEffect.transcriptionPending.stop()
+    }
+
     private func pasteAndRemember(_ text: String) { lastPastedText = text; TextInserter.paste(text); SoundEffect.pasted.play() }
     private func copy(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     private func persist(_ wav: URL) -> URL? {
@@ -655,10 +710,13 @@ final class AudioArbiter {
     func playSentence(text: String, voiceID: String,
                       onStart: @escaping @Sendable () -> Void = {}) async -> Bool {
         onStatus?(.requestingTTS)
+        startTTSWaitCue()
         let result = await tts.play(Utterance(text: text, voiceID: voiceID), onStart: { [weak self] in
+            self?.stopTTSWaitCue()
             self?.onStatus?(.speaking)
             onStart()
         })
+        stopTTSWaitCue()
         if !isDictating { onStatus?(.idle) }
         return result
     }

@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 import IOKit.hid
 
 /// Global trigger-key monitor. The trigger is the **Fn (Globe) key** — Wispr Flow
@@ -55,7 +54,8 @@ import IOKit.hid
 ///
 /// Durations are therefore taken from the **events' own timestamps** rather than
 /// from the clock at the moment we handle them, so even a stalled thread reports
-/// the gesture the user actually performed.
+/// the gesture the user actually performed. `CGEvent.timestamp` is nanoseconds
+/// since boot (not mach ticks) — see `heldDuration`.
 final class HotkeyMonitor: @unchecked Sendable {
     /// Whether Input Monitoring (kIOHIDRequestTypeListenEvent) is granted.
     static func inputMonitoringGranted() -> Bool {
@@ -139,20 +139,13 @@ final class HotkeyMonitor: @unchecked Sendable {
 
     private var tap: CFMachPort?
     private var isDown = false
-    /// Mach absolute time carried by the key-down event itself.
+    /// `CGEvent.timestamp` of the key-down (nanoseconds since boot).
     private var downTimestamp: UInt64 = 0
     /// Fallback anchor, for the rare event that carries no timestamp.
     private var downTime: Date = .distantPast
     private var lockTimer: Timer?
 
     private var thread: Thread?
-
-    /// Seconds per unit of `CGEvent.timestamp` (mach absolute time).
-    private static let secondsPerMachTick: Double = {
-        var info = mach_timebase_info_data_t()
-        mach_timebase_info(&info)
-        return Double(info.numer) / Double(info.denom) / 1_000_000_000
-    }()
 
     private enum Gesture: Equatable {
         /// Not dictating.
@@ -316,11 +309,18 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// we took to get to them, which is a different and much less useful number:
     /// a delivery hiccup would turn a 30 ms tap into a "hold" and stop a
     /// dictation the user was double-tapping to lock on.
+    ///
+    /// `CGEvent.timestamp` is nanoseconds since boot (Apple's
+    /// `CGEventTimestamp` docs). It is *not* mach absolute time — converting
+    /// with `mach_timebase_info` on a machine whose timebase is 125/3 inflated
+    /// every duration by ~42×, so a quick tap read as a >500 ms hold, the
+    /// first half of a double-tap stopped the dictation, and the second press
+    /// started a brand-new one instead of locking.
     private func heldDuration(upTimestamp: UInt64) -> TimeInterval {
         guard downTimestamp != 0, upTimestamp > downTimestamp else {
             return Date().timeIntervalSince(downTime)
         }
-        return Double(upTimestamp - downTimestamp) * Self.secondsPerMachTick
+        return Double(upTimestamp - downTimestamp) / 1_000_000_000
     }
 
     private func keyUp(at timestamp: UInt64) {

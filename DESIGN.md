@@ -271,7 +271,10 @@ cues fire back to back and no dictation runs.
    `held` computed as ~1 s, and `HotkeyMonitor` concluded "push-to-talk hold →
    stop" instead of "first half of a double-tap". macOS separately disables an
    event tap whose callback is that slow (`hotkey tap re-enabled after timeout` in
-   the log), which drops the events either side of the gap.
+   the log), which drops the events either side of the gap. (`CGEvent.timestamp`
+   is nanoseconds since boot — do not scale it with `mach_timebase_info`; that
+   conversion belongs to mach ticks only, and on a 125/3 timebase it inflated
+   every hold by ~42× and broke double-tap lock the same way.)
 
 Note the failure mode: a slow key path does not merely feel laggy, it makes the
 gesture recogniser read a *different gesture* than the one performed.

@@ -181,16 +181,23 @@ final class AudioArbiter {
         recorder.onFirstAudio = { [weak self] in
             DispatchQueue.main.async { self?.captureBecameLive() }
         }
+        // The device is spun up after `start()` returns (it is far too slow to do
+        // on the trigger key's thread — see AudioRecorder.start), so a microphone
+        // that never opens surfaces here rather than as a thrown error.
+        // Weak in `live` as well as `self`: this handler outlives the dictation
+        // (it is only replaced by the next `beginDictation`), and a strong capture
+        // would pin the finished dictation's trace and session until then.
+        recorder.onStartFailed = { [weak self, weak live] reason in
+            // Delivered on the main thread by contract (see AudioRecorder).
+            MainActor.assumeIsolated {
+                guard let self, let live else { return }
+                self.abandonDictation(live, reason: "recorder start failed: \(reason)")
+            }
+        }
         do {
             try recorder.start(trace: trace)
         } catch {
-            Log.log("recorder start failed: \(error)")
-            trace.note("recorder start failed: \(error)")
-            trace.flush()
-            self.live = nil
-            isDictating = false
-            onDictationEnded?()
-            onStatus?(.idle)
+            abandonDictation(live, reason: "recorder start failed: \(error)")
             return
         }
         // Tint the menu bar the instant capture begins. While Control may still be
@@ -214,6 +221,23 @@ final class AudioArbiter {
             Log.log("dictation: WARNING no microphone audio after \(Self.noAudioWarningSeconds)s — check mic permission/device")
             current.trace.note("no audio within \(Self.noAudioWarningSeconds)s")
         }
+    }
+
+    /// Tear a dictation down before it ever produced anything — the capture graph
+    /// was invalid, or the device failed to come up. Idempotent, and a no-op once
+    /// some later dictation has taken over.
+    private func abandonDictation(_ live: LiveDictation, reason: String) {
+        guard self.live === live else { return }
+        Log.log("dictation: \(reason)")
+        live.trace.note(reason)
+        live.trace.flush()
+        live.pump?.invalidate()
+        live.pump = nil
+        cancelStream(live)
+        self.live = nil
+        isDictating = false
+        onDictationEnded?()
+        onStatus?(.idle)
     }
 
     /// The microphone is genuinely capturing. Chirp now, then mute background

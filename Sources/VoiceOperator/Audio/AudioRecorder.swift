@@ -15,11 +15,26 @@ import AVFoundation
 /// Requires the Microphone entitlement + user grant at runtime. Emits capture
 /// diagnostics (input format, peak level, frame count) to `Log` so silent-audio
 /// problems ("you" hallucinations from Whisper) are easy to spot.
-final class AudioRecorder {
+final class AudioRecorder: @unchecked Sendable {
     /// The ASR wire format: 16 kHz mono 16-bit PCM (2 bytes per sample).
     static let asrSampleRate = 16_000
 
     private let engine = AVAudioEngine()
+
+    /// Every touch of the engine graph — tap install/removal, start, stop — runs
+    /// here, and nowhere else. Two reasons, and the second is the important one:
+    ///
+    ///  1. `AVAudioEngine.start()` blocks until the input device is actually
+    ///     running, which on an idle built-in microphone is routinely 700–1000 ms
+    ///     (measured on a 2019 Intel MacBook Pro; the tail reaches 4 s). It cannot
+    ///     be on the main thread — see `start()`.
+    ///  2. Because it is *serial*, a stop always executes after the start it
+    ///     follows even when that start is still parked in the driver, and the
+    ///     next dictation's tap install always executes after that stop. Ordering
+    ///     the graph mutations any other way lets a new recording's tap be torn
+    ///     down by the previous recording's stop.
+    private let engineQueue = DispatchQueue(label: "com.voiceoperator.audio-engine",
+                                            qos: .userInitiated)
 
     /// Everything the audio-tap thread and the main thread share. `AVAudioConverter`
     /// is not thread-safe and `stop()` flushes it from the main thread, so it lives
@@ -38,6 +53,11 @@ final class AudioRecorder {
     private var meteringStartByte = 0
     private var trace: DictationTrace?
     private var firstAudioHandler: (@Sendable () -> Void)?
+    private var startFailureHandler: (@Sendable (String) -> Void)?
+    /// The hardware format the tap is installed with. Held here rather than
+    /// captured into the queue block: `AVAudioFormat` is not `Sendable`, and this
+    /// class already takes responsibility for its own state via `lock`.
+    private var tapFormat: AVAudioFormat?
 
     /// Duration (seconds) of the most recently stopped clip.
     private(set) var lastDurationSeconds: Double = 0
@@ -55,6 +75,23 @@ final class AudioRecorder {
     var onFirstAudio: (@Sendable () -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return firstAudioHandler }
         set { lock.lock(); firstAudioHandler = newValue; lock.unlock() }
+    }
+
+    /// Fired **on the main thread** if the audio device fails to come up. `start()`
+    /// only validates the graph synchronously; the device is spun up afterwards,
+    /// so this is the only way a caller learns that the microphone never opened.
+    /// `isRecording` is already back to false by the time it runs. Carries a
+    /// rendered reason rather than the `Error` itself, which is not `Sendable`.
+    var onStartFailed: (@Sendable (String) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return startFailureHandler }
+        set { lock.lock(); startFailureHandler = newValue; lock.unlock() }
+    }
+
+    /// The recording currently being captured. A tap buffer or a queued graph
+    /// mutation carrying an older value belongs to a recording that has since
+    /// been stopped, and is dropped.
+    private var currentGeneration: Int {
+        lock.lock(); defer { lock.unlock() }; return generation
     }
 
     /// Exclude the next `seconds` of audio from the peak/RMS measurement, counting
@@ -87,6 +124,27 @@ final class AudioRecorder {
         return captured.subdata(in: offset..<min(offset + maxCount, captured.count))
     }
 
+    /// Begin capturing.
+    ///
+    /// Returns as soon as the capture graph is *configured* — a millisecond or
+    /// two. The audio device itself is spun up on `engineQueue`, because
+    /// `AVAudioEngine.start()` blocks for as long as the hardware takes to wake,
+    /// and on a built-in microphone that has gone idle that is routinely
+    /// 700–1000 ms.
+    ///
+    /// It must not block, because this is called straight out of the trigger
+    /// key's event-tap callback. Blocking here freezes key handling for the whole
+    /// wake-up: the key-*up* that ends a push-to-talk, and the second press of a
+    /// double-tap, both queue behind it and are then handled a second late — at
+    /// which point `HotkeyMonitor` reads a 20 ms tap as a one-second hold and
+    /// stops the dictation the user was trying to lock on. macOS also disables an
+    /// event tap whose callback is that slow. (This is what
+    /// "the Fn key does nothing for a second, then beeps on and straight off" was.)
+    ///
+    /// Nothing downstream needs the device to be live before this returns: the
+    /// tap is installed ahead of the start, `onFirstAudio` reports the instant
+    /// samples genuinely begin, and the upload pump only ever sends what has
+    /// actually been captured. Failure is reported later via `onStartFailed`.
     func start(trace: DictationTrace? = nil) throws {
         guard !isRecording else { throw RecorderError.alreadyRecording }
         let auth = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -108,23 +166,55 @@ final class AudioRecorder {
         }
         lock.lock()
         generation += 1
-        let generation = self.generation
+        let recording = generation
         converter = conv
         inputSampleRate = format.sampleRate
+        tapFormat = format
         captured = Data()
         sawFirstAudio = false
         meteringStartByte = 0
         self.trace = trace
         lock.unlock()
-
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            self?.handleTap(buffer, generation: generation)
-        }
-        engine.prepare()
-        trace?.mark("engine-prepare")
-        try engine.start()
-        trace?.mark("engine-start")
         isRecording = true
+
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            // Stopped while we were queued (or while a previous start was still
+            // blocked in the driver). Don't wake a device nobody is listening to.
+            self.lock.lock()
+            let stale = recording != self.generation
+            let tapFormat = self.tapFormat
+            self.lock.unlock()
+            guard !stale, let tapFormat else { return }
+
+            let input = self.engine.inputNode
+            input.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { [weak self] buffer, _ in
+                self?.handleTap(buffer, generation: recording)
+            }
+            self.engine.prepare()
+            trace?.mark("engine-prepare")
+            do {
+                try self.engine.start()
+                trace?.mark("engine-start")
+            } catch {
+                input.removeTap(onBus: 0)
+                let reason = "\(error)"
+                Log.log("recorder: engine start failed — \(reason)")
+                trace?.note("engine start failed: \(reason)")
+                self.reportStartFailure(reason, generation: recording)
+            }
+        }
+    }
+
+    /// Hand a failed device start back to the caller on the main thread, unless a
+    /// newer recording has already superseded this one.
+    private func reportStartFailure(_ reason: String, generation: Int) {
+        let handler = onStartFailed
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.currentGeneration == generation, self.isRecording else { return }
+            self.isRecording = false
+            handler?(reason)
+        }
     }
 
     /// One tap buffer. Runs on the audio thread; the first-audio callback is
@@ -150,16 +240,31 @@ final class AudioRecorder {
     /// not have to race a subsequent `start()` for them.
     func stop() throws -> (url: URL, pcm: Data) {
         guard isRecording else { throw RecorderError.notRecording }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
         isRecording = false
 
         lock.lock()
+        // Retire this recording *before* draining. The graph is torn down
+        // asynchronously — possibly behind a start still blocked in the driver —
+        // so tap buffers can still be in flight; the bump makes `handleTap` drop
+        // them rather than append audio past the flush.
+        generation += 1
         convertAndStoreLocked(nil)     // flush the converter's resampling tail
         converter = nil
+        tapFormat = nil
+        trace = nil
         let samples = captured
         let meteringStart = meteringStartByte
         lock.unlock()
+
+        // Queued rather than immediate, so it lands after this recording's own
+        // start and before the next one's. Worst case the device stays up for the
+        // remainder of a slow wake-up, which costs nothing but a moment of the
+        // microphone-in-use indicator.
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            self.engine.inputNode.removeTap(onBus: 0)
+            self.engine.stop()
+        }
 
         lastDurationSeconds = Double(samples.count / 2) / Double(Self.asrSampleRate)
         (lastPeak, lastRMS) = Self.levels(pcm16: samples, from: meteringStart)

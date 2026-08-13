@@ -250,6 +250,38 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   `flagsChanged`, configurable, so Wispr Flow (still on Fn) keeps working in parallel until we
   retire it. Migrate to Fn later. (macOS "double-tap Fn" dictation already disabled by user.)
 
+#### Two invariants the key path must keep (2026-08-12)
+
+Both were violated at once, and on a 2019 Intel MacBook Pro (Ventura 13.7.8) the
+symptom was: tap Fn twice, nothing happens for a second, then the start and stop
+cues fire back to back and no dictation runs.
+
+1. **Nothing slow may run on the trigger key's thread.** `AudioArbiter.beginDictation`
+   used to be invoked straight from the event-tap callback *on the main thread*, and
+   it called `AVAudioEngine.start()` synchronously. Waking an idle built-in
+   microphone takes a median of **721 ms** on that machine (p90 990 ms, max 4.4 s;
+   ~80 ms on a recent Mac, which is why it only ever showed up at home). The tap is
+   now on a dedicated `HotkeyMonitor` run-loop thread, and the device is spun up on
+   `AudioRecorder.engineQueue`; `start()` returns in a millisecond or two and
+   reports a failed device asynchronously via `onStartFailed`.
+
+2. **Gesture durations come from the events' own timestamps**, never from the clock
+   at the moment they are handled. With key handling stalled behind the device
+   wake-up, the key-*up* of a 30 ms tap was processed a second after its key-down,
+   `held` computed as ~1 s, and `HotkeyMonitor` concluded "push-to-talk hold →
+   stop" instead of "first half of a double-tap". macOS separately disables an
+   event tap whose callback is that slow (`hotkey tap re-enabled after timeout` in
+   the log), which drops the events either side of the gap.
+
+Note the failure mode: a slow key path does not merely feel laggy, it makes the
+gesture recogniser read a *different gesture* than the one performed.
+
+The residual cost of a cold device — roughly a second before the "safe to talk"
+chirp, and the words spoken into it — is deliberately not fixed by keeping the
+engine warm: that would hold the input device open and light the macOS
+microphone-in-use indicator permanently. The `audio=` mark in each dictation's
+`trace` line is the measurement of that deaf time.
+
 ---
 
 ## Architecture — Swift menu-bar app (`LSUIElement`, no dock/window)

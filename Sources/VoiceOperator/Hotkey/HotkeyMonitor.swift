@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import IOKit.hid
 
 /// Global trigger-key monitor. The trigger is the **Fn (Globe) key** — Wispr Flow
@@ -38,8 +39,24 @@ import IOKit.hid
 /// A keyboard `CGEventTap` needs BOTH Accessibility (to install) and **Input
 /// Monitoring** (to receive un-redacted keycodes — without it, every event
 /// arrives with keycode/flags zeroed). See `AppCoordinator`.
-@MainActor
-final class HotkeyMonitor {
+///
+/// ## Why this runs on its own thread
+///
+/// The tap and the gesture state machine live on a dedicated run-loop thread,
+/// not the main one, and every callback is hopped to main. Key events must be
+/// handled the moment they arrive, and the main thread is not somewhere that can
+/// be promised: it draws the menu bar, tracks menus, and used to spend the best
+/// part of a second inside `AVAudioEngine.start()` waking an idle microphone.
+/// When key handling stalls, the damage is not merely late — it is *wrong*. The
+/// key-up of a quick tap arrives a second after its key-down, the gesture reads
+/// as a hold rather than as half of a double-tap, and the dictation the user was
+/// locking on stops instead. macOS compounds it by disabling an event tap whose
+/// callback is too slow, which drops the events either side of the gap.
+///
+/// Durations are therefore taken from the **events' own timestamps** rather than
+/// from the clock at the moment we handle them, so even a stalled thread reports
+/// the gesture the user actually performed.
+final class HotkeyMonitor: @unchecked Sendable {
     /// Whether Input Monitoring (kIOHIDRequestTypeListenEvent) is granted.
     static func inputMonitoringGranted() -> Bool {
         IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
@@ -50,6 +67,12 @@ final class HotkeyMonitor {
     static func requestInputMonitoring() -> Bool {
         IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
     }
+
+    /// All callbacks are delivered on the **main thread**, in the order the key
+    /// events arrived. Assign them before calling `start()`: they are read from
+    /// the tap thread and are not synchronised.
+    typealias Action = @MainActor @Sendable () -> Void
+
     /// Dictation started. The mode (Ctrl+Fn = command, Fn = paste) arrives as a
     /// `DictationModeDecision` rather than a value, because at this instant it may
     /// genuinely not be known yet: capture begins the moment Fn goes down, and the
@@ -57,33 +80,40 @@ final class HotkeyMonitor {
     ///
     /// The `DictationTrace` is created here, at the key event itself, so every
     /// later phase is measured against the instant the user actually pressed.
-    var onStart: ((DictationModeDecision, DictationTrace) -> Void)?
-    var onStop: (() -> Void)?
+    var onStart: (@MainActor @Sendable (DictationModeDecision, DictationTrace) -> Void)?
+    var onStop: Action?
     /// Fired on ⌘⌃V — re-paste the last pasted text.
-    var onRepaste: (() -> Void)?
+    var onRepaste: Action?
     /// Fired on ⌘⌃B — toggle narration mute.
-    var onToggleMute: (() -> Void)?
+    var onToggleMute: Action?
     /// Fired on ⌘⌃S — speak the clipboard aloud (or stop if already speaking).
-    var onSpeakClipboard: (() -> Void)?
+    var onSpeakClipboard: Action?
     /// Fired on ⌘⌃A — summarize the clipboard via Haiku.
-    var onSummarizeClipboard: (() -> Void)?
+    var onSummarizeClipboard: Action?
     /// Fired on ⌘⌃N — skip the clip playing now (no-op when nothing is playing).
-    var onSkip: (() -> Void)?
+    var onSkip: Action?
     /// Fired on ⌘⌃J — focus the surface of the last agent that spoke.
-    var onFocusLast: (() -> Void)?
+    var onFocusLast: Action?
 
     /// Suppresses the ⌘⌃ chord shortcuts while the status-bar menu is open. Those
     /// items carry real menu key equivalents (for the right-aligned shortcut hint),
     /// which the menu fires itself while open — so we mute the tap's copy to avoid
     /// firing twice. The Fn dictation trigger is unaffected.
-    var chordsSuppressed = false
+    var chordsSuppressed: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return suppressChords }
+        set { stateLock.lock(); suppressChords = newValue; stateLock.unlock() }
+    }
+    private let stateLock = NSLock()
+    private var suppressChords = false
 
-    /// Live Control-key state, updated from every flagsChanged event.
+    /// Live Control-key state, updated from every flagsChanged event on the
+    /// hotkey thread. Used only to seed `DictationModeDecision` at key-down;
+    /// late Control presses are forwarded to the decision on the main thread.
     private var controlDown = false
 
-    /// The mode decision of the dictation now in flight, while it is still open to
-    /// a late Control press. Held until the next dictation replaces it; forwarding
-    /// to an already-latched decision is a no-op, so there is no stale-state hazard.
+    /// The mode decision of the dictation now in flight. Touched only on the
+    /// main thread (via `onMain`), because `DictationModeDecision` is
+    /// `@MainActor`. Forwarding to an already-latched decision is a no-op.
     private var modeDecision: DictationModeDecision?
 
     // ⌘⌃V: V is keycode 9 (kVK_ANSI_V); requires Command + Control.
@@ -109,8 +139,20 @@ final class HotkeyMonitor {
 
     private var tap: CFMachPort?
     private var isDown = false
+    /// Mach absolute time carried by the key-down event itself.
+    private var downTimestamp: UInt64 = 0
+    /// Fallback anchor, for the rare event that carries no timestamp.
     private var downTime: Date = .distantPast
     private var lockTimer: Timer?
+
+    private var thread: Thread?
+
+    /// Seconds per unit of `CGEvent.timestamp` (mach absolute time).
+    private static let secondsPerMachTick: Double = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return Double(info.numer) / Double(info.denom) / 1_000_000_000
+    }()
 
     private enum Gesture: Equatable {
         /// Not dictating.
@@ -125,7 +167,13 @@ final class HotkeyMonitor {
     }
     private var gesture: Gesture = .idle
 
+    /// Create the tap here — it is a mach port, not bound to any run loop, so
+    /// whether it could be created is known synchronously and `AppCoordinator`
+    /// can keep reporting installation success at launch. Which run loop
+    /// *services* it is decided separately, by where the source is attached, and
+    /// that is the private thread below.
     func start() -> Bool {
+        guard thread == nil else { return tap != nil }
         let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
             | (1 << CGEventType.keyDown.rawValue)   // for the ⌘⌃-chord shortcuts
         let refcon = Unmanaged.passUnretained(self).toOpaque()
@@ -141,11 +189,31 @@ final class HotkeyMonitor {
             }, userInfo: refcon) else {
             return false
         }
-        self.tap = tap
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        self.tap = tap        // read back off `self` inside the thread: CF types are not Sendable
+
+        let thread = Thread { [weak self] in
+            guard let self, let tap = self.tap else { return }
+            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+            // Serviced forever. The source keeps this run loop alive, and the
+            // lock-window timer is scheduled here too, so neither can be held up
+            // by whatever the main thread happens to be doing.
+            while !Thread.current.isCancelled {
+                _ = CFRunLoopRunInMode(.defaultMode, 60, false)
+            }
+        }
+        thread.name = "com.voiceoperator.hotkey"
+        thread.qualityOfService = .userInteractive
+        self.thread = thread
+        thread.start()
         return true
+    }
+
+    /// Hand a callback to the main thread. `DispatchQueue.main` is FIFO, so a
+    /// start can never overtake the stop that preceded it.
+    private func onMain(_ body: @escaping @MainActor @Sendable () -> Void) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
@@ -161,10 +229,12 @@ final class HotkeyMonitor {
             if gesture != .idle {
                 Log.log("hotkey: dictation was in progress across the gap — stopping it")
                 cancelLockTimer()
-                modeDecision = nil
                 gesture = .idle
                 isDown = false
-                onStop?()
+                onMain { [weak self] in
+                    self?.modeDecision = nil
+                    self?.onStop?()
+                }
             }
             return
         }
@@ -176,15 +246,17 @@ final class HotkeyMonitor {
             guard !chordsSuppressed else { return }
             let keycode = event.getIntegerValueField(.keyboardEventKeycode)
             if event.flags.contains(.maskCommand), event.flags.contains(.maskControl) {
+                let action: Action?
                 switch keycode {
-                case Self.vKeycode: onRepaste?()
-                case Self.bKeycode: onToggleMute?()
-                case Self.sKeycode: onSpeakClipboard?()
-                case Self.aKeycode: onSummarizeClipboard?()
-                case Self.nKeycode: onSkip?()
-                case Self.jKeycode: onFocusLast?()
-                default: break
+                case Self.vKeycode: action = onRepaste
+                case Self.bKeycode: action = onToggleMute
+                case Self.sKeycode: action = onSpeakClipboard
+                case Self.aKeycode: action = onSummarizeClipboard
+                case Self.nKeycode: action = onSkip
+                case Self.jKeycode: action = onFocusLast
+                default: action = nil
                 }
+                if let action { onMain { action() } }
             }
             return
         }
@@ -194,47 +266,71 @@ final class HotkeyMonitor {
         // Fn-then-Control chord reaches us. A Control press while the current
         // dictation's mode window is still open promotes it to command mode.
         controlDown = event.flags.contains(.maskControl)
-        if controlDown { modeDecision?.noteControlPressed() }
+        if controlDown {
+            onMain { [weak self] in self?.modeDecision?.noteControlPressed() }
+        }
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
         guard keycode == Self.triggerKeycode else { return }
         let down = (flags & Self.triggerBit) != 0
         if down == isDown { return }   // ignore duplicates / confounding modifiers
         isDown = down
-        if down { keyDown() } else { keyUp() }
+        if down { keyDown(at: event.timestamp) } else { keyUp(at: event.timestamp) }
     }
 
-    private func keyDown() {
+    private func keyDown(at timestamp: UInt64) {
         switch gesture {
         case .idle:
             // Start capturing this instant. Everything else — hold vs. tap vs.
             // double-tap, paste vs. command — is decided later, while audio is
             // already flowing.
+            downTimestamp = timestamp
             downTime = Date()
             gesture = .holding
-            let decision = DictationModeDecision(controlAlreadyDown: controlDown)
-            modeDecision = decision
-            onStart?(decision, DictationTrace())
+            // `DictationModeDecision` is `@MainActor`, so create it on main with
+            // the Control state observed on this thread at the key event. FIFO
+            // on `DispatchQueue.main` keeps a following Control press's hop
+            // ordered after this creation.
+            let controlAlreadyDown = controlDown
+            let trace = DictationTrace()
+            onMain { [weak self] in
+                guard let self else { return }
+                let decision = DictationModeDecision(controlAlreadyDown: controlAlreadyDown)
+                self.modeDecision = decision
+                self.onStart?(decision, trace)
+            }
         case .awaitingLock:
             // Second press inside the window: hands-free from here on.
             cancelLockTimer()
             gesture = .locked
         case .locked:
             gesture = .idle
-            onStop?()
+            onMain { [weak self] in self?.onStop?() }
         case .holding:
             break   // duplicate down; the isDown guard normally filters these
         }
     }
 
-    private func keyUp() {
+    /// How long the key was actually held, measured between the two events'
+    /// **own** timestamps. Reading the clock here instead would measure how long
+    /// we took to get to them, which is a different and much less useful number:
+    /// a delivery hiccup would turn a 30 ms tap into a "hold" and stop a
+    /// dictation the user was double-tapping to lock on.
+    private func heldDuration(upTimestamp: UInt64) -> TimeInterval {
+        guard downTimestamp != 0, upTimestamp > downTimestamp else {
+            return Date().timeIntervalSince(downTime)
+        }
+        return Double(upTimestamp - downTimestamp) * Self.secondsPerMachTick
+    }
+
+    private func keyUp(at timestamp: UInt64) {
         switch gesture {
         case .holding:
-            let held = Date().timeIntervalSince(downTime)
+            let held = heldDuration(upTimestamp: timestamp)
             guard held < lockWindow else {
                 // A real hold — this is push-to-talk, so stop on release.
                 gesture = .idle
-                onStop?()
+                onMain { [weak self] in self?.onStop?() }
                 return
             }
             // Too quick to tell apart from the first half of a double-tap. Keep
@@ -243,20 +339,19 @@ final class HotkeyMonitor {
             // it is a few hundred ms of room tone at the end of the clip.
             gesture = .awaitingLock
             lockTimer?.invalidate()
-            let timer = Timer.scheduledTimer(withTimeInterval: lockWindow - held, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self, self.gesture == .awaitingLock else { return }
-                    self.lockTimer = nil
-                    self.gesture = .idle
-                    self.onStop?()
-                }
+            let timer = Timer(timeInterval: max(0, lockWindow - held), repeats: false) { [weak self] _ in
+                guard let self, self.gesture == .awaitingLock else { return }
+                self.lockTimer = nil
+                self.gesture = .idle
+                self.onMain { [weak self] in self?.onStop?() }
             }
-            // .common, or menu tracking (and any other run-loop mode switch) parks
-            // this timer and the dictation it is supposed to end never stops: mic
-            // open, audio uploading, system output muted, indefinitely. The event
-            // tap itself is installed in .commonModes, so key events keep arriving
-            // during tracking while a default-mode timer would not fire.
-            RunLoop.main.add(timer, forMode: .common)
+            // Scheduled on *this* thread's run loop, alongside the tap, so the
+            // second press of a double-tap and the timer that would otherwise end
+            // the dictation are ordered against each other by the same loop.
+            // .common because menu tracking (and any other mode switch) parks a
+            // default-mode timer, and the dictation it is supposed to end never
+            // stops: mic open, audio uploading, system output muted, indefinitely.
+            RunLoop.current.add(timer, forMode: .common)
             lockTimer = timer
         case .awaitingLock, .locked, .idle:
             break   // release of the locking press, or of a press that already stopped

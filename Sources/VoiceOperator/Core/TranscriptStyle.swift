@@ -14,9 +14,10 @@ import Foundation
 /// thing this avoids: you decide while you are still speaking, and the transcript
 /// arrives shaped the way it needs to be.
 ///
-/// The two flags are independent, and the tap cycles the four combinations in the
-/// order `normal → lowercaseFirst → both → trimTrailingPunctuation → normal`, so
-/// each step changes exactly one flag.
+/// The two shaping flags are independent, then the final tap selects a discard
+/// state: `normal → lowercaseFirst → both → trimTrailingPunctuation → discard →
+/// normal`. Discard is deliberately its own state: it still transcribes and
+/// records the result, but it does not insert it into the focused app.
 ///
 /// ## The spaces are deliberate
 ///
@@ -31,6 +32,15 @@ struct TranscriptStyle: Equatable, Sendable {
     /// Drop the sentence-final punctuation and guarantee one trailing space, so
     /// what follows continues the same sentence.
     var trimTrailingPunctuation = false
+    /// Suppress insertion after transcription. This is never combined with a
+    /// shaping flag: the cycle shows it as a distinct trash state.
+    var discard = false
+
+    init(lowercaseFirst: Bool = false, trimTrailingPunctuation: Bool = false, discard: Bool = false) {
+        self.discard = discard
+        self.lowercaseFirst = discard ? false : lowercaseFirst
+        self.trimTrailingPunctuation = discard ? false : trimTrailingPunctuation
+    }
 
     static let normal = TranscriptStyle()
 
@@ -42,6 +52,7 @@ struct TranscriptStyle: Equatable, Sendable {
         TranscriptStyle(lowercaseFirst: true,  trimTrailingPunctuation: false),
         TranscriptStyle(lowercaseFirst: true,  trimTrailingPunctuation: true),
         TranscriptStyle(lowercaseFirst: false, trimTrailingPunctuation: true),
+        TranscriptStyle(discard: true),
     ]
 
     /// The state one tap of the left Shift key moves to.
@@ -52,6 +63,7 @@ struct TranscriptStyle: Equatable, Sendable {
 
     /// For the status item's accessibility description.
     var accessibilityLabel: String {
+        if discard { return "discard transcript" }
         switch (lowercaseFirst, trimTrailingPunctuation) {
         case (false, false): return "normal"
         case (true, false):  return "lowercase first word"

@@ -46,6 +46,8 @@ rm -rf "$APP" "$ZIP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/*.svg "$APP/Contents/Resources/"
+cp Resources/*.png "$APP/Contents/Resources/"
 
 echo "signing as: $IDENTITY"
 # --timestamp (secure timestamp) and --options runtime (hardened runtime) are

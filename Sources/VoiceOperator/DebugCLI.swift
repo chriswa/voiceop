@@ -128,6 +128,7 @@ enum DebugCLI {
             TranscriptStyle(lowercaseFirst: true),
             TranscriptStyle(lowercaseFirst: true, trimTrailingPunctuation: true),
             TranscriptStyle(trimTrailingPunctuation: true),
+            TranscriptStyle(discard: true),
         ]
         let statuses: [OperatorStatus] = [.listening, .commandListening]
         let scale: CGFloat = 2, zoom: CGFloat = 8, pad: CGFloat = 4
@@ -187,7 +188,7 @@ enum DebugCLI {
         do {
             try png.write(to: url)
             print("icon preview → \(url.path)  (rows: listening dark/light, command dark/light; "
-                  + "cols: normal, a, a+x, x)")
+                  + "cols: normal, a, a+x, x, trash)")
         } catch {
             FileHandle.standardError.write(Data("icon-preview failed: \(error)\n".utf8))
         }

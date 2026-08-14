@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 140">
+  <!-- A heavy comma, then a clear strike to mean "drop terminal punctuation". -->
+  <path d="M63 13C35 13 18 31 18 57c0 20 12 35 31 39L31 129h29l22-36c10-13 15-27 15-42 0-23-13-38-34-38Zm-1 24c10 0 17 8 17 20 0 12-7 20-17 20s-17-8-17-20c0-12 7-20 17-20Z"
+        fill="#ff9e1b" stroke="#111111" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M19 22 84 111M84 22 19 111"
+        fill="none" stroke="#111111" stroke-width="13" stroke-linecap="round"/>
+</svg>

@@ -237,7 +237,10 @@ final class AudioArbiter {
     func cycleTranscriptStyle() {
         guard let live else { return }
         live.style = live.style.next
-        live.trace.note("style=\(live.style.lowercaseFirst ? "a" : "-")\(live.style.trimTrailingPunctuation ? "x" : "-")")
+        let styleTrace = live.style.discard
+            ? "trash"
+            : "\(live.style.lowercaseFirst ? "a" : "-")\(live.style.trimTrailingPunctuation ? "x" : "-")"
+        live.trace.note("style=\(styleTrace)")
         onTranscriptStyle?(live.style)
     }
 
@@ -487,7 +490,7 @@ final class AudioArbiter {
                     // Nothing was said — nothing to paste or route.
                 } else if isCommand {
                     if let routingContext { self.onCommand?(text, routingContext) }
-                } else {
+                } else if !style.discard {
                     self.pasteAndRemember(text)
                 }
                 live?.trace.mark("done")

@@ -16,6 +16,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/*.svg "$APP/Contents/Resources/"
+cp Resources/*.png "$APP/Contents/Resources/"
 
 # Sign with a real codesigning identity if one exists (stable designated
 # requirement → TCC remembers Accessibility/Microphone grants across rebuilds).

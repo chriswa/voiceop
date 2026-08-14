@@ -7,27 +7,22 @@ final class TranscriptStyleTests: XCTestCase {
     private let lower = TranscriptStyle(lowercaseFirst: true)
     private let trim = TranscriptStyle(trimTrailingPunctuation: true)
     private let both = TranscriptStyle(lowercaseFirst: true, trimTrailingPunctuation: true)
+    private let discard = TranscriptStyle(discard: true)
 
     // MARK: - The cycle
 
     func testTheCycleVisitsEveryStateAndReturns() {
         var seen: [TranscriptStyle] = [.normal]
         var s = TranscriptStyle.normal
-        for _ in 0..<4 { s = s.next; seen.append(s) }
-        XCTAssertEqual(seen, [.normal, lower, both, trim, .normal])
+        for _ in 0..<5 { s = s.next; seen.append(s) }
+        XCTAssertEqual(seen, [.normal, lower, both, trim, discard, .normal])
     }
 
-    /// Each tap must change exactly one flag, so the four states form a ring the
-    /// user can feel their way around rather than a jump between opposites.
-    func testEachTapFlipsExactlyOneFlag() {
-        var s = TranscriptStyle.normal
-        for _ in 0..<4 {
-            let n = s.next
-            let changed = (n.lowercaseFirst != s.lowercaseFirst ? 1 : 0)
-                + (n.trimTrailingPunctuation != s.trimTrailingPunctuation ? 1 : 0)
-            XCTAssertEqual(changed, 1, "\(s) → \(n)")
-            s = n
-        }
+    func testDiscardIsAlwaysItsOwnStateAndDoesNotShapeText() {
+        let invalidCombinedState = TranscriptStyle(lowercaseFirst: true, trimTrailingPunctuation: true, discard: true)
+        XCTAssertEqual(invalidCombinedState, discard)
+        XCTAssertEqual(discard.apply(to: "The cat sat."), "The cat sat.")
+        XCTAssertEqual(discard.accessibilityLabel, "discard transcript")
     }
 
     // MARK: - Normal

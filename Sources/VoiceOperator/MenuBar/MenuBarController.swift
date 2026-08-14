@@ -97,8 +97,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// status palette. Idle remains a template image so macOS adapts it to the
     /// menu-bar appearance.
     static func icon(status: OperatorStatus, muted: Bool, style: TranscriptStyle = .normal) -> NSImage {
-        let base = NSImage(systemSymbolName: "megaphone.fill", accessibilityDescription: "Voice Operator")
-        let symbol = base?.withSymbolConfiguration(.init(pointSize: 15, weight: .regular))
+        let showsDiscard = style.discard && (status == .listening || status == .commandListening)
+        let base = NSImage(systemSymbolName: showsDiscard ? "trash.fill" : "megaphone.fill", accessibilityDescription: "Voice Operator")
+        let symbol = base?.withSymbolConfiguration(.init(pointSize: showsDiscard ? 18 : 15,
+                                                          weight: showsDiscard ? .bold : .regular))
             ?? NSImage(size: NSSize(width: 18, height: 18))
         let template = status.tint == nil && !muted
         let color = status.tint ?? .labelColor
@@ -113,7 +115,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             }
             // After the tint fill, or `sourceAtop` would repaint the badges in the
             // status colour and they would vanish into the silhouette.
-            if badges { drawStyleBadges(style, in: rect) }
+            if badges && !showsDiscard { drawStyleBadges(style, in: rect) }
             return true
         }
         // A badged icon is no longer monochrome, so it must not be a template
@@ -136,34 +138,72 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         NSColor(srgbRed: 1.0, green: 0.62, blue: 0.11, alpha: 1)
     }
 
-    /// Draw the style flags along the bottom edge: `a` for a lowercased first
-    /// word, `x` for stripped end punctuation, both when both are on.
+    /// Draw the style flags as large, transparent bottom-edge badges: `a` for a
+    /// lowercased first word always occupies the left half, and a struck-through
+    /// comma for stripped end punctuation always occupies the right half. This
+    /// makes the positions stable as flags are enabled and disabled.
     private nonisolated static func drawStyleBadges(_ style: TranscriptStyle, in rect: NSRect) {
-        var glyphs: [String] = []
-        if style.lowercaseFirst { glyphs.append("a") }
-        if style.trimTrailingPunctuation { glyphs.append("x") }
-        guard !glyphs.isEmpty else { return }
+        let badges: [(character: String, slot: Int)] = [
+            style.lowercaseFirst ? ("a", 0) : nil,
+            style.trimTrailingPunctuation ? ("trimPunctuation", 1) : nil,
+        ].compactMap { $0 }
+        guard !badges.isEmpty else { return }
 
+        let badgeHeight = round(rect.height * 0.5)
+        let badgeWidth = rect.width / 2
+        let baselineLift = round(rect.height * 0.17)
+        // Use a heavy monospaced face so `a` and `x` both use their full
+        // half-width slots instead of leaving a conspicuous gap between them.
+        // The font's visible ink is smaller than its point size, so it is allowed
+        // to be taller than half the icon for legibility at menu-bar scale.
+        let font = NSFont.monospacedSystemFont(ofSize: round(rect.height * 0.9), weight: .heavy)
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: round(rect.height * 0.42), weight: .bold),
+            .font: font,
             .foregroundColor: badgeColor,
-            // A negative stroke width fills *and* strokes, giving each glyph its
-            // own dark outline in one draw — without it, amber on red is mush at
-            // menu-bar size.
-            .strokeColor: NSColor.black.withAlphaComponent(0.8),
+            // A negative stroke width fills and strokes the glyph. The heavy
+            // outline makes the transparent badge readable over either the
+            // coloured megaphone or the menu-bar background.
+            .strokeColor: NSColor.black.withAlphaComponent(0.9),
             .strokeWidth: -5.0,
         ]
-        let drawn = glyphs.map { NSAttributedString(string: $0, attributes: attrs) }
-        let gap: CGFloat = 1
-        let total = drawn.reduce(0) { $0 + $1.size().width } + gap * CGFloat(drawn.count - 1)
-        // Bottom-right: the megaphone's handle occupies the bottom-left, and its
-        // horn the top, so this is the quietest corner of the silhouette. Held a
-        // half-point off the edge, since the glyph's last column of antialiasing
-        // would otherwise be clipped by the image bounds.
-        var x = max(rect.minX, rect.maxX - total - 0.5)
-        for glyph in drawn {
-            glyph.draw(at: NSPoint(x: x, y: rect.minY - round(rect.height * 0.06)))
-            x += glyph.size().width + gap
+
+        for badge in badges {
+            let badgeRect = NSRect(x: rect.minX + CGFloat(badge.slot) * badgeWidth,
+                                   y: rect.minY,
+                                   width: badgeWidth,
+                                   height: badgeHeight)
+            if badge.character == "trimPunctuation" {
+                drawTrimPunctuationBadge(in: badgeRect, verticallyCenteredAt: badgeRect.midY + baselineLift)
+                continue
+            }
+            let glyph = NSAttributedString(string: badge.character, attributes: attrs)
+            let size = glyph.size()
+            glyph.draw(at: NSPoint(x: badgeRect.midX - size.width / 2,
+                                   y: badgeRect.midY - size.height / 2 + baselineLift))
         }
+    }
+
+    /// The terminal-punctuation marker is a purpose-drawn SVG rather than text:
+    /// a thick comma struck through with an X stays legible at menu-bar scale.
+    private nonisolated static func drawTrimPunctuationBadge(in rect: NSRect, verticallyCenteredAt y: CGFloat) {
+        // AppKit does not reliably decode SVGs into `NSImage` outside a full
+        // asset catalogue, so the checked-in PNG is the faithful raster export
+        // of `Resources/trim-punctuation.svg` used at runtime.
+        let sourceAsset = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources/trim-punctuation.png")
+        let workingDirectoryAsset = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Resources/trim-punctuation.png")
+        let candidates = [
+            Bundle.main.url(forResource: "trim-punctuation", withExtension: "png"),
+            sourceAsset,
+            workingDirectoryAsset,
+        ].compactMap { $0 }
+        guard let image = candidates.lazy.compactMap(NSImage.init(contentsOf:)).first else { return }
+        let frame = NSRect(x: rect.minX,
+                           y: y - rect.height * 0.72,
+                           width: rect.width,
+                           height: rect.height * 1.44)
+        image.draw(in: frame)
     }
 }

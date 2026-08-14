@@ -28,6 +28,9 @@ final class AudioArbiter {
     private let sttDir: URL
 
     var onStatus: ((OperatorStatus) -> Void)?
+    /// The transcript style of the dictation in flight, for the menu-bar badge.
+    /// Reset to `.normal` when the dictation ends.
+    var onTranscriptStyle: ((TranscriptStyle) -> Void)?
     var onHistoryChanged: (() -> Void)?
     var onCommand: ((String, DictationContext) -> Void)?
     var onDictationBegan: (() -> Void)?
@@ -151,6 +154,10 @@ final class AudioArbiter {
         /// can still cancel the chirp. Closing cues key off this so a discarded
         /// tap that already announced "safe to talk" never goes silent.
         var announcedListening = false
+        /// How this dictation's transcript is shaped before it is recorded and
+        /// pasted. Cycled by tapping left Shift while recording, and deliberately
+        /// per-dictation: it belongs to the sentence being spoken, not to the app.
+        var style: TranscriptStyle = .normal
         /// PCM captured but not yet encoded, snapshotted synchronously at key-up.
         /// Read from the recorder later would race the *next* dictation's
         /// `start()`, which resets the shared capture buffer.
@@ -223,6 +230,17 @@ final class AudioArbiter {
         }
     }
 
+    /// Advance the in-flight dictation's transcript style by one (left Shift
+    /// tapped while recording). A no-op when nothing is recording — which is
+    /// exactly the condition the red menu-bar icon shows, so the icon is an
+    /// honest indicator of when the key does anything.
+    func cycleTranscriptStyle() {
+        guard let live else { return }
+        live.style = live.style.next
+        live.trace.note("style=\(live.style.lowercaseFirst ? "a" : "-")\(live.style.trimTrailingPunctuation ? "x" : "-")")
+        onTranscriptStyle?(live.style)
+    }
+
     /// Tear a dictation down before it ever produced anything — the capture graph
     /// was invalid, or the device failed to come up. Idempotent, and a no-op once
     /// some later dictation has taken over.
@@ -237,6 +255,7 @@ final class AudioArbiter {
         self.live = nil
         isDictating = false
         onDictationEnded?()
+        onTranscriptStyle?(.normal)
         onStatus?(.idle)
     }
 
@@ -388,6 +407,11 @@ final class AudioArbiter {
         // invariant that routing reads a final mode true by construction.
         let mode = live?.modeDecision.resolve() ?? .paste
         let isCommand = mode == .command
+        // Latch the style with the mode, and for the same reason: the transcript
+        // lands well after this dictation stopped being the current one, by which
+        // time `live` may describe a newer dictation with a style of its own.
+        let style = live?.style ?? .normal
+        onTranscriptStyle?(.normal)   // the badge belongs to the recording, which is over
         let announcedListening = live?.announcedListening ?? false
         live?.trace.mark("key-up")
         live?.pump?.invalidate()
@@ -451,13 +475,19 @@ final class AudioArbiter {
             guard let self else { return }
             defer { live?.trace.flush() }
             do {
-                let text = try await self.transcribe(live, wavURL: wav)
+                let raw = try await self.transcribe(live, wavURL: wav)
                 self.stopTranscriptionProgressCue()
+                // A command is spoken to the router, not written into a document,
+                // so the fragment-shaping the style does would only confuse it.
+                let text = isCommand ? raw : style.apply(to: raw)
                 self.record(wav: wav, duration: duration, transcript: text, command: isCommand, error: nil)
-                if isCommand {
-                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let routingContext { self.onCommand?(text, routingContext) }
-                } else if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Emptiness is judged on the transcript, not on the styled text:
+                // the style adds spaces, and " " must not paste as if it were speech.
+                if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Nothing was said — nothing to paste or route.
+                } else if isCommand {
+                    if let routingContext { self.onCommand?(text, routingContext) }
+                } else {
                     self.pasteAndRemember(text)
                 }
                 live?.trace.mark("done")

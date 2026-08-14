@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Developer self-tests, invoked from `main.swift` via CLI flags. Not part of
@@ -112,6 +113,83 @@ enum DebugCLI {
             FileHandle.standardError.write(Data("chirp: \(label)\n".utf8))
             effect.play()
             try? await Task.sleep(for: .milliseconds(600))
+        }
+    }
+
+    /// Render the menu-bar icon in every transcript-style combination to a PNG
+    /// contact sheet, so the badges can be judged at their real size instead of by
+    /// eye through a screenshot. Each row is drawn at 2× (Retina, as the menu bar
+    /// draws it) and then magnified with no interpolation, over both a light and a
+    /// dark menu-bar background. Writes to the given path (default /tmp).
+    @MainActor
+    static func runIconPreview(path: String) async {
+        let styles: [TranscriptStyle] = [
+            .normal,
+            TranscriptStyle(lowercaseFirst: true),
+            TranscriptStyle(lowercaseFirst: true, trimTrailingPunctuation: true),
+            TranscriptStyle(trimTrailingPunctuation: true),
+        ]
+        let statuses: [OperatorStatus] = [.listening, .commandListening]
+        let scale: CGFloat = 2, zoom: CGFloat = 8, pad: CGFloat = 4
+        let cell = MenuBarController.icon(status: .listening, muted: false).size
+
+        let cols = styles.count, rows = statuses.count * 2   // × light/dark
+        let cellW = (cell.width + pad * 2) * zoom, cellH = (cell.height + pad * 2) * zoom
+        let sheet = NSSize(width: cellW * CGFloat(cols), height: cellH * CGFloat(rows))
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: Int(sheet.width.rounded(.up)),
+                                         pixelsHigh: Int(sheet.height.rounded(.up)),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .none
+        var row = 0
+        for status in statuses {
+            for dark in [true, false] {
+                let bg: NSColor = dark ? NSColor(white: 0.13, alpha: 1) : NSColor(white: 0.93, alpha: 1)
+                for (col, style) in styles.enumerated() {
+                    let frame = NSRect(x: CGFloat(col) * cellW, y: sheet.height - CGFloat(row + 1) * cellH,
+                                       width: cellW, height: cellH)
+                    bg.setFill(); frame.fill()
+                    // Render the icon into its own 2× bitmap first, so the zoom
+                    // magnifies real pixels rather than re-rendering vectors.
+                    let icon = MenuBarController.icon(status: status, muted: false, style: style)
+                    guard let small = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                                       pixelsWide: Int(cell.width * scale),
+                                                       pixelsHigh: Int(cell.height * scale),
+                                                       bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                                       isPlanar: false, colorSpaceName: .deviceRGB,
+                                                       bytesPerRow: 0, bitsPerPixel: 0) else { continue }
+                    small.size = cell
+                    NSGraphicsContext.saveGraphicsState()
+                    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: small)
+                    let bounds = NSRect(origin: .zero, size: cell)
+                    // A fresh rep's memory is uninitialised — clear it, or the
+                    // icon lands on an opaque white block instead of the menu bar.
+                    NSGraphicsContext.current?.cgContext.clear(bounds)
+                    icon.draw(in: bounds)
+                    NSGraphicsContext.restoreGraphicsState()
+                    // Wrapped in an NSImage rather than drawn as a bare rep, which
+                    // composites with `copy` and would paint the icon's
+                    // transparent margin as an opaque block.
+                    let magnified = NSImage(size: cell)
+                    magnified.addRepresentation(small)
+                    magnified.draw(in: frame.insetBy(dx: pad * zoom, dy: pad * zoom))
+                }
+                row += 1
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        do {
+            try png.write(to: url)
+            print("icon preview → \(url.path)  (rows: listening dark/light, command dark/light; "
+                  + "cols: normal, a, a+x, x)")
+        } catch {
+            FileHandle.standardError.write(Data("icon-preview failed: \(error)\n".utf8))
         }
     }
 

@@ -37,6 +37,14 @@ if CommandLine.arguments.contains("--chirp-test") {
     await DebugCLI.runChirpTest()
     exit(0)
 }
+// Render the menu-bar icon in all four transcript-style states to a PNG contact
+// sheet, magnified, over light and dark menu-bar backgrounds.
+if CommandLine.arguments.contains("--icon-preview") {
+    await DebugCLI.runIconPreview(
+        path: CommandLine.arguments.last.flatMap { $0 == "--icon-preview" ? nil : $0 }
+            ?? "/tmp/voiceop-icon-preview.png")
+    exit(0)
+}
 if CommandLine.arguments.contains("--summarize-test") {
     await DebugCLI.runSummarizeTest()
     exit(0)

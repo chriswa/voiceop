@@ -94,6 +94,10 @@ final class HotkeyMonitor: @unchecked Sendable {
     var onSkip: Action?
     /// Fired on ⌘⌃J — focus the surface of the last agent that spoke.
     var onFocusLast: Action?
+    /// A deliberate tap of the **left Shift key while a dictation is recording**:
+    /// advance that dictation's `TranscriptStyle` by one. Never fires outside a
+    /// dictation, and never for Shift used as a modifier — see `shiftArmed`.
+    var onCycleStyle: Action?
 
     /// Suppresses the ⌘⌃ chord shortcuts while the status-bar menu is open. Those
     /// items carry real menu key equivalents (for the right-aligned shortcut hint),
@@ -133,6 +137,32 @@ final class HotkeyMonitor: @unchecked Sendable {
     private static let triggerKeycode: Int64 = 63
     private static let triggerBit: UInt64 = 0x800000
 
+    /// Left Shift, by its **device-dependent** bit (`NX_DEVICELSHIFTKEYMASK`)
+    /// rather than the generic `maskShift` (0x20000). The generic bit cannot tell
+    /// the two Shift keys apart, so releasing the left one while the right one is
+    /// still held would read as another left-Shift press.
+    private static let leftShiftBit: UInt64 = 0x2
+    /// Every modifier bit that is *not* left Shift, used to notice that some other
+    /// modifier moved while a Shift tap was in progress (see `shiftArmed`).
+    /// Enumerated rather than written `~leftShiftBit`, because an event can carry
+    /// incidental non-modifier bits whose flicker would disarm a perfectly good
+    /// tap: the generic masks (`alphaShift`…`secondaryFn`, 0xFF0000) and the
+    /// device-dependent left/right bits (0x7F, plus right-Control at 0x2000).
+    private static let otherModifierBits: UInt64 = (0x00FF_0000 | 0x0000_207F) & ~leftShiftBit
+
+    /// A left-Shift press that is still a candidate for a style-cycling *tap*.
+    ///
+    /// Cycling on Shift **down** would be a trap: during a hands-free locked
+    /// dictation the user is free to type, and Shift is the most-pressed modifier
+    /// there is — every shift-selected range and every capital letter would
+    /// silently change the transcript's shape. So a press only arms the gesture,
+    /// anything else pressed while Shift is held disarms it, and the cycle happens
+    /// on release. A deliberate tap still costs nothing perceptible.
+    private var shiftArmed = false
+    private var leftShiftDown = false
+    /// The state of the other modifiers when the Shift press landed.
+    private var shiftArmFlags: UInt64 = 0
+
     /// How long after key-down a second press still counts as "lock this on".
     /// Wispr Flow's `DICTATION_DEBOUNCE_DELAY`.
     private let lockWindow: TimeInterval = 0.5
@@ -169,6 +199,12 @@ final class HotkeyMonitor: @unchecked Sendable {
         guard thread == nil else { return tap != nil }
         let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
             | (1 << CGEventType.keyDown.rawValue)   // for the ⌘⌃-chord shortcuts
+            // Clicks are of no interest in themselves; they only tell us a held
+            // Shift is being used as a modifier (shift-click to extend a
+            // selection) rather than tapped — see `shiftArmed`.
+            | (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.rightMouseDown.rawValue)
+            | (1 << CGEventType.otherMouseDown.rawValue)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
@@ -219,6 +255,7 @@ final class HotkeyMonitor: @unchecked Sendable {
             // trust stale state: otherwise `isDown` stays true, the recording runs
             // unbounded, and the duplicate-event filter below swallows the user's
             // next press as they try to recover.
+            shiftArmed = false   // its release may well have been in the gap
             if gesture != .idle {
                 Log.log("hotkey: dictation was in progress across the gap — stopping it")
                 cancelLockTimer()
@@ -231,11 +268,19 @@ final class HotkeyMonitor: @unchecked Sendable {
             }
             return
         }
+        // Clicks are watched for one reason only: a Shift held across one is being
+        // used as a modifier (shift-click to extend a selection), not tapped.
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            shiftArmed = false
+            return
+        }
         // ⌘⌃-chord keyDown shortcuts (V = re-paste, B = toggle mute, S = speak
         // clipboard, A = summarize clipboard, N = skip current clip). Suppressed
         // while the menu is open,
         // where the items' own key equivalents fire instead (see chordsSuppressed).
         if type == .keyDown {
+            // Shift was being held as a modifier for this key, not tapped.
+            shiftArmed = false
             guard !chordsSuppressed else { return }
             let keycode = event.getIntegerValueField(.keyboardEventKeycode)
             if event.flags.contains(.maskCommand), event.flags.contains(.maskControl) {
@@ -264,11 +309,39 @@ final class HotkeyMonitor: @unchecked Sendable {
         }
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
+        trackLeftShift(flags: flags)
         guard keycode == Self.triggerKeycode else { return }
         let down = (flags & Self.triggerBit) != 0
         if down == isDown { return }   // ignore duplicates / confounding modifiers
         isDown = down
         if down { keyDown(at: event.timestamp) } else { keyUp(at: event.timestamp) }
+    }
+
+    /// Edge-detect the left Shift key and turn a clean tap of it, during a
+    /// dictation, into one style cycle. Called for every `flagsChanged` event,
+    /// whatever keycode it carries.
+    private func trackLeftShift(flags: UInt64) {
+        let down = (flags & Self.leftShiftBit) != 0
+        let others = flags & Self.otherModifierBits
+        guard down == leftShiftDown else {
+            leftShiftDown = down
+            if down {
+                // Only a dictation in flight has a style to cycle; arming solely
+                // while recording keeps Shift entirely ordinary the rest of the
+                // time. Re-checked on release, since the dictation may have ended
+                // in between (a push-to-talk release, say).
+                shiftArmed = gesture != .idle
+                shiftArmFlags = others
+            } else {
+                let tapped = shiftArmed && gesture != .idle
+                shiftArmed = false
+                if tapped { onMain { [weak self] in self?.onCycleStyle?() } }
+            }
+            return
+        }
+        // Shift itself did not move, so some *other* modifier did while it was
+        // held: this is a chord (⇧⌘, a Ctrl+Fn landing mid-tap, …), not a tap.
+        if shiftArmed, others != shiftArmFlags { shiftArmed = false }
     }
 
     private func keyDown(at timestamp: UInt64) {

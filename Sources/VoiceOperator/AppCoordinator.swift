@@ -13,6 +13,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         LaunchAtLogin.enableByDefaultOnce()
         AVCaptureDevice.requestAccess(for: .audio) { granted in Log.log("mic access request → granted=\(granted)") }
         arbiter.onStatus = { [weak self] in self?.menuBar.update(status: $0) }
+        arbiter.onTranscriptStyle = { [weak self] in self?.menuBar.update(style: $0) }
         arbiter.onHistoryChanged = { [weak self] in self?.menuBar.refreshHistory() }
         arbiter.onDictationBegan = { Task { await SpeechJobManager.shared.beginDictation() } }
         arbiter.onDictationEnded = { Task { await SpeechJobManager.shared.endDictation() } }
@@ -42,6 +43,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
         hotkey.onStart = { [weak self] mode, trace in self?.arbiter.beginDictation(mode: mode, trace: trace) }
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation(context: Self.frontmostContext()) }
+        hotkey.onCycleStyle = { [weak self] in self?.arbiter.cycleTranscriptStyle() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }

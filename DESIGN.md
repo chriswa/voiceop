@@ -279,6 +279,53 @@ cues fire back to back and no dictation runs.
 Note the failure mode: a slow key path does not merely feel laggy, it makes the
 gesture recogniser read a *different gesture* than the one performed.
 
+#### Transcript style — left Shift while recording (2026-08-14)
+
+Wispr returns a finished *sentence*: first word capitalised, terminal full stop.
+That is wrong when the transcript is being injected into the middle of a line
+already written, and hand-editing after every such paste is what this removes.
+
+Tapping **left Shift while a dictation is recording** cycles that dictation's
+`TranscriptStyle` through four states — `normal → lowercase first → lowercase +
+trim → trim → normal` — each tap flipping one of two flags:
+
+- **lowercase first** — case-fold the first word and prefix a space. Skipped when
+  the leading run of letters is an acronym (`API`) or the pronoun `I` (`I`, `I'll`);
+  a lone `A` *is* folded, because mid-sentence it is the article.
+- **trim end punctuation** — drop one trailing `. , ; : ! ?` and guarantee exactly
+  one trailing space.
+
+Both flags add whitespace deliberately: they mean "this goes mid-line", and a
+doubled space is harmless where this text is headed while a missing one welds two
+words together. The transform is pure (`TranscriptStyle.apply`), applied to the
+returned transcript before it is recorded *and* pasted, and skipped entirely for
+command-mode dictations, which are spoken to the router rather than written down.
+
+Three things the mechanism has to get right:
+
+1. **The state is ephemeral and per-dictation.** It lives on the `LiveDictation`
+   and is latched at key-up alongside the mode, for the same reason: the transcript
+   lands long after this dictation stopped being the current one.
+2. **Shift is not cycled on key-down.** During a hands-free locked dictation the
+   user is free to type, and Shift is the most-pressed modifier there is — every
+   shift-selection and every capital letter would silently reshape the transcript.
+   A press only *arms* the gesture; any other key, click, or modifier change while
+   Shift is held disarms it; the cycle happens on release.
+3. **Left Shift is identified by its device-dependent bit** (`0x2`,
+   `NX_DEVICELSHIFTKEYMASK`), not the generic `maskShift` — which cannot tell the
+   two Shift keys apart, so releasing the left one while the right is held would
+   read as a second press.
+
+The state shows as amber `a` / `x` badges on the menu-bar icon, drawn *after* the
+status tint fill (a `sourceAtop` fill would otherwise repaint them red) and only
+while capturing — the same instants the icon is red, which is exactly when the key
+does anything. `--icon-preview` renders all four states, magnified, over light and
+dark menu-bar backgrounds.
+
+There is no audible cue, and cannot usefully be one: `OutputMuter` hardware-mutes
+the default output device for the whole recording, so a cue at press time would be
+silent on any device that has a mute control.
+
 The residual cost of a cold device — roughly a second before the "safe to talk"
 chirp, and the words spoken into it — is deliberately not fixed by keeping the
 engine warm: that would hold the input device open and light the macOS

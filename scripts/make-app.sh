@@ -5,6 +5,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib.sh
+source scripts/lib.sh
 CONFIG="${1:-debug}"
 
 echo "building ($CONFIG)…"
@@ -18,6 +20,7 @@ cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
+stamp_source_commit "$APP"
 
 # Sign with a real codesigning identity if one exists (stable designated
 # requirement → TCC remembers Accessibility/Microphone grants across rebuilds).
@@ -35,4 +38,4 @@ else
 fi
 
 echo "built: $APP"
-echo "run:   open \"$APP\"    (or: \"$APP/Contents/MacOS/VoiceOperator\" for logs)"
+restart_running_app "$APP"

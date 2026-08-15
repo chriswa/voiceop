@@ -15,9 +15,16 @@
 #          --password <app-specific-password>
 #
 # Output: build/release/Voice Operator.app  and  build/VoiceOperator.zip
+#
+# This is the app other people install, NOT the one you run day to day — that is
+# make-app.sh's bundle. Two paths, two purposes: the staging directory here is
+# separate so a debug rebuild cannot clobber the bundle between signing and
+# stapling (see APP below).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib.sh
+source scripts/lib.sh
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-claude-usage-notary}"
 BUNDLE_ID="com.chriswa.voiceoperator"
@@ -48,6 +55,7 @@ cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
+stamp_source_commit "$APP"
 
 echo "signing as: $IDENTITY"
 # --timestamp (secure timestamp) and --options runtime (hardened runtime) are

@@ -46,6 +46,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation(context: Self.frontmostContext()) }
         hotkey.onCycleStyle = { [weak self] in self?.arbiter.cycleTranscriptStyle() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
+        hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         installHotkeyWhenTrusted()

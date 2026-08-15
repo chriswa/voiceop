@@ -35,6 +35,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         super.init(); menu.delegate = self; status.isEnabled = false; menu.addItem(status)
         secureInputWarning.isEnabled = false; secureInputWarning.isHidden = true
         menu.addItem(secureInputWarning)
+        mute.keyEquivalent = "b"; mute.keyEquivalentModifierMask = [.command, .control]
         mute.target = self; menu.addItem(mute); menu.addItem(.separator())
         stt.submenu = NSMenu(); commands.submenu = NSMenu(); menu.addItem(stt); menu.addItem(commands)
         menu.addItem(.separator())
@@ -112,6 +113,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func runRetry(_ sender: NSMenuItem) { (sender.representedObject as? Action)?.handler?((sender.representedObject as! Action).id) }
     @objc private func runCopy(_ sender: NSMenuItem) { (sender.representedObject as? Action)?.handler?((sender.representedObject as! Action).id) }
     @objc private func toggleMute() { muted.toggle(); mute.title = muted ? "Unmute Speech" : "Mute Speech"; refreshIcon(); onMuteSpeech?(muted) }
+    /// Toggle narration mute from outside the menu — the global ⌘⌃B chord. Goes
+    /// through the menu item's own action so the title, the icon and the mute
+    /// listener stay in step however it was triggered.
+    func toggleNarrationMute() { toggleMute() }
     @objc private func speakClipboard() { onSpeakClipboard?() }
     @objc private func summarizeClipboard() { onSummarizeClipboard?() }
     @objc private func restart() { onRestart?() }

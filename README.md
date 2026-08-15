@@ -184,6 +184,7 @@ Fire from any app (they run off the CGEvent tap, so no window focus needed):
 - **⌘⌃V** — re-paste the last text Voice Operator pasted, into the frontmost app.
 - **⌘⌃S** — speak the clipboard aloud; press again to stop.
 - **⌘⌃A** — replace the clipboard with a one- or two-sentence Haiku summary of it.
+- **⌘⌃B** — mute or unmute narration (same as the menu-bar **Mute Speech** item).
 
 They stop working entirely — with no other symptom, while dictation carries on —
 whenever an app holds macOS **secure event input** (Terminal's "Secure Keyboard

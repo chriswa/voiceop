@@ -61,10 +61,21 @@ actor SpeechJobManager {
     /// `text` as a local job. Empty text is a no-op when nothing is speaking.
     nonisolated func speakOrStop(text: String) {
         Task {
-            if await self.stopSpeaking() { return }
+            if await self.stopSpeaking() {
+                Log.log("speak-clipboard: stopped speech that was already playing")
+                return
+            }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
-            _ = await self.enqueue(text: trimmed, voice: "af_heart", local: true)
+            guard !trimmed.isEmpty else {
+                Log.log("speak-clipboard: clipboard has no text — nothing to speak")
+                return
+            }
+            guard let result = await self.enqueue(text: trimmed, voice: "af_heart", local: true) else {
+                Log.log("speak-clipboard: enqueue returned nothing")
+                return
+            }
+            Log.log("speak-clipboard: enqueued \(result.id) (\(trimmed.count) chars)"
+                    + (result.error.map { " — rejected: \($0)" } ?? ""))
         }
     }
 
@@ -147,7 +158,18 @@ actor SpeechJobManager {
     }
 
     private func pump() {
-        guard configured, !dictating, !muted, current == nil, let play else { return }
+        guard configured, !dictating, !muted, current == nil, let play else {
+            // Waiting behind a dictation, or behind the sentence now playing, is
+            // ordinary queueing and says nothing. The states below are the ones
+            // that leave a job parked indefinitely, which is indistinguishable
+            // from a shortcut that did nothing unless it is said out loud.
+            if !order.isEmpty {
+                if !configured { Log.log("speech queue: \(order.count) job(s) waiting — playback not configured yet") }
+                else if muted { Log.log("speech queue: \(order.count) job(s) waiting — speech is muted") }
+                else if play == nil { Log.log("speech queue: \(order.count) job(s) waiting — no playback handler") }
+            }
+            return
+        }
         while let id = order.first {
             guard let job = jobs[id] else { order.removeFirst(); continue }
             if terminal(job.state) { order.removeFirst(); continue }
@@ -177,7 +199,10 @@ actor SpeechJobManager {
         guard current == id, let job = jobs[id] else { return }
         current = nil
         if !completed {
-            if !terminal(job.state) { update(id) { $0.state = .synthesisFailed; $0.playbackState = nil }; order.removeAll { $0 == id } }
+            if !terminal(job.state) {
+                Log.log("speech queue: \(id) synthesis/playback failed at sentence \(job.next + 1)/\(job.segments.count)")
+                update(id) { $0.state = .synthesisFailed; $0.playbackState = nil }; order.removeAll { $0 == id }
+            }
             pump(); return
         }
         let next = job.next + 1

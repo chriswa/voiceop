@@ -90,10 +90,6 @@ final class HotkeyMonitor: @unchecked Sendable {
     var onSpeakClipboard: Action?
     /// Fired on ⌘⌃A — summarize the clipboard via Haiku.
     var onSummarizeClipboard: Action?
-    /// Fired on ⌘⌃N — skip the clip playing now (no-op when nothing is playing).
-    var onSkip: Action?
-    /// Fired on ⌘⌃J — focus the surface of the last agent that spoke.
-    var onFocusLast: Action?
     /// A deliberate tap of the **left Shift key while a dictation is recording**:
     /// advance that dictation's `TranscriptStyle` by one. Never fires outside a
     /// dictation, and never for Shift used as a modifier — see `shiftArmed`.
@@ -120,18 +116,34 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// `@MainActor`. Forwarding to an already-latched decision is a no-op.
     private var modeDecision: DictationModeDecision?
 
-    // ⌘⌃V: V is keycode 9 (kVK_ANSI_V); requires Command + Control.
-    private static let vKeycode: Int64 = 9
-    // ⌘⌃B: B is keycode 11 (kVK_ANSI_B); requires Command + Control.
-    private static let bKeycode: Int64 = 11
-    // ⌘⌃S: S is keycode 1 (kVK_ANSI_S); requires Command + Control.
-    private static let sKeycode: Int64 = 1
-    // ⌘⌃A: A is keycode 0 (kVK_ANSI_A); requires Command + Control.
-    private static let aKeycode: Int64 = 0
-    // ⌘⌃N: N is keycode 45 (kVK_ANSI_N); requires Command + Control.
-    private static let nKeycode: Int64 = 45
-    // ⌘⌃J: J is keycode 38 (kVK_ANSI_J); requires Command + Control.
-    private static let jKeycode: Int64 = 38
+    /// The ⌘⌃ chord shortcuts, as one table: keycode, the name it logs under, and
+    /// the callback it fires. Kept together deliberately — a keycode constant, a
+    /// switch case and a log string maintained separately are three places to
+    /// forget, and a chord whose callback nobody assigned then fails
+    /// indistinguishably from one the tap never saw.
+    ///
+    /// Raw values are the `kVK_ANSI_*` keycodes the chord is typed on.
+    private enum Chord: Int64, CaseIterable {
+        case repaste = 9, toggleMute = 11, speakClipboard = 1, summarizeClipboard = 0
+
+        var name: String {
+            switch self {
+            case .repaste:            return "⌘⌃V (re-paste)"
+            case .toggleMute:         return "⌘⌃B (toggle mute)"
+            case .speakClipboard:     return "⌘⌃S (speak clipboard)"
+            case .summarizeClipboard: return "⌘⌃A (summarize clipboard)"
+            }
+        }
+    }
+    /// The callback a chord fires, or nil when nobody assigned one.
+    private func action(for chord: Chord) -> Action? {
+        switch chord {
+        case .repaste:            return onRepaste
+        case .toggleMute:         return onToggleMute
+        case .speakClipboard:     return onSpeakClipboard
+        case .summarizeClipboard: return onSummarizeClipboard
+        }
+    }
 
     // Fn (Globe): keycode 63 (kVK_Function), flagged by kCGEventFlagMaskSecondaryFn.
     private static let triggerKeycode: Int64 = 63
@@ -274,28 +286,30 @@ final class HotkeyMonitor: @unchecked Sendable {
             shiftArmed = false
             return
         }
-        // ⌘⌃-chord keyDown shortcuts (V = re-paste, B = toggle mute, S = speak
-        // clipboard, A = summarize clipboard, N = skip current clip). Suppressed
-        // while the menu is open,
-        // where the items' own key equivalents fire instead (see chordsSuppressed).
+        // ⌘⌃-chord keyDown shortcuts — see `Chord` for the table. Suppressed while
+        // the menu is open, where the items' own key equivalents fire instead
+        // (see chordsSuppressed).
         if type == .keyDown {
             // Shift was being held as a modifier for this key, not tapped.
             shiftArmed = false
-            guard !chordsSuppressed else { return }
             let keycode = event.getIntegerValueField(.keyboardEventKeycode)
-            if event.flags.contains(.maskCommand), event.flags.contains(.maskControl) {
-                let action: Action?
-                switch keycode {
-                case Self.vKeycode: action = onRepaste
-                case Self.bKeycode: action = onToggleMute
-                case Self.sKeycode: action = onSpeakClipboard
-                case Self.aKeycode: action = onSummarizeClipboard
-                case Self.nKeycode: action = onSkip
-                case Self.jKeycode: action = onFocusLast
-                default: action = nil
-                }
-                if let action { onMain { action() } }
+            guard event.flags.contains(.maskCommand), event.flags.contains(.maskControl) else { return }
+            guard let chord = Chord(rawValue: keycode) else { return }
+            // Every recognised chord logs, whatever becomes of it: a shortcut that
+            // fires and does nothing is indistinguishable from one that never
+            // arrived unless the tap says which of the two happened. (Nothing at
+            // all here means the key events are not reaching us — see
+            // `SecureInput`, which is the usual reason.)
+            guard !chordsSuppressed else {
+                Log.log("hotkey chord: \(chord.name) ignored — menu is open (its own key equivalent fires)")
+                return
             }
+            guard let action = action(for: chord) else {
+                Log.log("hotkey chord: \(chord.name) has no handler wired — nothing to do")
+                return
+            }
+            Log.log("hotkey chord: \(chord.name)")
+            onMain { action() }
             return
         }
         guard type == .flagsChanged else { return }

@@ -99,6 +99,7 @@ final class TTSEngine {
                     }
                 }
             } catch {
+                Log.log("tts stream: synthesis failed: \(error)")
                 player.fail()             // resolve awaitCompletion(false); do NOT cache
                 self.inFlight[key] = nil
                 throw error
@@ -145,17 +146,6 @@ final class TTSEngine {
         // Stop live playback now; the synthesis producer is intentionally left
         // running so the clip still lands in cache for an instant re-cue.
         activeStream?.halt()
-        activeStream = nil
-    }
-
-    /// Skip the clip playing now: stop the audio but resolve playback as a
-    /// natural finish (`true`), so the caller advances the queue as if the clip
-    /// had been fully heard. Unlike `halt()` it does NOT bump `haltCount`, so the
-    /// streaming return value stays `true`. The synthesis producer is left
-    /// running so the clip still lands in cache.
-    func skip() {
-        filePlayer.finishNow()
-        activeStream?.finishNow()
         activeStream = nil
     }
 

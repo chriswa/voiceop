@@ -6,6 +6,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let status = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
+    /// Shown only while some app holds secure event input — see `update(secureInputHolder:)`.
+    private let secureInputWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
@@ -21,18 +23,31 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onCopySTT: ((UUID) -> Void)?
     var onRetryCommand: ((UUID) -> Void)?
     var onCopyCommand: ((UUID) -> Void)?
+    /// The menu opened (true) or closed (false). Its items carry the same ⌘⌃
+    /// shortcuts the global tap watches for, and AppKit fires them itself while
+    /// the menu is open, so the tap must stand down for exactly that window.
+    var onMenuOpenChanged: ((Bool) -> Void)?
     private var muted = false
     private var currentStatus: OperatorStatus = .idle
     private var currentStyle: TranscriptStyle = .normal
 
     override init() {
         super.init(); menu.delegate = self; status.isEnabled = false; menu.addItem(status)
+        secureInputWarning.isEnabled = false; secureInputWarning.isHidden = true
+        menu.addItem(secureInputWarning)
         mute.target = self; menu.addItem(mute); menu.addItem(.separator())
         stt.submenu = NSMenu(); commands.submenu = NSMenu(); menu.addItem(stt); menu.addItem(commands)
         menu.addItem(.separator())
-        let speak = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboard), keyEquivalent: "")
+        // Real key equivalents, so each item shows its shortcut right-aligned the
+        // way every other menu does. While the menu is open AppKit fires these
+        // itself, so the tap's copy of the same chord is muted for that window
+        // (see `onMenuOpenChanged` and `HotkeyMonitor.chordsSuppressed`) — without
+        // that, opening the menu and pressing ⌘⌃S would speak the clipboard twice.
+        let speak = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboard), keyEquivalent: "s")
+        speak.keyEquivalentModifierMask = [.command, .control]
         speak.target = self; menu.addItem(speak)
-        let summarize = NSMenuItem(title: "Summarize Clipboard", action: #selector(summarizeClipboard), keyEquivalent: "")
+        let summarize = NSMenuItem(title: "Summarize Clipboard", action: #selector(summarizeClipboard), keyEquivalent: "a")
+        summarize.keyEquivalentModifierMask = [.command, .control]
         summarize.target = self; menu.addItem(summarize)
         menu.addItem(.separator())
         let copyPath = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
@@ -57,8 +72,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         currentStyle = style
         refreshIcon()
     }
+    /// Name the app holding secure event input, or nil when it is off. While it is
+    /// on the ⌘⌃ shortcuts get no key events at all (see `SecureInput`), so the
+    /// menu says which app to turn it off in rather than leaving them dead and
+    /// unexplained. Dictation is unaffected, so the rest of the menu stays normal.
+    func update(secureInputHolder: String?) {
+        guard let holder = secureInputHolder else { secureInputWarning.isHidden = true; return }
+        secureInputWarning.title = "⚠︎ Secure Keyboard Entry is on in \(holder) — ⌘⌃ shortcuts disabled"
+        secureInputWarning.isHidden = false
+    }
     func refreshHistory() { }
-    func menuWillOpen(_ menu: NSMenu) { rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT); rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand) }
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        onMenuOpenChanged?(true)
+        rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
+        rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand)
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        onMenuOpenChanged?(false)
+    }
     private func rebuild<T>(_ menu: NSMenu, entries: [T], retry: ((UUID) -> Void)?, copy: ((UUID) -> Void)?) {
         menu.removeAllItems()
         if entries.isEmpty { menu.addItem(NSMenuItem(title: "None yet", action: nil, keyEquivalent: "")); return }

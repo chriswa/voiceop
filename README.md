@@ -181,9 +181,15 @@ The menu-bar **Recent Updates → ⟨entry⟩** submenu offers **Replay** and
 
 Fire from any app (they run off the CGEvent tap, so no window focus needed):
 
-- **⌘⌃J** — focus the surface of the last agent that spoke (same as the menu-bar
-  **Focus ⟨name⟩** item; tracks whoever is speaking the moment narration starts).
 - **⌘⌃V** — re-paste the last text Voice Operator pasted, into the frontmost app.
+- **⌘⌃S** — speak the clipboard aloud; press again to stop.
+- **⌘⌃A** — replace the clipboard with a one- or two-sentence Haiku summary of it.
+
+They stop working entirely — with no other symptom, while dictation carries on —
+whenever an app holds macOS **secure event input** (Terminal's "Secure Keyboard
+Entry", say), which withholds key events from every event tap. Voice Operator
+detects this: the menu names the app holding it, and the log says
+`secure input: ON (held by …)`.
 
 ## STT self-test (mic-free, one request)
 

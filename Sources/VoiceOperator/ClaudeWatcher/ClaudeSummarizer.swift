@@ -37,7 +37,10 @@ struct ClaudeSummarizer {
     /// Shared Haiku call for a full message array (multi-turn). Returns trimmed
     /// text, or nil on auth/HTTP/parse failure.
     private static func callHaiku(instruction: String, messages: [[String: Any]]) async -> String? {
-        guard let token = readOAuthToken() else { return nil }
+        guard let token = readOAuthToken() else {
+            Log.log("haiku: no Claude Code OAuth token in the Keychain (service '\(keychainService)')")
+            return nil
+        }
         let body: [String: Any] = [
             "model": model, "max_tokens": 250,
             "system": [
@@ -56,10 +59,26 @@ struct ClaudeSummarizer {
         req.setValue("claude-code/2.1.47", forHTTPHeaderField: "User-Agent")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        // Each failure names itself: "no token", "no network", "401" and
+        // "unexpected JSON" all end in the same `nil`, and the caller leaves the
+        // clipboard untouched either way, so only the log can tell them apart.
+        let data: Data, resp: URLResponse
+        do { (data, resp) = try await URLSession.shared.data(for: req) }
+        catch {
+            Log.log("haiku: request failed: \(error.localizedDescription)")
+            return nil
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        guard status == 200 else {
+            // The body carries Anthropic's error type/message; it is diagnostic
+            // (`invalid_api_key`, `rate_limit_error`) and holds no credential.
+            let detail = String(data: data.prefix(300), encoding: .utf8) ?? ""
+            Log.log("haiku: HTTP \(status) — \(detail)")
+            return nil
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let content = json["content"] as? [[String: Any]] else {
+            Log.log("haiku: unexpected response shape (\(data.count) bytes)")
             return nil
         }
         let text = content.compactMap { $0["text"] as? String }.joined()
@@ -75,12 +94,24 @@ struct ClaudeSummarizer {
         p.arguments = ["find-generic-password", "-s", keychainService,
                        "-a", NSUserName(), "-w"]
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return nil }
+        guard (try? p.run()) != nil else {
+            Log.log("haiku: could not run /usr/bin/security")
+            return nil
+        }
         p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
+        // Exit 44 is "item not found"; 45 is a denied/cancelled Keychain prompt,
+        // which is what a freshly re-signed bundle hits until it is re-authorised.
+        guard p.terminationStatus == 0 else {
+            Log.log("haiku: Keychain read failed (security exit \(p.terminationStatus))")
+            return nil
+        }
         let out = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let json = try? JSONSerialization.jsonObject(with: out) as? [String: Any],
-              let oauth = json["claudeAiOauth"] as? [String: Any] else { return nil }
-        return oauth["accessToken"] as? String
+              let oauth = json["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String else {
+            Log.log("haiku: Keychain item is not in the expected claudeAiOauth shape")
+            return nil
+        }
+        return token
     }
 }

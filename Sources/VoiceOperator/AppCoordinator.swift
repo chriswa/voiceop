@@ -9,7 +9,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let speechService = SpeechHTTPService()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Log.log("Voice Operator launching")
+        Log.log("Voice Operator launching — \(BuildInfo.summary)")
         LaunchAtLogin.enableByDefaultOnce()
         AVCaptureDevice.requestAccess(for: .audio) { granted in Log.log("mic access request → granted=\(granted)") }
         arbiter.onStatus = { [weak self] in self?.menuBar.update(status: $0) }
@@ -34,6 +34,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onCopySTT = { [weak self] in self?.arbiter.copySTT(id: $0) }
         menuBar.onRetryCommand = { [weak self] in self?.arbiter.retryCommand(id: $0) }
         menuBar.onCopyCommand = { [weak self] in self?.arbiter.copyCommand(id: $0) }
+        menuBar.onMenuOpenChanged = { [weak self] open in self?.hotkey.chordsSuppressed = open }
         menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         menuBar.onMuteSpeech = { muted in Task { await SpeechJobManager.shared.setMuted(muted) } }
@@ -48,6 +49,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         installHotkeyWhenTrusted()
+        watchSecureInput()
         do { try speechService.start() } catch { Log.log("speech HTTP start failed: \(error)") }
         // Dial the Baseten connection and fetch the token/dictionary now, so the
         // first dictation of the session doesn't pay for any of it.
@@ -67,6 +69,30 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
     private static func frontmostContext() -> DictationContext {
         DictationContext(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+    }
+
+    /// Watch secure event input and report every transition.
+    ///
+    /// While it is on, none of the ⌘⌃ chord shortcuts can reach us — see
+    /// `SecureInput`. Nothing here can change that; what it can do is make the
+    /// cause legible, in the log and in the menu, instead of leaving half the
+    /// app mysteriously dead.
+    private var secureInputTimer: Timer?
+    private var secureInputWasEnabled: Bool?
+    private func watchSecureInput() {
+        func check() {
+            let enabled = SecureInput.isEnabled
+            guard enabled != secureInputWasEnabled else { return }
+            secureInputWasEnabled = enabled
+            Log.log(enabled
+                ? "secure input: \(SecureInput.description) — ⌘⌃ shortcuts cannot reach Voice Operator until it is turned off (dictation is unaffected)"
+                : "secure input: off — ⌘⌃ shortcuts are working again")
+            menuBar.update(secureInputHolder: enabled ? SecureInput.holderName : nil)
+        }
+        check()
+        secureInputTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+            MainActor.assumeIsolated { check() }
+        }
     }
 
     private var trustPollTimer: Timer?

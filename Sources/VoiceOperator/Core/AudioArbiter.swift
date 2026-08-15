@@ -631,20 +631,27 @@ final class AudioArbiter {
     func speakClipboard() {
         // Toggle: stop whatever is speaking/queued; otherwise speak the clipboard.
         let text = NSPasteboard.general.string(forType: .string) ?? ""
+        Log.log("speak-clipboard: \(text.count) char(s) on the clipboard")
         SpeechJobManager.shared.speakOrStop(text: text)
     }
 
     func summarizeClipboard() {
         guard let text = NSPasteboard.general.string(forType: .string)?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            Log.log("summarize-clipboard: clipboard has no text — nothing to summarize")
+            return
+        }
+        Log.log("summarize-clipboard: summarizing \(text.count) char(s) via Haiku")
         onStatus?(.summarizing)
         Task { [weak self] in
             defer { self?.onStatus?(.idle) }
             guard let summary = await ClaudeSummarizer.summarizeText(text), !summary.isEmpty else {
+                Log.log("summarize-clipboard: no summary returned — clipboard untouched")
                 SoundEffect.transcriptionFailed.play(); return
             }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(summary, forType: .string)
+            Log.log("summarize-clipboard: wrote \(summary.count)-char summary to the clipboard")
             SoundEffect.clipFinished.play()
         }
     }

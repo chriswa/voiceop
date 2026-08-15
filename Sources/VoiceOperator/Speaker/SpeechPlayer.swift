@@ -30,14 +30,6 @@ final class SpeechPlayer: NSObject, AVAudioPlayerDelegate {
         finish(false)
     }
 
-    /// Skip: stop playback now but resolve `true` (treat the clip as fully
-    /// heard), unlike `halt()` which resolves `false` for barge-in.
-    func finishNow() {
-        player?.stop()
-        player = nil
-        finish(true)
-    }
-
     private func finish(_ ok: Bool) {
         guard let c = continuation else { return }
         continuation = nil

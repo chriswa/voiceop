@@ -78,40 +78,27 @@ struct KokoroSynthesizer: SpeechSynthesizer {
             let task = Task {
                 do {
                     Log.log("kokoro \(label): requesting \(Self.endpoint("synthesize").absoluteString)")
-                    progress.enter("awaiting response")
-                    let (bytes, resp) = try await URLSession.shared.bytes(for: makeRequest(text: text, voiceID: voiceID))
-                    guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-                        throw SpeakerError.http(
-                            status: (resp as? HTTPURLResponse)?.statusCode ?? -1, body: "")
-                    }
-                    try Self.requireAudioContentType(http)
-                    Log.log("kokoro \(label): HTTP 200 after \(Log.elapsed(since: startedAt))")
-                    progress.enter("reading body")
-                    var headerRemaining = Self.wavHeaderSize
-                    var s16 = [UInt8]()
-                    s16.reserveCapacity(8192)
-                    var firstChunk = true
-                    for try await byte in bytes {
-                        if headerRemaining > 0 { headerRemaining -= 1; continue }
-                        s16.append(byte)
-                        // Flush on a whole-sample boundary once we've buffered a
-                        // playable chunk; keep any dangling odd byte for next time.
-                        if s16.count >= 4096, s16.count % 2 == 0 {
-                            let pcm = Self.f32le(fromS16le: s16)
-                            progress.advance(pcm.count)
-                            if firstChunk {
-                                firstChunk = false
-                                Log.log("kokoro \(label): first audio chunk after \(Log.elapsed(since: startedAt))")
-                            }
-                            continuation.yield(pcm)
-                            s16.removeAll(keepingCapacity: true)
-                        }
-                    }
-                    if s16.count % 2 != 0 { s16.removeLast() }   // drop a trailing partial sample
-                    if !s16.isEmpty {
-                        let pcm = Self.f32le(fromS16le: s16)
-                        progress.advance(pcm.count)
-                        continuation.yield(pcm)
+                    do {
+                        try await self.streamOnce(text: text, voiceID: voiceID, label: label,
+                                                  progress: progress, startedAt: startedAt,
+                                                  into: continuation)
+                    } catch {
+                        // Retry once, and only while nothing has reached the player:
+                        // a half-delivered clip cannot be restarted without repeating
+                        // audio the listener already heard.
+                        //
+                        // The failure this covers has been observed in the wild — a
+                        // request that delivers not one byte, times out at 30s, and
+                        // costs the listener the entire answer, on a service that
+                        // answers a fresh request in a couple of seconds either side
+                        // of it. Whatever the cause, a second attempt is far more
+                        // likely to be heard than the silence it replaces.
+                        guard progress.yieldedNothing, !(error is CancellationError) else { throw error }
+                        Log.log("kokoro \(label): nothing delivered in \(Log.elapsed(since: startedAt)) (\(error)); retrying once")
+                        progress.enter("retrying")
+                        try await self.streamOnce(text: text, voiceID: voiceID, label: label,
+                                                  progress: progress, startedAt: startedAt,
+                                                  into: continuation)
                     }
                     progress.complete("finished")
                     Log.log("kokoro \(label): complete in \(Log.elapsed(since: startedAt)) — \(progress.snapshot)")
@@ -141,6 +128,50 @@ struct KokoroSynthesizer: SpeechSynthesizer {
                 }
             }
             continuation.onTermination = { _ in task.cancel(); watchdog.cancel() }
+        }
+    }
+
+    /// One attempt at streaming the clip, yielding decoded chunks as they arrive.
+    ///
+    /// Separate from `synthesizeStream` so that a failed attempt which delivered
+    /// nothing can simply be run again, rather than the retry having to
+    /// reproduce the request, the validation and the framing.
+    private func streamOnce(text: String, voiceID: String, label: String,
+                            progress: StreamProgress, startedAt: Date,
+                            into continuation: AsyncThrowingStream<Data, Error>.Continuation) async throws {
+        progress.enter("awaiting response")
+        let (bytes, resp) = try await URLSession.shared.bytes(for: makeRequest(text: text, voiceID: voiceID))
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw SpeakerError.http(status: (resp as? HTTPURLResponse)?.statusCode ?? -1, body: "")
+        }
+        try Self.requireAudioContentType(http)
+        Log.log("kokoro \(label): HTTP 200 after \(Log.elapsed(since: startedAt))")
+        progress.enter("reading body")
+        var headerRemaining = Self.wavHeaderSize
+        var s16 = [UInt8]()
+        s16.reserveCapacity(8192)
+        var firstChunk = true
+        for try await byte in bytes {
+            if headerRemaining > 0 { headerRemaining -= 1; continue }
+            s16.append(byte)
+            // Flush on a whole-sample boundary once we've buffered a playable
+            // chunk; keep any dangling odd byte for next time.
+            if s16.count >= 4096, s16.count % 2 == 0 {
+                let pcm = Self.f32le(fromS16le: s16)
+                progress.advance(pcm.count)
+                if firstChunk {
+                    firstChunk = false
+                    Log.log("kokoro \(label): first audio chunk after \(Log.elapsed(since: startedAt))")
+                }
+                continuation.yield(pcm)
+                s16.removeAll(keepingCapacity: true)
+            }
+        }
+        if s16.count % 2 != 0 { s16.removeLast() }   // drop a trailing partial sample
+        if !s16.isEmpty {
+            let pcm = Self.f32le(fromS16le: s16)
+            progress.advance(pcm.count)
+            continuation.yield(pcm)
         }
     }
 
@@ -261,6 +292,9 @@ private final class StreamProgress: @unchecked Sendable {
     func advance(_ byteCount: Int) { lock.lock(); chunks += 1; pcmBytes += byteCount; lock.unlock() }
     func complete(_ newStage: String) { lock.lock(); stage = newStage; done = true; lock.unlock() }
     var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done }
+    /// Whether a failed attempt can be safely retried: nothing has been handed
+    /// to the player yet, so starting over repeats no audio.
+    var yieldedNothing: Bool { lock.lock(); defer { lock.unlock() }; return chunks == 0 }
     var snapshot: String {
         lock.lock(); defer { lock.unlock() }
         return "stage=\(stage) chunks=\(chunks) pcmBytes=\(pcmBytes)"

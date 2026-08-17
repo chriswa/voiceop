@@ -20,6 +20,17 @@ import Foundation
 struct KokoroSynthesizer: SpeechSynthesizer {
     /// Kokoro's native output rate (s16le, mono). See `TTSEngine.streamFormat`.
     let sampleRate = 24_000
+
+    /// How often a synthesis that has not finished reports where it is stuck.
+    private static let stallReportSeconds = 15
+    /// When to stop waiting altogether and cancel the request.
+    ///
+    /// `URLRequest.timeoutInterval` has been observed *not* to fire on a stalled
+    /// streaming body — a clip parked here indefinitely, and because nothing
+    /// upstream has a timeout either, one stuck sentence wedged the whole speech
+    /// queue until the next dictation cleared it. Cancelling throws, which the
+    /// existing error path already turns into a failed job the caller can see.
+    private static let stallHardCapSeconds = 90
     /// Generation speed passed to Kokoro; 1.2 is the server's own default.
     private let speed = 1.2
     /// Bytes of leading WAV header to drop from the `/synthesize` body. Kokoro
@@ -61,35 +72,75 @@ struct KokoroSynthesizer: SpeechSynthesizer {
     /// byte is carried into the next chunk.
     func synthesizeStream(text: String, voiceID: String) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
+            let label = Log.clip(text)
+            let progress = StreamProgress()
+            let startedAt = Date()
             let task = Task {
                 do {
+                    Log.log("kokoro \(label): requesting \(Self.endpoint("synthesize").absoluteString)")
+                    progress.enter("awaiting response")
                     let (bytes, resp) = try await URLSession.shared.bytes(for: makeRequest(text: text, voiceID: voiceID))
                     guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
                         throw SpeakerError.http(
                             status: (resp as? HTTPURLResponse)?.statusCode ?? -1, body: "")
                     }
                     try Self.requireAudioContentType(http)
+                    Log.log("kokoro \(label): HTTP 200 after \(Log.elapsed(since: startedAt))")
+                    progress.enter("reading body")
                     var headerRemaining = Self.wavHeaderSize
                     var s16 = [UInt8]()
                     s16.reserveCapacity(8192)
+                    var firstChunk = true
                     for try await byte in bytes {
                         if headerRemaining > 0 { headerRemaining -= 1; continue }
                         s16.append(byte)
                         // Flush on a whole-sample boundary once we've buffered a
                         // playable chunk; keep any dangling odd byte for next time.
                         if s16.count >= 4096, s16.count % 2 == 0 {
-                            continuation.yield(Self.f32le(fromS16le: s16))
+                            let pcm = Self.f32le(fromS16le: s16)
+                            progress.advance(pcm.count)
+                            if firstChunk {
+                                firstChunk = false
+                                Log.log("kokoro \(label): first audio chunk after \(Log.elapsed(since: startedAt))")
+                            }
+                            continuation.yield(pcm)
                             s16.removeAll(keepingCapacity: true)
                         }
                     }
                     if s16.count % 2 != 0 { s16.removeLast() }   // drop a trailing partial sample
-                    if !s16.isEmpty { continuation.yield(Self.f32le(fromS16le: s16)) }
+                    if !s16.isEmpty {
+                        let pcm = Self.f32le(fromS16le: s16)
+                        progress.advance(pcm.count)
+                        continuation.yield(pcm)
+                    }
+                    progress.complete("finished")
+                    Log.log("kokoro \(label): complete in \(Log.elapsed(since: startedAt)) — \(progress.snapshot)")
                     continuation.finish()
                 } catch {
+                    progress.complete("failed")
+                    Log.log("kokoro \(label): failed after \(Log.elapsed(since: startedAt)) — \(progress.snapshot): \(error)")
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            // Reports where a synthesis is stuck while it is still stuck, rather
+            // than leaving the whole stretch invisible. Cancelling at the hard cap
+            // makes the producer throw, which is a failure mode the callers
+            // already handle — unlike an indefinite park, which none of them do.
+            let watchdog = Task {
+                var waited = 0
+                while !progress.isFinished {
+                    try? await Task.sleep(for: .seconds(Self.stallReportSeconds))
+                    if progress.isFinished || Task.isCancelled { return }
+                    waited += Self.stallReportSeconds
+                    Log.log("kokoro \(label): STALLED \(waited)s — \(progress.snapshot)")
+                    if waited >= Self.stallHardCapSeconds {
+                        Log.log("kokoro \(label): giving up after \(waited)s; cancelling the request")
+                        task.cancel()
+                        return
+                    }
+                }
+            }
+            continuation.onTermination = { _ in task.cancel(); watchdog.cancel() }
         }
     }
 
@@ -191,5 +242,27 @@ struct KokoroSynthesizer: SpeechSynthesizer {
             }
         }
         return out
+    }
+}
+
+/// Cross-task progress for one `synthesizeStream` call.
+///
+/// The producer advances it; a sibling watchdog task reads it. Lock-guarded
+/// rather than actor-isolated so the watchdog can sample it without awaiting the
+/// very task it is trying to prove is stuck.
+private final class StreamProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stage = "connecting"
+    private var chunks = 0
+    private var pcmBytes = 0
+    private var done = false
+
+    func enter(_ newStage: String) { lock.lock(); stage = newStage; lock.unlock() }
+    func advance(_ byteCount: Int) { lock.lock(); chunks += 1; pcmBytes += byteCount; lock.unlock() }
+    func complete(_ newStage: String) { lock.lock(); stage = newStage; done = true; lock.unlock() }
+    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done }
+    var snapshot: String {
+        lock.lock(); defer { lock.unlock() }
+        return "stage=\(stage) chunks=\(chunks) pcmBytes=\(pcmBytes)"
     }
 }

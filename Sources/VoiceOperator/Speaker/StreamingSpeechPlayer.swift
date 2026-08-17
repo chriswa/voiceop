@@ -29,6 +29,18 @@ final class StreamingSpeechPlayer {
     /// Fired the moment the first buffer is scheduled (audio is about to sound).
     var onFirstBuffer: (@MainActor () -> Void)?
 
+    /// Completion bookkeeping as one log-ready line.
+    ///
+    /// This is what tells a stalled clip's two failure modes apart. `scheduled=0`
+    /// means no audio ever arrived from the provider, so the stall is upstream in
+    /// synthesis; `played < scheduled` with `streamEnded=true` means the audio
+    /// arrived but `AVAudioPlayerNode` stopped delivering its completion
+    /// callbacks, which is the engine being torn out from under us.
+    var progress: String {
+        "scheduled=\(scheduled) played=\(played) streamEnded=\(streamEnded) "
+            + "settled=\(settled.map { "\($0)" } ?? "pending")"
+    }
+
     /// Start the engine for `format` (float32 mono). Throws if the audio engine
     /// can't start, so the caller can fall back to the one-shot WAV path.
     func start(format: AVAudioFormat) throws {
@@ -81,6 +93,10 @@ final class StreamingSpeechPlayer {
 
     private func resolve(_ ok: Bool) {
         guard settled == nil else { return }
+        // Logged at every resolution, not just the unhappy ones: the pairing of
+        // "stream: playing" with a resolve line is what proves a clip finished,
+        // and its absence is the whole signature of the hang this exists to find.
+        Log.log("tts player: resolved \(ok ? "finished" : "stopped") — scheduled=\(scheduled) played=\(played) streamEnded=\(streamEnded)")
         settled = ok
         node.stop()
         engine.stop()

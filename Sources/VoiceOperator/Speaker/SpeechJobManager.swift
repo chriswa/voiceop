@@ -51,6 +51,7 @@ actor SpeechJobManager {
         guard !segments.isEmpty else { return Result(id: "", state: .synthesisFailed, playbackState: nil, characterOffset: 0, error: "empty_text", version: 0) }
         let id = "sp_" + UUID().uuidString.lowercased()
         jobs[id] = Job(id: id, voice: voice, segments: segments, local: local)
+        Log.log("speech job \(id): accepted \(text.count) chars as \(segments.count) sentence(s), voice=\(voice)")
         order.append(id); pump()
         return jobs[id].map(result)
     }
@@ -177,6 +178,10 @@ actor SpeechJobManager {
             current = id
             update(id) { $0.playbackState = .queued }
             let segment = job.segments[job.next]
+            // Paired with `startedSentence`'s line below: a "handed to playback"
+            // with no "audible" after it localises a stall to synthesis, and is
+            // the difference between a silent shortcut and a diagnosable one.
+            Log.log("speech job \(id): handing sentence \(job.next + 1)/\(job.segments.count) to playback — \(Log.clip(segment.text))")
             if let prefetch {
                 for index in (job.next + 1)..<min(job.segments.count, job.next + 3) {
                     prefetch(job.segments[index].text, job.voice)
@@ -193,6 +198,7 @@ actor SpeechJobManager {
     }
     private func startedSentence(id: String) {
         guard current == id, let job = jobs[id], !terminal(job.state) else { return }
+        Log.log("speech job \(id): sentence \(job.next + 1)/\(job.segments.count) is audible")
         update(id) { $0.playbackState = .speaking }
     }
     private func finishedSentence(id: String, completed: Bool) {
@@ -207,6 +213,7 @@ actor SpeechJobManager {
         }
         let next = job.next + 1
         if next == job.segments.count {
+            Log.log("speech job \(id): completed all \(job.segments.count) sentence(s)")
             update(id) { $0.next = next; $0.state = .completed; $0.playbackState = nil }
             order.removeAll { $0 == id }
         } else {
@@ -215,7 +222,8 @@ actor SpeechJobManager {
         }
     }
     private func interruptCurrent(state: State) {
-        guard let id = current, jobs[id] != nil else { return }
+        guard let id = current, let job = jobs[id] else { return }
+        Log.log("speech job \(id): \(state.rawValue) at sentence \(job.next + 1)/\(job.segments.count)")
         // Halt the audio before announcing the state, so a client that reacts
         // to the terminal result is never racing sound that is still playing.
         order.removeAll { $0 == id }; current = nil; halt?()

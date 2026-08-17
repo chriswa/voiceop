@@ -16,6 +16,20 @@ enum Log {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
     }()
 
+    /// Short, log-safe identifier for a clip of speech. Enough of the sentence to
+    /// correlate a stall with the answer it belonged to, without spilling whole
+    /// transcripts into a file that lives forever.
+    static func clip(_ text: String) -> String {
+        let flat = text.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let head = flat.count <= 48 ? flat : String(flat.prefix(48)) + "…"
+        return "\"\(head)\" [\(text.count)ch]"
+    }
+
+    static func elapsed(since start: Date) -> String {
+        String(format: "%.1fs", Date().timeIntervalSince(start))
+    }
+
     static func log(_ message: String) {
         let line = "[\(formatter.string(from: Date()))] \(message)\n"
         FileHandle.standardError.write(Data(line.utf8))

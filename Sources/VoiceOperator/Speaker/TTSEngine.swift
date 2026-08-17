@@ -32,6 +32,17 @@ final class TTSEngine {
     /// to completion so the clip lands in cache (barge-in re-cues from cache).
     private var haltCount = 0
 
+    /// How often a clip that has neither started nor finished says where it is.
+    private static let stallReportSeconds = 20
+    /// Backstop for a clip that never resolves at all.
+    ///
+    /// Deliberately longer than the synthesizer's own cap, so an upstream stall
+    /// is reported and cancelled by the layer that can name the cause before this
+    /// blunter one fires. This catches what that cannot: audio that arrived and
+    /// was scheduled, but whose `AVAudioPlayerNode` completion callbacks stopped
+    /// coming, which leaves `awaitCompletion()` parked forever.
+    private static let stallHardCapSeconds = 150
+
     init(synth: SpeechSynthesizer = KokoroSynthesizer(), cache: AudioCache = AudioCache()) {
         self.synth = synth
         self.cache = cache
@@ -50,22 +61,31 @@ final class TTSEngine {
     func play(_ u: Utterance, onStart: @escaping @Sendable @MainActor () -> Void = {}) async -> Bool {
         let mark = haltCount
         let key = cache.key(text: u.spokenText, voiceID: u.voiceID)
+        // Which of the three routes a clip took is the first thing worth knowing
+        // about a clip that never made a sound, because they fail differently.
+        let label = Log.clip(u.spokenText)
 
         // A. Cache hit — play the stored WAV directly.
         if let hit = cache.cached(text: u.spokenText, voiceID: u.voiceID) {
             guard haltCount == mark else { return false }
+            Log.log("tts play: \(label) cache hit")
             onStart()
             return await filePlayer.play(url: hit)
         }
         // B. A stream for this exact clip is already running — await its cached
         //    URL and play the file rather than opening a second provider call.
         if let existing = inFlight[key] {
-            guard let url = try? await existing.value else { return false }
+            Log.log("tts play: \(label) waiting on an in-flight synthesis of the same clip")
+            guard let url = try? await existing.value else {
+                Log.log("tts play: \(label) the in-flight synthesis it waited on failed — no audio")
+                return false
+            }
             guard haltCount == mark else { return false }
             onStart()
             return await filePlayer.play(url: url)
         }
         // C. Originator — stream and play live.
+        Log.log("tts play: \(label) synthesizing")
         return await streamAndPlay(u, key: key, mark: mark, onStart: onStart)
     }
 
@@ -87,6 +107,11 @@ final class TTSEngine {
         // Inherits the main actor (created in a @MainActor method), so the consume
         // loop, scheduling, and cache write are all serialized on the main actor.
         let producer = Task<URL, Error> {
+            // Every exit path clears the slot, rather than each one remembering
+            // to. A slot left behind is not a leak of memory but of behaviour:
+            // `play` coalesces onto whatever it finds in `inFlight`, so a stale
+            // entry makes that exact sentence fail instantly and forever after.
+            defer { self.inFlight[key] = nil }
             var acc = Data()
             var reframer = PCMReframer()
             do {
@@ -101,22 +126,45 @@ final class TTSEngine {
             } catch {
                 Log.log("tts stream: synthesis failed: \(error)")
                 player.fail()             // resolve awaitCompletion(false); do NOT cache
-                self.inFlight[key] = nil
                 throw error
             }
             player.endOfStream()
             guard !acc.isEmpty else {     // empty transcript: nothing to cache
-                self.inFlight[key] = nil
+                Log.log("tts stream: \(Log.clip(u.spokenText)) produced no audio")
                 throw SpeakerError.synthesis("no audio")
             }
             let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: self.synth.sampleRate)
-            let url = try self.cache.store(wav, text: u.spokenText, voiceID: u.voiceID)
-            self.inFlight[key] = nil
-            return url
+            return try self.cache.store(wav, text: u.spokenText, voiceID: u.voiceID)
         }
         inFlight[key] = producer
 
+        // Nothing between here and `awaitCompletion` returning is otherwise
+        // observable, and that is exactly the stretch a wedged clip dies in: the
+        // menu bar sits on cyan, the queue will not advance past `current`, and
+        // no layer above has a timeout. Report it while it is still happening,
+        // then fail the clip rather than parking on it forever.
+        let startedAt = Date()
+        let label = Log.clip(u.spokenText)
+        let watchdog = Task { [weak player] in
+            var waited = 0
+            while true {
+                try? await Task.sleep(for: .seconds(Self.stallReportSeconds))
+                if Task.isCancelled { return }
+                guard let player else { return }
+                waited += Self.stallReportSeconds
+                Log.log("tts stall: \(label) unfinished after \(waited)s — \(player.progress)")
+                guard waited >= Self.stallHardCapSeconds else { continue }
+                Log.log("tts stall: \(label) giving up after \(waited)s; failing the clip so the queue can advance")
+                producer.cancel()
+                self.inFlight[key] = nil
+                player.fail()
+                return
+            }
+        }
+
         let finished = await player.awaitCompletion()
+        watchdog.cancel()
+        Log.log("tts play: \(label) \(finished ? "finished" : "stopped") after \(Log.elapsed(since: startedAt))")
         if activeStream === player { activeStream = nil }
         return finished && haltCount == mark
     }
@@ -167,13 +215,26 @@ final class TTSEngine {
         let key = cache.key(text: text, voiceID: voiceID)
         guard inFlight[key] == nil else { return }
         let task = Task<URL, Error> {
-            var acc = Data()
-            for try await pcm in self.synth.synthesizeStream(text: text, voiceID: voiceID) { acc.append(pcm) }
-            guard !acc.isEmpty else { throw SpeakerError.synthesis("no audio") }
-            let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: self.synth.sampleRate)
-            let url = try self.cache.store(wav, text: text, voiceID: voiceID)
-            self.inFlight[key] = nil
-            return url
+            do {
+                var acc = Data()
+                for try await pcm in self.synth.synthesizeStream(text: text, voiceID: voiceID) { acc.append(pcm) }
+                guard !acc.isEmpty else { throw SpeakerError.synthesis("no audio") }
+                let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: self.synth.sampleRate)
+                let url = try self.cache.store(wav, text: text, voiceID: voiceID)
+                self.inFlight[key] = nil
+                return url
+            } catch {
+                // Clearing the slot is the point, not the log line. A prefetch
+                // that threw used to leave its dead task in `inFlight` forever,
+                // and `play` coalesces onto whatever it finds there — so every
+                // later attempt at this exact sentence awaited a task that could
+                // only fail, and the sentence became permanently unspeakable for
+                // the life of the process. Prefetch is best-effort; a failure
+                // here must cost nothing more than a re-synthesis.
+                Log.log("tts prefetch: \(Log.clip(text)) failed, clearing its slot: \(error)")
+                self.inFlight[key] = nil
+                throw error
+            }
         }
         inFlight[key] = task
     }

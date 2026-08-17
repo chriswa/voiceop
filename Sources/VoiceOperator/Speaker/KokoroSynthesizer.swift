@@ -25,10 +25,11 @@ struct KokoroSynthesizer: SpeechSynthesizer {
     private static let stallReportSeconds = 15
     /// When to stop waiting altogether and cancel the request.
     ///
-    /// `URLRequest.timeoutInterval` has been observed *not* to fire on a stalled
-    /// streaming body — a clip parked here indefinitely, and because nothing
-    /// upstream has a timeout either, one stuck sentence wedged the whole speech
-    /// queue until the next dictation cleared it. Cancelling throws, which the
+    /// A backstop, not the usual exit: `URLRequest.timeoutInterval` does fire on
+    /// the stall seen in the wild, and the observed clip died at 30.3s. This has
+    /// to sit above that so the timeout — which names its own cause — gets first
+    /// refusal, and above a retry of the same, so it only catches a stall the
+    /// URL loading system somehow does not. Cancelling throws, which the
     /// existing error path already turns into a failed job the caller can see.
     private static let stallHardCapSeconds = 90
     /// Generation speed passed to Kokoro; 1.2 is the server's own default.

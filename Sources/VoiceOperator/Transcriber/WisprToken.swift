@@ -2,11 +2,20 @@ import Foundation
 
 /// Reads (and refreshes) the Wispr Flow Supabase access token — approach "A"
 /// from DESIGN.md. We lift the token Wispr already stored rather than
-/// reimplementing its login. The token is read from Wispr's own session.json at
-/// runtime and held only in memory; it is never written to our own storage.
+/// reimplementing its login.
 ///
 /// Supabase auth is a standard protocol, so refresh works headlessly using the
 /// public anon key embedded in Wispr's bundle.
+///
+/// Supabase **rotates** refresh tokens: every successful refresh spends the
+/// token it was given and issues a new one, and re-POSTing a spent token comes
+/// back `400 refresh_token_already_used`. So the rotated session must outlive
+/// the process. It used to be held in memory only, which made dictation a
+/// one-restart fuse: the first refresh spent the token in Wispr's
+/// `session.json`, nothing ever rewrote that file (the Wispr Flow app is
+/// retired here), and the live tip of the chain died with the process — so the
+/// *next* launch POSTed the long-spent file token and 400'd forever. We now
+/// persist each rotation to our own store so a restart resumes the chain.
 actor WisprToken {
     static let shared = WisprToken()
 
@@ -25,17 +34,22 @@ actor WisprToken {
     }
     private static let tokenKey = "sb-dodjkfqhwrzqjwkfnthl-auth-token"
 
-    private struct Session: Decodable {
+    /// Our own copy of the rotated session. Deliberately *not* Wispr's file: we
+    /// never write to another app's storage, and Wispr rewrites that file
+    /// wholesale whenever it runs.
+    static var storePath: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("VoiceOperator/wispr-session.json")
+    }
+
+    private struct Session: Codable {
         let access_token: String
         let refresh_token: String
         let expires_at: Double
     }
 
-    /// The most recently obtained session, held in memory only. Without this the
-    /// refreshed token was thrown away after every call: `session.json` on disk is
-    /// only rewritten by the Wispr Flow app, and that app has been retired here,
-    /// so the file is permanently stale and *every* dictation paid a full Supabase
-    /// round trip on the critical path before any audio could be sent.
+    /// The most recently obtained session. Also mirrored to `storePath`; this
+    /// just saves a file read on the dictation critical path.
     private var cached: Session?
 
     /// A currently-valid access token, refreshing via Supabase if within 60s of
@@ -43,24 +57,55 @@ actor WisprToken {
     func accessToken() async throws -> String {
         if let cached, !Self.isExpiring(cached) { return cached.access_token }
 
-        // If Wispr Flow is running it keeps `session.json` fresh; use its token
-        // rather than rotating a second refresh chain against the same account.
-        let onDisk = try? loadSession()
-        if let onDisk, !Self.isExpiring(onDisk) {
-            cached = onDisk
-            return onDisk.access_token
+        // Three places a session can come from, newest-issued first. Our store
+        // normally holds the tip of the chain; Wispr's file wins only when the
+        // Wispr Flow app has run since (a fresh sign-in), which is exactly how a
+        // spent chain recovers without any manual step.
+        let candidates = Self.rank([cached, loadStored(), try? loadWisprSession()])
+        guard !candidates.isEmpty else { throw TranscriberError.notSignedIn }
+
+        // An access token that is still good beats any refresh: no round trip on
+        // the critical path, and no rotation to keep in sync.
+        if let live = candidates.first(where: { !Self.isExpiring($0) }) {
+            adopt(live)
+            return live.access_token
         }
 
-        // Otherwise refresh ourselves, preferring the token we were last issued
-        // over the one on disk: Supabase rotates refresh tokens, so once we have
-        // refreshed, the copy in the file is spent. Falling back to `cached` also
-        // keeps dictation alive when the file is gone entirely — Wispr Flow has
-        // been retired here, so that is the expected steady state, and throwing
-        // would break dictation permanently an hour after launch.
-        guard let basis = cached ?? onDisk else { throw TranscriberError.notSignedIn }
-        let session = try await coalescedRefresh(basis.refresh_token)
+        // Otherwise spend a refresh token. If the newest one is already spent —
+        // another process rotated it, or a stale store survived a sign-in — fall
+        // through to the next distinct one rather than failing the dictation.
+        var lastError: Error = TranscriberError.notSignedIn
+        for candidate in candidates {
+            do {
+                let session = try await coalescedRefresh(candidate.refresh_token)
+                adopt(session)
+                return session.access_token
+            } catch {
+                lastError = error
+                // Only a rejected *token* is worth retrying with another one; a
+                // network failure would fail identically for every candidate.
+                guard Self.isRejected(error) else { throw error }
+            }
+        }
+        Log.log("token: every refresh token is spent — open Wispr Flow and sign in to restore dictation")
+        if Self.isRejected(lastError) { throw TranscriberError.signInExpired }
+        throw lastError
+    }
+
+    /// Newest-issued first, without repeating a refresh token we would only have
+    /// re-POSTed to the same answer.
+    private static func rank(_ sessions: [Session?]) -> [Session] {
+        var seen = Set<String>()
+        return sessions.compactMap { $0 }
+            .sorted { $0.expires_at > $1.expires_at }
+            .filter { seen.insert($0.refresh_token).inserted }
+    }
+
+    /// Hold the session in memory *and* on disk, so the next launch resumes this
+    /// chain instead of replaying a spent token.
+    private func adopt(_ session: Session) {
         cached = session
-        return session.access_token
+        store(session)
     }
 
     /// One refresh at a time. This method suspends, and an actor is reentrant
@@ -92,7 +137,41 @@ actor WisprToken {
         Date().timeIntervalSince1970 > session.expires_at - 60
     }
 
-    private func loadSession() throws -> Session {
+    /// True when Supabase refused the *token* (spent, revoked, malformed) rather
+    /// than failing to answer. Those are the cases where another candidate has a
+    /// real chance of working.
+    private static func isRejected(_ error: Error) -> Bool {
+        switch error {
+        case TranscriberError.http(let status, _):
+            return (400...403).contains(status)
+        default:
+            return false
+        }
+    }
+
+    // MARK: - Storage
+
+    private func loadStored() -> Session? {
+        guard let data = try? Data(contentsOf: Self.storePath) else { return nil }
+        return try? JSONDecoder().decode(Session.self, from: data)
+    }
+
+    /// Best-effort: a failed write costs us the chain across the next restart,
+    /// which is bad, but failing the dictation in hand over it would be worse.
+    private func store(_ session: Session) {
+        do {
+            let url = Self.storePath
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try JSONEncoder().encode(session).write(to: url, options: .atomic)
+            // It is a live credential; keep it off other accounts on the machine.
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            Log.log("token: could not persist session (\(error.localizedDescription))")
+        }
+    }
+
+    private func loadWisprSession() throws -> Session {
         let data = try Data(contentsOf: URL(fileURLWithPath: Self.sessionPath))
         guard let outer = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let blob = outer[Self.tokenKey] as? String,

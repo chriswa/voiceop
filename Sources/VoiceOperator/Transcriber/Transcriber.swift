@@ -53,6 +53,9 @@ extension Transcriber {
 
 enum TranscriberError: Error {
     case notSignedIn
+    /// Every refresh token we hold has been spent or revoked, so only a fresh
+    /// sign-in in the Wispr Flow app can restore the chain.
+    case signInExpired
     case http(status: Int, body: String)
     case badResponse
     /// No Baseten key, so the streaming path is unavailable.
@@ -71,6 +74,8 @@ extension TranscriberError {
         switch self {
         case .notSignedIn:
             return "not signed in to Wispr Flow"
+        case .signInExpired:
+            return "Wispr sign-in expired — open Wispr Flow and sign in"
         case .http(let status, let body):
             // The API's error bodies look like {"detail": "Request timed out"}.
             if let obj = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any],

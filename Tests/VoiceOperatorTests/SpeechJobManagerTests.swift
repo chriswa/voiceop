@@ -140,13 +140,13 @@ final class SpeechJobManagerTests: XCTestCase {
 
         // Sentence one synthesizes through `play`; only sentence two is a
         // lookahead, and nothing else has been started.
-        XCTAssertEqual(await h.synth.startedTexts, ["Two."])
+        await h.assertStarted(["Two."])
 
         // Settling the lookahead does not buy a third: sentence one still has
         // the other slot, and still has not produced its audio.
         await h.synth.settle("Two.")
         try? await Task.sleep(for: .milliseconds(20))
-        XCTAssertEqual(await h.synth.startedTexts, ["Two."])
+        await h.assertStarted(["Two."])
     }
 
     /// The rule that is easy to get wrong. While the sentence being played is
@@ -160,12 +160,13 @@ final class SpeechJobManagerTests: XCTestCase {
         // the sentence being played.
         await h.synth.settle("Two.")
         try? await Task.sleep(for: .milliseconds(20))
-        XCTAssertEqual(await h.synth.startedTexts, ["Two."], "a third clip started while sentence one was still synthesizing")
+        await h.assertStarted(["Two."], "a third clip started while sentence one was still synthesizing")
 
-        // The moment sentence one's audio is in hand, the window opens.
+        // The moment sentence one's audio is in hand, the window opens as far
+        // as the budget allows: both free slots go to the next two sentences.
         await h.gate.synthesizeNext()
-        await h.synth.waitForStarts(2)
-        XCTAssertEqual(await h.synth.startedTexts, ["Two.", "Three."])
+        await h.synth.waitForStarts(3)
+        await h.assertStarted(["Two.", "Three.", "Four."])
     }
 
     /// A budget rather than a fixed distance. Short sentences settle quickly and
@@ -189,7 +190,7 @@ final class SpeechJobManagerTests: XCTestCase {
         // Sentence five is under way while sentence one is still playing — the
         // whole point. A one-ahead window would not have reached it until
         // playback was on sentence four.
-        XCTAssertEqual(await h.synth.startedTexts, ["Two.", "Three.", "Four.", "Five."])
+        await h.assertStarted(["Two.", "Three.", "Four.", "Five."])
         let playback = await h.manager.result(id: h.jobId)?.playbackState
         XCTAssertEqual(playback, .queued, "playback should still be on sentence one")
     }
@@ -201,7 +202,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await h.gate.synthesizeNext()
         try? await Task.sleep(for: .milliseconds(20))
 
-        XCTAssertEqual(await h.synth.startedTexts, [])
+        await h.assertStarted([])
     }
 }
 
@@ -213,6 +214,15 @@ private struct WindowHarness {
     let gate: PlaybackGate
     let synth: SynthesisGate
     let jobId: String
+
+    /// Awaiting actor state inside an `XCTAssert` autoclosure does not compile,
+    /// so every check of what reached the synthesizer goes through here. `line`
+    /// keeps a failure reported against the calling test.
+    func assertStarted(_ expected: [String], _ message: String = "",
+                       file: StaticString = #filePath, line: UInt = #line) async {
+        let started = await synth.startedTexts
+        XCTAssertEqual(started, expected, message, file: file, line: line)
+    }
 }
 
 /// Enqueue one job and wait until sentence one has been handed to playback and

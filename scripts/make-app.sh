@@ -13,6 +13,10 @@ echo "building ($CONFIG)…"
 swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/VoiceOperator"
 
+# Allocated after the compile, so a build that failed doesn't burn a number.
+read -r VERSION BUILD_NUMBER <<<"$(allocate_version)"
+echo "version: $VERSION (build $BUILD_NUMBER)"
+
 APP="build/Voice Operator.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -20,7 +24,7 @@ cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
-stamp_source_commit "$APP"
+stamp_build_identity "$APP" "$VERSION" "$BUILD_NUMBER"
 
 # Sign with a real codesigning identity if one exists (stable designated
 # requirement → TCC remembers Accessibility/Microphone grants across rebuilds).
@@ -37,5 +41,5 @@ else
         --entitlements Resources/VoiceOperator.entitlements "$APP"
 fi
 
-echo "built: $APP"
+echo "built: $APP  (v$VERSION)"
 restart_running_app "$APP"

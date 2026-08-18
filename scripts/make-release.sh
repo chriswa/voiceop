@@ -48,6 +48,12 @@ echo "building universal (release, arm64 + x86_64)…"
 swift build -c release --arch arm64 --arch x86_64
 BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/VoiceOperator"
 
+# The version comes from the committed Info.plist, so this bundle, the commit it
+# was built from, and the vX.Y.Z tag all name the same thing. Allocate it with
+# `scripts/bump-version.sh` and commit before running this (docs/RELEASING.md).
+read -r VERSION BUILD_NUMBER <<<"$(committed_version)"
+echo "version: $VERSION (build $BUILD_NUMBER)"
+
 echo "assembling bundle…"
 rm -rf "$APP" "$ZIP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -55,7 +61,7 @@ cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
-stamp_source_commit "$APP"
+stamp_build_identity "$APP" "$VERSION" "$BUILD_NUMBER"
 
 echo "signing as: $IDENTITY"
 # --timestamp (secure timestamp) and --options runtime (hardened runtime) are
@@ -109,6 +115,6 @@ rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
 echo
-echo "built + notarized: $APP"
+echo "built + notarized: $APP  (v$VERSION)"
 echo "distributable:     $ZIP  (attach this to a GitHub Release)"
 echo "arch: $(lipo -archs "$APP/Contents/MacOS/VoiceOperator")"

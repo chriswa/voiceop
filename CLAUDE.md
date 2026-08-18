@@ -70,6 +70,12 @@ Then have the app restart — either the user clicks the menu-bar
 **Restart Voice Operator** item, or kill the running `VoiceOperator` process and
 `open "build/Voice Operator.app"`.
 
+Every build gets its own version number (`MAJOR.MINOR` from `Resources/Info.plist`,
+patch from the untracked `.build-number` counter), shown in the menu just above
+**Restart Voice Operator** and logged at launch. It changing is the proof the
+restart picked up your build. Release versions are allocated from the same counter
+by `./scripts/bump-version.sh` — see `docs/RELEASING.md`.
+
 `swift test` runs the unit tests. Notarized universal releases:
 `docs/RELEASING.md` / `./scripts/make-release.sh`.
 

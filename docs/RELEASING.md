@@ -55,16 +55,26 @@ build output, so they keep working if the app is renamed. Run them from the repo
    correspond to a real commit on `main`) — or, if you're unsure whether they're ready,
    ask the user before releasing.
 
-1. **Bump the version.** In `Resources/Info.plist`, increment `CFBundleShortVersionString`
-   (e.g. `0.1.0` → `0.1.1`) and `CFBundleVersion` (integer, +1). **Edit it as text.**
-   PlistBuddy is fine for *reading* (as below) but `-c Set` rewrites the whole file:
-   it alphabetizes the keys, converts the indentation to tabs, and silently deletes
-   the XML comments. Commit and push:
+1. **Bump the version.**
+   ```bash
+   ./scripts/bump-version.sh          # next patch on the current release line
+   ./scripts/bump-version.sh 0.2      # or open a new MAJOR.MINOR line
+   ```
+   It allocates the next patch from the build counter and writes both
+   `CFBundleShortVersionString` and `CFBundleVersion` into `Resources/Info.plist`.
+   That counter is shared with local `make-app.sh` builds, so a release version is
+   never one a local build has already shown in its menu, and the patch component
+   will *jump* — it counts builds, not releases. Commit and push (the release must
+   correspond to a real commit on `main`, and `make-release.sh` builds exactly the
+   version recorded here):
    ```bash
    git add Resources/Info.plist
    git commit -m "Bump version to X.Y.Z"
    git push origin main
    ```
+   Only edit the file by hand if you must, and then **as text** — PlistBuddy is fine
+   for *reading* (as below) but `-c Set` rewrites the whole file: it alphabetizes the
+   keys, converts the indentation to tabs, and silently deletes the XML comments.
 
 2. **Build + notarize + staple:**
    ```bash

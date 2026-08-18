@@ -23,6 +23,9 @@ import IOKit.hid
 ///     has elapsed since key-down, in case a second press is coming.
 ///   • **Second press inside that window** → hands-free lock: keep dictating
 ///     until the next press stops it.
+///   • **⌘ pressed while the key is held** → the same hands-free lock, decided
+///     mid-dictation: release the trigger whenever you like and keep talking
+///     until the next press stops it. See `trackCommandLock`.
 ///
 /// `lockWindow` matches Wispr Flow's `DICTATION_DEBOUNCE_DELAY` (500 ms), which
 /// it likewise uses only to recognise a second quick press — never to delay the
@@ -162,6 +165,11 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// device-dependent left/right bits (0x7F, plus right-Control at 0x2000).
     private static let otherModifierBits: UInt64 = (0x00FF_0000 | 0x0000_207F) & ~leftShiftBit
 
+    /// The **generic** Command bit (`NSEvent.ModifierFlags.command`). Either
+    /// Command key locks a dictation hands-free, so unlike left Shift there is
+    /// nothing here to tell apart — see `trackCommandLock`.
+    private static let commandBit: UInt64 = 0x0010_0000
+
     /// A left-Shift press that is still a candidate for a style-cycling *tap*.
     ///
     /// Cycling on Shift **down** would be a trap: during a hands-free locked
@@ -172,6 +180,12 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// on release. A deliberate tap still costs nothing perceptible.
     private var shiftArmed = false
     private var leftShiftDown = false
+    /// Live Command-key state, edge-detected so that only a *new* press locks a
+    /// dictation — Command already held when the trigger went down belongs to
+    /// whatever the user was doing, not to us. Compared against the real flag bit
+    /// on every `flagsChanged`, so a press or release missed while the tap was
+    /// disabled reconciles itself on the next event rather than sticking.
+    private var commandDown = false
     /// The state of the other modifiers when the Shift press landed.
     private var shiftArmFlags: UInt64 = 0
 
@@ -324,6 +338,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
         trackLeftShift(flags: flags)
+        trackCommandLock(flags: flags)
         guard keycode == Self.triggerKeycode else { return }
         let down = (flags & Self.triggerBit) != 0
         if down == isDown { return }   // ignore duplicates / confounding modifiers
@@ -356,6 +371,36 @@ final class HotkeyMonitor: @unchecked Sendable {
         // Shift itself did not move, so some *other* modifier did while it was
         // held: this is a chord (⇧⌘, a Ctrl+Fn landing mid-tap, …), not a tap.
         if shiftArmed, others != shiftArmFlags { shiftArmed = false }
+    }
+
+    /// Promote a push-to-talk hold to a hands-free lock when Command is pressed
+    /// while the trigger key is still down. It is the third way to reach `.locked`
+    /// — and the only one available *after* you have started talking, so a
+    /// dictation that turns out to be longer than a hold is comfortable for does
+    /// not have to be restarted as a double-tap.
+    ///
+    /// Two properties keep it from firing by accident:
+    ///
+    /// 1. **Only from `.holding`.** The trigger key is physically down, so the
+    ///    user is unambiguously mid-dictation. Command is not consulted at any
+    ///    other time — including during `.awaitingLock`, where the trigger has
+    ///    already been released and a ⌘-shortcut the user meant for their own app
+    ///    would otherwise leave the microphone open indefinitely.
+    /// 2. **On the press edge, not the held state.** Command already down when the
+    ///    trigger went down is somebody else's modifier and is ignored; only a
+    ///    fresh press locks.
+    ///
+    /// Unlike the style-cycling Shift gesture this acts on key-*down* rather than
+    /// waiting for a clean tap: there is no ambiguity to resolve (nothing else
+    /// reads Command while the trigger is held), and locking immediately means the
+    /// trigger key can be let go the instant the user thinks of it.
+    private func trackCommandLock(flags: UInt64) {
+        let down = (flags & Self.commandBit) != 0
+        guard down != commandDown else { return }
+        commandDown = down
+        guard down, gesture == .holding else { return }
+        gesture = .locked
+        Log.log("hotkey: ⌘ pressed while holding the trigger — dictation locked hands-free")
     }
 
     private func keyDown(at timestamp: UInt64) {

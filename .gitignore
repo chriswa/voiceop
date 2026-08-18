@@ -10,3 +10,4 @@ __pycache__/
 # testing. config.json holds Cloudflare Access service-token credentials.
 config.json
 baseten-key
+.build-number

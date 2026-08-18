@@ -135,7 +135,8 @@ CAVEATS:
 ## Scope (v1)
 
 In:
-- **Dictation**: hold-to-talk + double-tap-to-toggle, transcription pasted into the focused
+- **Dictation**: hold-to-talk + double-tap-to-toggle (+ ⌘ mid-hold to promote a hold to
+  hands-free), transcription pasted into the focused
   app, with matched start/stop/**pasted** SFX.
 - **Claude Code narration**: watch transcripts, summarize each completed turn, speak it in a
   sticky per-session name+voice ("Waldo here. …"), forward speaking events to spaceterm.
@@ -279,6 +280,34 @@ cues fire back to back and no dictation runs.
 Note the failure mode: a slow key path does not merely feel laggy, it makes the
 gesture recogniser read a *different gesture* than the one performed.
 
+#### Locking hands-free mid-dictation — ⌘ while holding the trigger (2026-08-18)
+
+There are three ways to run a dictation, and the third exists because the choice
+between the first two has to be made *before* you know how long you will talk:
+
+1. **Hold** Fn, speak, release — push-to-talk.
+2. **Double-tap** Fn, speak, tap Fn — hands-free.
+3. **Hold** Fn, speak, **tap ⌘ while still holding**, release Fn, keep speaking,
+   tap Fn to end — a push-to-talk promoted to hands-free without interrupting it.
+
+The third is the same `.locked` gesture state as the second, just reached later, so
+nothing downstream of `HotkeyMonitor` knows the difference: one dictation, one
+recording, one transcript, with speech either side of the ⌘ tap.
+
+Two constraints keep ⌘ from locking a dictation by accident (`trackCommandLock`):
+
+- **Only while the trigger key is physically held** (`.holding`). Notably *not*
+  during `.awaitingLock`, where Fn has already been released — a ⌘-shortcut the
+  user meant for their own app would otherwise leave the microphone open with
+  nothing to close it.
+- **On the press edge**, so ⌘ already held when Fn went down is somebody else's
+  modifier and is ignored.
+
+Unlike the Shift gesture below this fires on key-*down* rather than waiting for a
+clean tap: nothing else reads ⌘ while the trigger is held, so there is no ambiguity
+to resolve, and locking immediately means Fn can be released the moment the user
+thinks of it.
+
 #### Transcript style — left Shift while recording (2026-08-14)
 
 Wispr returns a finished *sentence*: first word capitalised, terminal full stop.
@@ -345,9 +374,20 @@ Transcriber/  (protocol Transcriber)   WisprTranscriber today (WS + /llm HTTP); 
 Speaker/      (protocol SpeechSynthesizer)  KokoroSynthesizer (local kokoro-82m HTTP, streaming)
 Inserter/                              Swift paste helper (lazy clipboard + Cmd-V + restore + AX ctx)
 ClaudeWatcher/                         ports transcript-reader.py: tail, Haiku-summarize, spaceterm sock
-Hotkey/                                CGEventTap; Right Shift now -> Fn later; hold + double-tap
+Hotkey/                                CGEventTap on Fn; hold / double-tap / Cmd-mid-hold to lock
 MenuBarUI/                             status states + Pause toggle
 ```
+
+**Build identity.** Every bundle build — local or release — allocates its own version
+(`allocate_version`, `scripts/lib.sh`): `MAJOR.MINOR` is the release line from the committed
+`Info.plist`, `PATCH` is a monotonic counter in the untracked `.build-number`. The number is
+stamped into the *bundle's* `Info.plist` with the source commit, logged at launch, and shown
+in the menu above **Restart Voice Operator** (`BuildInfo`). That last part is the point: a
+running instance keeps executing the binary that was deleted out from under it, so the only
+proof a restart picked up the last build is the version changing. Two builds of identical
+source therefore still differ. `scripts/bump-version.sh` allocates a release's version into
+the committed plist, whose patch component doubles as the counter's floor — so a fresh clone
+resumes above the last release instead of re-issuing published numbers.
 
 **`AudioArbiter` invariant** (the reason this app exists): dictation-start → halt current TTS
 (re-cue from start) + mute output + block queue; dictation-end (+delay) → unmute + drain queue.

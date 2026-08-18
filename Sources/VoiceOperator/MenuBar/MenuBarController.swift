@@ -55,6 +55,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         copyPath.target = self; menu.addItem(copyPath)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self; menu.addItem(login)
+        // Which build is running, right next to the item that restarts it: the
+        // version changing is how you know the restart picked up the last build
+        // (see BuildInfo).
+        let version = NSMenuItem(title: BuildInfo.menuLabel, action: nil, keyEquivalent: "")
+        version.isEnabled = false; menu.addItem(version)
         let restart = NSMenuItem(title: "Restart Voice Operator", action: #selector(restart), keyEquivalent: "")
         restart.target = self; menu.addItem(restart)
         menu.addItem(NSMenuItem(title: "Quit Voice Operator", action: #selector(NSApplication.terminate(_:)), keyEquivalent: ""))

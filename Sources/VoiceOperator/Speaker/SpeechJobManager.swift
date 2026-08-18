@@ -182,10 +182,22 @@ actor SpeechJobManager {
             // with no "audible" after it localises a stall to synthesis, and is
             // the difference between a silent shortcut and a diagnosable one.
             Log.log("speech job \(id): handing sentence \(job.next + 1)/\(job.segments.count) to playback — \(Log.clip(segment.text))")
-            if let prefetch {
-                for index in (job.next + 1)..<min(job.segments.count, job.next + 3) {
-                    prefetch(job.segments[index].text, job.voice)
-                }
+            // One sentence of lookahead, so at most two clips are ever in
+            // flight: the one being handed to playback here, and the one after
+            // it. The window advances with playback rather than opening all at
+            // once — sentence three starts synthesizing when sentence two
+            // starts playing, not while sentence one is still silent.
+            //
+            // Synthesis is a shared, finite resource whatever the backend: a
+            // local model behind a small worker pool, or a remote service with
+            // a queue of its own. Every extra request in flight is contention
+            // with the one clip the listener is actually waiting for, and that
+            // clip loses — its request is issued last. Measured against a
+            // two-sentence lookahead on a saturated backend, the sentence being
+            // played reached first audio at 17.5s while the lookahead that
+            // displaced it got there in 11.7s.
+            if let prefetch, job.next + 1 < job.segments.count {
+                prefetch(job.segments[job.next + 1].text, job.voice)
             }
             Task { [weak self] in
                 let completed = await play(segment.text, job.voice) { [weak self] in

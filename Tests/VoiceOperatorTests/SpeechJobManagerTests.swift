@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import VoiceOperator
 
@@ -130,6 +131,73 @@ final class SpeechJobManagerTests: XCTestCase {
         let missed = await manager.wait(id: accepted.id, seconds: 30, since: queued.version)
         XCTAssertEqual(missed?.playbackState, .speaking)
     }
+
+    /// The prefetch window is the whole reason a queued answer can be slower
+    /// than a single sentence: every clip in flight competes for the same
+    /// synthesizer. Pinning it at one lookahead keeps the concurrency at two
+    /// and, more importantly, keeps the *current* sentence from being the one
+    /// that loses the race it is blocking on.
+    func testPrefetchesOnlyOneSentenceAhead() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let prefetched = Recorder()
+        await manager.configure(
+            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            prefetch: { text, _ in prefetched.record(text) },
+            halt: {})
+
+        _ = await manager.enqueue(
+            text: "First sentence. Second sentence. Third sentence. Fourth sentence.",
+            voice: "af_heart")!
+        // `pump` prefetches before it hands the sentence to `play`, so a started
+        // playback is a precise barrier: whatever this window was going to
+        // request, it has requested by now.
+        await gate.waitForStarts(1)
+
+        // Sentence one is playing, so only sentence two may be in flight.
+        XCTAssertEqual(prefetched.all.map(Self.trimmed), ["Second sentence."])
+
+        await gate.startNext()
+        await gate.finishNext()
+        await gate.waitForStarts(2)
+
+        // Sentence two is playing, so the window has advanced onto sentence
+        // three — rather than having opened onto three *and* four at the start.
+        XCTAssertEqual(prefetched.all.map(Self.trimmed), ["Second sentence.", "Third sentence."])
+    }
+
+    /// The lookahead has to stop at the end of the answer rather than running
+    /// off the end of the segment list.
+    func testDoesNotPrefetchPastTheLastSentence() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let prefetched = Recorder()
+        await manager.configure(
+            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            prefetch: { text, _ in prefetched.record(text) },
+            halt: {})
+
+        _ = await manager.enqueue(text: "Only sentence.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+
+        XCTAssertEqual(prefetched.all, [])
+    }
+
+    private static func trimmed(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Records the texts `prefetch` was called with.
+///
+/// Lock-guarded rather than an actor because `prefetch` is a synchronous
+/// `@Sendable` closure: recording on the caller's thread is what lets a started
+/// playback stand in as a barrier, instead of the test sleeping and hoping.
+private final class Recorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var texts: [String] = []
+    func record(_ text: String) { lock.lock(); texts.append(text); lock.unlock() }
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return texts }
 }
 
 private actor Counter {

@@ -58,7 +58,18 @@ final class TTSEngine {
     /// first audible chunk when streaming, or just before playback for a cache hit.
     /// Returns true if it finished, false if halted (even mid-synthesis, before
     /// playback began) or failed.
-    func play(_ u: Utterance, onStart: @escaping @Sendable @MainActor () -> Void = {}) async -> Bool {
+    ///
+    /// `onSynthesized` fires when this clip's audio is fully in hand and it has
+    /// stopped competing for the synthesizer — which is a different moment from
+    /// both `onStart` (audio began, more is still being generated) and the
+    /// return (audio finished playing, long after). The speech queue schedules
+    /// its lookahead on it: while the sentence being played is still
+    /// synthesizing, it is the only clip anyone is waiting on, and nothing
+    /// speculative should be competing with it. It fires on failure too, so a
+    /// clip that dies cannot pin the queue's window shut.
+    func play(_ u: Utterance,
+              onStart: @escaping @Sendable @MainActor () -> Void = {},
+              onSynthesized: @escaping @Sendable @MainActor () -> Void = {}) async -> Bool {
         let mark = haltCount
         let key = cache.key(text: u.spokenText, voiceID: u.voiceID)
         // Which of the three routes a clip took is the first thing worth knowing
@@ -69,6 +80,7 @@ final class TTSEngine {
         if let hit = cache.cached(text: u.spokenText, voiceID: u.voiceID) {
             guard haltCount == mark else { return false }
             Log.log("tts play: \(label) cache hit")
+            onSynthesized()
             onStart()
             return await filePlayer.play(url: hit)
         }
@@ -78,15 +90,17 @@ final class TTSEngine {
             Log.log("tts play: \(label) waiting on an in-flight synthesis of the same clip")
             guard let url = try? await existing.value else {
                 Log.log("tts play: \(label) the in-flight synthesis it waited on failed — no audio")
+                onSynthesized()
                 return false
             }
+            onSynthesized()
             guard haltCount == mark else { return false }
             onStart()
             return await filePlayer.play(url: url)
         }
         // C. Originator — stream and play live.
         Log.log("tts play: \(label) synthesizing")
-        return await streamAndPlay(u, key: key, mark: mark, onStart: onStart)
+        return await streamAndPlay(u, key: key, mark: mark, onStart: onStart, onSynthesized: onSynthesized)
     }
 
     /// Stream the utterance, teeing each chunk to the live player and to an
@@ -94,13 +108,14 @@ final class TTSEngine {
     /// completion (and caches) even across a halt, so a barged-in clip re-cues
     /// from cache instantly.
     private func streamAndPlay(_ u: Utterance, key: String, mark: Int,
-                               onStart: @escaping @Sendable @MainActor () -> Void) async -> Bool {
+                               onStart: @escaping @Sendable @MainActor () -> Void,
+                               onSynthesized: @escaping @Sendable @MainActor () -> Void) async -> Bool {
         let player = StreamingSpeechPlayer()
         player.onFirstBuffer = onStart
         do { try player.start(format: streamFormat) }
         catch {
             Log.log("tts stream: engine start failed (\(error)); falling back to WAV")
-            return await playViaWAV(u, key: key, mark: mark, onStart: onStart)
+            return await playViaWAV(u, key: key, mark: mark, onStart: onStart, onSynthesized: onSynthesized)
         }
         activeStream = player
 
@@ -137,6 +152,11 @@ final class TTSEngine {
             return try self.cache.store(wav, text: u.spokenText, voiceID: u.voiceID)
         }
         inFlight[key] = producer
+        // Synthesis settling and playback finishing are hours apart on a long
+        // clip, and the queue needs the earlier one. `try?` because a clip that
+        // failed or was cancelled has stopped competing for the synthesizer
+        // just as surely as one that succeeded.
+        Task { _ = try? await producer.value; onSynthesized() }
 
         // Nothing between here and `awaitCompletion` returning is otherwise
         // observable, and that is exactly the stretch a wedged clip dies in: the
@@ -172,7 +192,8 @@ final class TTSEngine {
     /// One-shot fallback (used when the streaming audio engine can't start):
     /// synthesize the whole WAV, cache it, then play the file.
     private func playViaWAV(_ u: Utterance, key: String, mark: Int,
-                            onStart: @escaping @Sendable @MainActor () -> Void) async -> Bool {
+                            onStart: @escaping @Sendable @MainActor () -> Void,
+                            onSynthesized: @escaping @Sendable @MainActor () -> Void) async -> Bool {
         let url: URL
         do {
             let task = Task<URL, Error> {
@@ -182,7 +203,12 @@ final class TTSEngine {
             inFlight[key] = task
             defer { inFlight[key] = nil }
             url = try await task.value
-        } catch { Log.log("tts fallback synth failed: \(error)"); return false }
+        } catch {
+            Log.log("tts fallback synth failed: \(error)")
+            onSynthesized()
+            return false
+        }
+        onSynthesized()
         guard haltCount == mark else { return false }
         onStart()
         return await filePlayer.play(url: url)
@@ -209,11 +235,19 @@ final class TTSEngine {
     /// this for a user barge-in and for explicit cancellation.
     func stop() { halt() }
 
-    /// Fill the audio cache without making sound for sentence prefetch.
-    func prefetch(text: String, voiceID: String) {
+    /// Fill the audio cache without making sound, for sentence lookahead.
+    ///
+    /// Returns when this clip's synthesis has settled — completed, failed, or
+    /// turned out to be unnecessary because the audio was already cached. The
+    /// speech queue counts what is in flight from that, so returning early
+    /// would let it open a third request while two were still running.
+    func prefetch(text: String, voiceID: String) async {
         guard cache.cached(text: text, voiceID: voiceID) == nil else { return }
         let key = cache.key(text: text, voiceID: voiceID)
-        guard inFlight[key] == nil else { return }
+        // Someone is already synthesizing this exact clip — the originating
+        // `play`, or a lookahead that has not been overtaken yet. Wait on it
+        // rather than opening a second call for the same audio.
+        if let existing = inFlight[key] { _ = try? await existing.value; return }
         let task = Task<URL, Error> {
             do {
                 var acc = Data()
@@ -237,5 +271,6 @@ final class TTSEngine {
             }
         }
         inFlight[key] = task
+        _ = try? await task.value
     }
 }

@@ -30,17 +30,51 @@ actor SpeechJobManager {
     private var dictating = false
     private var muted = false
     private var configured = false
-    private var play: (@Sendable (String, String, @escaping @Sendable () -> Void) async -> Bool)?
-    private var prefetch: (@Sendable (String, String) -> Void)?
+    /// `(text, voice, onStart, onSynthesized) -> finishedNaturally`. Closure
+    /// types cannot carry argument labels, so the two callbacks are positional:
+    /// `onStart` is the first audible sample, `onSynthesized` is the clip's
+    /// audio being fully in hand. See `fillSynthesisWindow` for why the second
+    /// one is a scheduling input rather than just a log line.
+    private var play: (@Sendable (String, String, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool)?
+    /// Synthesize a clip without playing it, returning when it has settled.
+    private var prefetch: (@Sendable (String, String) async -> Void)?
     private var halt: (@Sendable () -> Void)?
+
+    /// How many clips may be synthesizing at once, across the whole queue.
+    ///
+    /// Synthesis is a shared, finite resource whatever the backend — a local
+    /// model behind a small worker pool, or a remote service with a queue of
+    /// its own — so this is the number that decides how much the lookahead
+    /// competes with the sentence the listener is actually blocked on.
+    private static let maxConcurrentSyntheses = 2
+
+    /// Segment indices of `synthesisJob` whose synthesis has started and has
+    /// not settled.
+    private var synthesizing: Set<Int> = []
+    /// The lowest segment index of `synthesisJob` whose synthesis has not been
+    /// started. Everything below it has started; everything below it and absent
+    /// from `synthesizing` has finished.
+    private var synthesisFrontier = 0
+    /// The job the two fields above describe. Late callbacks from a job that
+    /// has been superseded are ignored rather than corrupting its successor's
+    /// bookkeeping — synthesis outlives the job that asked for it, deliberately,
+    /// so the clip still lands in cache.
+    ///
+    /// Which means the cap is per job, not global: for the moment either side
+    /// of a barge-in, an interrupted job's clips can still be synthesizing
+    /// while its replacement opens its own window. Accepted rather than
+    /// overlooked. Counting across jobs would mean holding the new answer's
+    /// first sentence behind audio nobody is going to hear, which is the wrong
+    /// trade for a window that closes on its own within one clip.
+    private var synthesisJob: String?
     /// A parked `GET ?wait=`. `since == nil` is the original contract — wake
     /// only at a terminal state — and `since == v` widens it to "wake at any
     /// change after version v". Both kinds coexist on one job.
     private struct Waiter { let since: Int?; let continuation: CheckedContinuation<Result, Never> }
     private var waiters: [String: [Waiter]] = [:]
 
-    func configure(play: @escaping @Sendable (String, String, @escaping @Sendable () -> Void) async -> Bool,
-                   prefetch: @escaping @Sendable (String, String) -> Void,
+    func configure(play: @escaping @Sendable (String, String, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool,
+                   prefetch: @escaping @Sendable (String, String) async -> Void,
                    halt: @escaping @Sendable () -> Void) {
         self.play = play; self.prefetch = prefetch; self.halt = halt; configured = true; pump()
     }
@@ -177,37 +211,96 @@ actor SpeechJobManager {
             guard job.next < job.segments.count else { update(id) { $0.state = .completed; $0.playbackState = nil }; order.removeFirst(); continue }
             current = id
             update(id) { $0.playbackState = .queued }
-            let segment = job.segments[job.next]
+            let index = job.next
+            let segment = job.segments[index]
             // Paired with `startedSentence`'s line below: a "handed to playback"
             // with no "audible" after it localises a stall to synthesis, and is
             // the difference between a silent shortcut and a diagnosable one.
             Log.log("speech job \(id): handing sentence \(job.next + 1)/\(job.segments.count) to playback — \(Log.clip(segment.text))")
-            // One sentence of lookahead, so at most two clips are ever in
-            // flight: the one being handed to playback here, and the one after
-            // it. The window advances with playback rather than opening all at
-            // once — sentence three starts synthesizing when sentence two
-            // starts playing, not while sentence one is still silent.
-            //
-            // Synthesis is a shared, finite resource whatever the backend: a
-            // local model behind a small worker pool, or a remote service with
-            // a queue of its own. Every extra request in flight is contention
-            // with the one clip the listener is actually waiting for, and that
-            // clip loses — its request is issued last. Measured against a
-            // two-sentence lookahead on a saturated backend, the sentence being
-            // played reached first audio at 17.5s while the lookahead that
-            // displaced it got there in 11.7s.
-            if let prefetch, job.next + 1 < job.segments.count {
-                prefetch(job.segments[job.next + 1].text, job.voice)
-            }
+            openSynthesisWindow(for: job)
             Task { [weak self] in
-                let completed = await play(segment.text, job.voice) { [weak self] in
+                // Positional callbacks: first audible sample, then audio fully
+                // in hand. See the `play` property for why they are unlabelled.
+                let completed = await play(segment.text, job.voice, { [weak self] in
                     Task { await self?.startedSentence(id: id) }
-                }
+                }, { [weak self] in
+                    Task { await self?.synthesisSettled(job: id, index: index) }
+                })
                 await self?.finishedSentence(id: id, completed: completed)
             }
             return
         }
     }
+
+    /// Point the synthesis window at `job`'s current sentence and open it.
+    ///
+    /// The sentence being handed to playback synthesizes through `play`, not
+    /// `prefetch` — `play` streams it and starts sound on the first chunk,
+    /// where waiting on a prefetch would hold the whole clip back — so this
+    /// only *books* it into the window. Every other sentence is started by
+    /// `fillSynthesisWindow`.
+    private func openSynthesisWindow(for job: Job) {
+        if synthesisJob != job.id {
+            synthesisJob = job.id
+            synthesizing = []
+            synthesisFrontier = 0
+        }
+        if synthesisFrontier <= job.next {
+            // Only the job's first sentence: every later one was already
+            // started by the lookahead before playback reached it.
+            synthesizing.insert(job.next)
+            synthesisFrontier = job.next + 1
+        }
+        fillSynthesisWindow()
+    }
+
+    /// Start as many lookahead syntheses as the window currently allows.
+    ///
+    /// Two rules, and the second is the one that is easy to get wrong.
+    ///
+    /// At most `maxConcurrentSyntheses` clips synthesize at once, because they
+    /// contend for one backend and the loser is whichever the listener happens
+    /// to be waiting on.
+    ///
+    /// And nothing further than one sentence ahead starts while the sentence
+    /// being *played* is still synthesizing. That sentence is the only thing
+    /// standing between the listener and sound; if the backend is struggling
+    /// with it, spending the other slot on a speculative third clip makes the
+    /// struggle worse. Once it is in hand the window opens as far as the
+    /// concurrency cap allows — which is the point of expressing this as a
+    /// budget rather than a fixed distance. Four short sentences no longer
+    /// ration the budget one at a time while a very long fifth sits unstarted:
+    /// each short one settles, frees its slot, and the window walks forward to
+    /// reach the long one while there is still speech left to cover it.
+    private func fillSynthesisWindow() {
+        guard let id = current, id == synthesisJob, let job = jobs[id], let prefetch else { return }
+        while synthesizing.count < Self.maxConcurrentSyntheses, synthesisFrontier < job.segments.count {
+            if synthesisFrontier > job.next + 1, synthesizing.contains(job.next) { return }
+            let index = synthesisFrontier
+            synthesisFrontier += 1
+            synthesizing.insert(index)
+            let text = job.segments[index].text
+            let voice = job.voice
+            Task { [weak self] in
+                await prefetch(text, voice)
+                await self?.synthesisSettled(job: id, index: index)
+            }
+        }
+    }
+
+    /// One clip has stopped competing for the synthesizer — because it
+    /// succeeded, failed, or was already cached. Either way a slot is free.
+    ///
+    /// Safe to call more than once for the same clip, and it is: a sentence the
+    /// lookahead started and playback then caught up with reports through both
+    /// paths. Set removal makes the second call a no-op, and re-filling an
+    /// already-full window is one loop test.
+    private func synthesisSettled(job id: String, index: Int) {
+        guard synthesisJob == id else { return }
+        synthesizing.remove(index)
+        fillSynthesisWindow()
+    }
+
     private func startedSentence(id: String) {
         guard current == id, let job = jobs[id], !terminal(job.state) else { return }
         Log.log("speech job \(id): sentence \(job.next + 1)/\(job.segments.count) is audible")

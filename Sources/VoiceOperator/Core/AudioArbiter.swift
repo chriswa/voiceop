@@ -772,20 +772,21 @@ final class AudioArbiter {
     private func save() { historyStore.save(.init(stt: sttHistory, commands: commandHistory)); onHistoryChanged?() }
 
     func playSentence(text: String, voiceID: String,
-                      onStart: @escaping @Sendable () -> Void = {}) async -> Bool {
+                      onStart: @escaping @Sendable () -> Void = {},
+                      onSynthesized: @escaping @Sendable () -> Void = {}) async -> Bool {
         onStatus?(.requestingTTS)
         startTTSWaitCue()
         let result = await tts.play(Utterance(text: text, voiceID: voiceID), onStart: { [weak self] in
             self?.stopTTSWaitCue()
             self?.onStatus?(.speaking)
             onStart()
-        })
+        }, onSynthesized: { onSynthesized() })
         stopTTSWaitCue()
         if !isDictating { onStatus?(.idle) }
         return result
     }
     func haltSpeech() { tts.stop() }
-    func prefetchSentence(text: String, voiceID: String) { tts.prefetch(text: text, voiceID: voiceID) }
+    func prefetchSentence(text: String, voiceID: String) async { await tts.prefetch(text: text, voiceID: voiceID) }
 }
 
 struct DictationContext: Sendable {

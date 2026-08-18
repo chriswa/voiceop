@@ -15,7 +15,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let gate = PlaybackGate()
         let halts = Counter()
         await manager.configure(
-            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: { Task { await halts.increment() } })
 
@@ -42,7 +42,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
-            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: {})
 
@@ -88,7 +88,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
-            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: {})
 
@@ -117,7 +117,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
-            play: { _, _, onStart in await gate.play(onStart: onStart) },
+            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: {})
 
@@ -132,72 +132,140 @@ final class SpeechJobManagerTests: XCTestCase {
         XCTAssertEqual(missed?.playbackState, .speaking)
     }
 
-    /// The prefetch window is the whole reason a queued answer can be slower
-    /// than a single sentence: every clip in flight competes for the same
-    /// synthesizer. Pinning it at one lookahead keeps the concurrency at two
-    /// and, more importantly, keeps the *current* sentence from being the one
-    /// that loses the race it is blocking on.
-    func testPrefetchesOnlyOneSentenceAhead() async {
-        let manager = SpeechJobManager()
-        let gate = PlaybackGate()
-        let prefetched = Recorder()
-        await manager.configure(
-            play: { _, _, onStart in await gate.play(onStart: onStart) },
-            prefetch: { text, _ in prefetched.record(text) },
-            halt: {})
+    /// Two clips synthesize at once and no more: the one being played, and one
+    /// lookahead. A third would be competing with the sentence the listener is
+    /// actually blocked on, at whichever backend they share.
+    func testSynthesizesAtMostTwoClipsAtOnce() async {
+        let h = await startWindowHarness(sentences: 5)
 
-        _ = await manager.enqueue(
-            text: "First sentence. Second sentence. Third sentence. Fourth sentence.",
-            voice: "af_heart")!
-        // `pump` prefetches before it hands the sentence to `play`, so a started
-        // playback is a precise barrier: whatever this window was going to
-        // request, it has requested by now.
-        await gate.waitForStarts(1)
+        // Sentence one synthesizes through `play`; only sentence two is a
+        // lookahead, and nothing else has been started.
+        XCTAssertEqual(await h.synth.startedTexts, ["Two."])
 
-        // Sentence one is playing, so only sentence two may be in flight.
-        XCTAssertEqual(prefetched.all.map(Self.trimmed), ["Second sentence."])
-
-        await gate.startNext()
-        await gate.finishNext()
-        await gate.waitForStarts(2)
-
-        // Sentence two is playing, so the window has advanced onto sentence
-        // three — rather than having opened onto three *and* four at the start.
-        XCTAssertEqual(prefetched.all.map(Self.trimmed), ["Second sentence.", "Third sentence."])
+        // Settling the lookahead does not buy a third: sentence one still has
+        // the other slot, and still has not produced its audio.
+        await h.synth.settle("Two.")
+        try? await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(await h.synth.startedTexts, ["Two."])
     }
 
-    /// The lookahead has to stop at the end of the answer rather than running
-    /// off the end of the segment list.
-    func testDoesNotPrefetchPastTheLastSentence() async {
-        let manager = SpeechJobManager()
-        let gate = PlaybackGate()
-        let prefetched = Recorder()
-        await manager.configure(
-            play: { _, _, onStart in await gate.play(onStart: onStart) },
-            prefetch: { text, _ in prefetched.record(text) },
-            halt: {})
+    /// The rule that is easy to get wrong. While the sentence being played is
+    /// still synthesizing it is the only thing between the listener and sound,
+    /// so the window must not spend its free slot looking further ahead — even
+    /// though, positionally, it could.
+    func testHoldsTheWindowShutWhileTheCurrentSentenceIsStillSynthesizing() async {
+        let h = await startWindowHarness(sentences: 5)
 
-        _ = await manager.enqueue(text: "Only sentence.", voice: "af_heart")!
-        await gate.waitForStarts(1)
+        // The backend answers the lookahead first and is still labouring over
+        // the sentence being played.
+        await h.synth.settle("Two.")
+        try? await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(await h.synth.startedTexts, ["Two."], "a third clip started while sentence one was still synthesizing")
 
-        XCTAssertEqual(prefetched.all, [])
+        // The moment sentence one's audio is in hand, the window opens.
+        await h.gate.synthesizeNext()
+        await h.synth.waitForStarts(2)
+        XCTAssertEqual(await h.synth.startedTexts, ["Two.", "Three."])
     }
 
-    private static func trimmed(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// A budget rather than a fixed distance. Short sentences settle quickly and
+    /// the window walks forward through them, so a long sentence further down
+    /// the answer starts while there is still speech left to cover it — instead
+    /// of waiting for playback to reach its immediate predecessor.
+    func testWalksTheWindowForwardThroughShortSentences() async {
+        let h = await startWindowHarness(sentences: 5)
+
+        // Sentence one's audio arrives; sentence two is long and stays in
+        // flight for the rest of this test, holding one slot throughout.
+        await h.gate.synthesizeNext()
+        await h.synth.waitForStarts(2)
+
+        // The other slot now walks: each short sentence settles and frees it.
+        await h.synth.settle("Three.")
+        await h.synth.waitForStarts(3)
+        await h.synth.settle("Four.")
+        await h.synth.waitForStarts(4)
+
+        // Sentence five is under way while sentence one is still playing — the
+        // whole point. A one-ahead window would not have reached it until
+        // playback was on sentence four.
+        XCTAssertEqual(await h.synth.startedTexts, ["Two.", "Three.", "Four.", "Five."])
+        let playback = await h.manager.result(id: h.jobId)?.playbackState
+        XCTAssertEqual(playback, .queued, "playback should still be on sentence one")
+    }
+
+    /// The window has to stop at the end of the answer rather than running off
+    /// the end of the segment list.
+    func testDoesNotLookPastTheLastSentence() async {
+        let h = await startWindowHarness(sentences: 1)
+        await h.gate.synthesizeNext()
+        try? await Task.sleep(for: .milliseconds(20))
+
+        XCTAssertEqual(await h.synth.startedTexts, [])
     }
 }
 
-/// Records the texts `prefetch` was called with.
-///
-/// Lock-guarded rather than an actor because `prefetch` is a synchronous
-/// `@Sendable` closure: recording on the caller's thread is what lets a started
-/// playback stand in as a barrier, instead of the test sleeping and hoping.
-private final class Recorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var texts: [String] = []
-    func record(_ text: String) { lock.lock(); texts.append(text); lock.unlock() }
-    var all: [String] { lock.lock(); defer { lock.unlock() }; return texts }
+/// One job, `sentences` sentences long, with both halves of synthesis under the
+/// test's control: `gate` owns the sentence being played (its `onSynthesized`),
+/// `synth` owns every lookahead.
+private struct WindowHarness {
+    let manager: SpeechJobManager
+    let gate: PlaybackGate
+    let synth: SynthesisGate
+    let jobId: String
+}
+
+/// Enqueue one job and wait until sentence one has been handed to playback and
+/// its lookahead, if any, has actually reached the synthesizer. Both barriers
+/// matter: the window is opened synchronously, but starts its requests in
+/// detached tasks.
+private func startWindowHarness(sentences: Int) async -> WindowHarness {
+    let manager = SpeechJobManager()
+    let gate = PlaybackGate()
+    let synth = SynthesisGate()
+    let words = ["One.", "Two.", "Three.", "Four.", "Five."]
+    await manager.configure(
+        play: { _, _, onStart, onSynthesized in
+            await gate.play(onStart: onStart, onSynthesized: onSynthesized)
+        },
+        prefetch: { text, _ in await synth.synthesize(text) },
+        halt: {})
+    let accepted = await manager.enqueue(
+        text: words.prefix(sentences).joined(separator: " "), voice: "af_heart")!
+    await gate.waitForStarts(1)
+    if sentences > 1 { await synth.waitForStarts(1) }
+    return WindowHarness(manager: manager, gate: gate, synth: synth, jobId: accepted.id)
+}
+
+/// Stands in for the synthesizer behind `prefetch`: records what was asked for,
+/// and holds each request open until the test settles it by name.
+private actor SynthesisGate {
+    private var started: [String] = []
+    private var pending: [String: CheckedContinuation<Void, Never>] = [:]
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    /// Sentence segments carry their trailing space; tests name them without.
+    private static func key(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func synthesize(_ text: String) async {
+        let name = Self.key(text)
+        started.append(name)
+        let ready = waiters.filter { $0.0 <= started.count }
+        waiters.removeAll { $0.0 <= started.count }
+        ready.forEach { $0.1.resume() }
+        await withCheckedContinuation { pending[name] = $0 }
+    }
+
+    var startedTexts: [String] { started }
+
+    func settle(_ name: String) { pending.removeValue(forKey: name)?.resume() }
+
+    func waitForStarts(_ count: Int) async {
+        guard started.count < count else { return }
+        await withCheckedContinuation { waiters.append((count, $0)) }
+    }
 }
 
 private actor Counter {
@@ -210,11 +278,14 @@ private actor PlaybackGate {
     private var startWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var completions: [CheckedContinuation<Bool, Never>] = []
     private var onStarts: [@Sendable () -> Void] = []
+    private var onSyntheses: [@Sendable () -> Void] = []
 
-    func play(onStart: @escaping @Sendable () -> Void) async -> Bool {
+    func play(onStart: @escaping @Sendable () -> Void,
+              onSynthesized: @escaping @Sendable () -> Void = {}) async -> Bool {
         await withCheckedContinuation { continuation in
             completions.append(continuation)
             onStarts.append(onStart)
+            onSyntheses.append(onSynthesized)
             starts += 1
             let ready = startWaiters.filter { $0.0 <= starts }
             startWaiters.removeAll { $0.0 <= starts }
@@ -225,6 +296,13 @@ private actor PlaybackGate {
     func startNext() {
         precondition(!onStarts.isEmpty)
         onStarts.removeFirst()()
+    }
+
+    /// Report that the sentence now playing has all of its audio — a distinct
+    /// moment from `startNext` (sound began) and `finishNext` (sound ended).
+    func synthesizeNext() {
+        precondition(!onSyntheses.isEmpty)
+        onSyntheses.removeFirst()()
     }
 
     func waitForStarts(_ count: Int) async {

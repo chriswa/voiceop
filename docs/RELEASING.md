@@ -140,3 +140,11 @@ It's stapled, so it also verifies offline.
   later, then re-zip.
 - **`spctl`/Gatekeeper rejects the app on the other Mac** — it wasn't notarized or
   wasn't stapled. Re-run the release; don't hand-sign around it.
+- **The patch number is a build counter, not a release counter.** It lives in the
+  untracked `.build-number` and every `make-app.sh` build takes one, so consecutive
+  releases are not consecutive versions. Nothing is wrong; the numbers only have to
+  rise. If the file is missing (fresh clone) the counter resumes from the version in
+  the committed `Info.plist`, which is why step 1 commits it.
+- **`make-release.sh` builds whatever version `Info.plist` records** — it never
+  allocates one. Skipping step 1 therefore re-releases the version already published,
+  and `gh release create` then fails on the existing tag. Run `bump-version.sh` first.

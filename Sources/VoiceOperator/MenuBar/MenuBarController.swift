@@ -9,6 +9,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Shown only while some app holds secure event input — see `update(secureInputHolder:)`.
     private let secureInputWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
+    private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
     var onMuteSpeech: ((Bool) -> Void)?
@@ -17,6 +18,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onRestart: (() -> Void)?
     var launchAtLoginState: (() -> Bool)?
     var onToggleLaunchAtLogin: (() -> Bool)?
+    /// Reads and flips the tap-to-toggle trigger preference. The flip closure
+    /// returns the state afterwards so the checkmark can follow it.
+    var tapToToggleState: (() -> Bool)?
+    var onToggleTapToToggle: (() -> Bool)?
     var sttHistoryProvider: (() -> [STTHistoryEntry])?
     var commandHistoryProvider: (() -> [CommandHistoryEntry])?
     var onRetrySTT: ((UUID) -> Void)?
@@ -51,6 +56,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         summarize.keyEquivalentModifierMask = [.command, .control]
         summarize.target = self; menu.addItem(summarize)
         menu.addItem(.separator())
+        tapToToggle.target = self; menu.addItem(tapToToggle)
         let copyPath = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
         copyPath.target = self; menu.addItem(copyPath)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -91,6 +97,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === self.menu else { return }
         onMenuOpenChanged?(true)
+        tapToToggle.state = (tapToToggleState?() ?? false) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand)
     }
@@ -126,6 +133,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func summarizeClipboard() { onSummarizeClipboard?() }
     @objc private func restart() { onRestart?() }
     @objc private func toggleLogin() { _ = onToggleLaunchAtLogin?() }
+    @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
     @objc private func copyLogPath() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(Log.fileURL.path, forType: .string) }
 
     private func refreshIcon() {

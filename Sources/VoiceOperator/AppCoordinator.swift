@@ -42,6 +42,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onRestart = { Relauncher.restartAfterTermination() }
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
+        menuBar.tapToToggleState = { HotkeyPreferences.tapToToggle }
+        menuBar.onToggleTapToToggle = { [weak self] in
+            HotkeyPreferences.tapToToggle.toggle()
+            let on = HotkeyPreferences.tapToToggle
+            self?.hotkey.tapToToggle = on
+            Log.log("hotkey mode: \(on ? "tap-to-toggle" : "hold / double-tap-lock")")
+            return on
+        }
 
         hotkey.onStart = { [weak self] mode, trace in self?.arbiter.beginDictation(mode: mode, trace: trace) }
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation(context: Self.frontmostContext()) }
@@ -50,6 +58,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
+        hotkey.tapToToggle = HotkeyPreferences.tapToToggle
         installHotkeyWhenTrusted()
         watchSecureInput()
         do { try speechService.start() } catch { Log.log("speech HTTP start failed: \(error)") }

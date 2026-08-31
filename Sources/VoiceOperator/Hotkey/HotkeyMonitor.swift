@@ -31,6 +31,18 @@ import IOKit.hid
 /// it likewise uses only to recognise a second quick press — never to delay the
 /// start of capture.
 ///
+/// ## Tap-to-toggle: a simpler alternative
+///
+/// Set `tapToToggle` (from the menu preference) and the trigger drops to a
+/// single model: **every key-down flips recording on or off, and key-up is
+/// ignored.** A first press starts dictating hands-free and the next press
+/// stops it, so a hold, a tap and a double-tap all collapse to "press to start,
+/// press to stop" (a double-tap being a quick start immediately stopped). It is
+/// implemented as one change — a first press enters `.locked` rather than
+/// `.holding` — because `.locked` already means "recording, next press ends it".
+/// Everything downstream follows: key-up is a no-op in `.locked`, and the ⌘-lock
+/// (which only fires from `.holding`) has nothing to do.
+///
 /// **Ctrl+Fn (command mode) is decided the same way**: on the stop side of the
 /// question, not by blocking the start. Whether Control is part of the gesture
 /// stays open for `DictationModeDecision.window` after key-down, so a chord whose
@@ -108,6 +120,17 @@ final class HotkeyMonitor: @unchecked Sendable {
     }
     private let stateLock = NSLock()
     private var suppressChords = false
+
+    /// Selects the trigger's gesture model — see the tap-to-toggle section above.
+    /// Guarded by `stateLock` because the menu flips it from the main thread while
+    /// the state machine reads it on the hotkey thread (at key-down). Switching it
+    /// mid-dictation needs no reset: the only difference is which state a first
+    /// press enters, and every other transition already handles both.
+    var tapToToggle: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return toggleMode }
+        set { stateLock.lock(); toggleMode = newValue; stateLock.unlock() }
+    }
+    private var toggleMode = false
 
     /// Live Control-key state, updated from every flagsChanged event on the
     /// hotkey thread. Used only to seed `DictationModeDecision` at key-down;
@@ -411,7 +434,10 @@ final class HotkeyMonitor: @unchecked Sendable {
             // already flowing.
             downTimestamp = timestamp
             downTime = Date()
-            gesture = .holding
+            // Default model: begin as a hold, resolved later on the stop side.
+            // Tap-to-toggle: lock immediately, so key-up is ignored and only the
+            // next press stops it.
+            gesture = tapToToggle ? .locked : .holding
             // `DictationModeDecision` is `@MainActor`, so create it on main with
             // the Control state observed on this thread at the key event. FIFO
             // on `DispatchQueue.main` keeps a following Control press's hop

@@ -24,6 +24,8 @@ final class AudioArbiter {
     private let transcriber: Transcriber
     private let liveTranscriber: LiveTranscriber?
     private let tts = TTSEngine()
+    /// Full-width word-highlight bar, driven in time with TTS playback.
+    let wordOverlay = WordOverlayController()
     private let historyStore = HistoryStore()
     private let sttDir: URL
 
@@ -776,17 +778,36 @@ final class AudioArbiter {
                       onSynthesized: @escaping @Sendable () -> Void = {}) async -> Bool {
         onStatus?(.requestingTTS)
         startTTSWaitCue()
-        let result = await tts.play(Utterance(text: text, voiceID: voiceID), onStart: { [weak self] in
+        let utterance = Utterance(text: text, voiceID: voiceID)
+        // Fetch word timings alongside synthesis so they're ready when audio
+        // starts; the overlay is anchored at the first audible sample.
+        let timingsTask = Task { await self.tts.wordTimings(for: utterance) }
+        let result = await tts.play(utterance, onStart: { [weak self] in
             self?.stopTTSWaitCue()
             self?.onStatus?(.speaking)
+            self?.wordOverlay.begin(anchor: Date(), timings: { await timingsTask.value })
             onStart()
         }, onSynthesized: { onSynthesized() })
+        // The overlay is NOT hidden here: it stays up across the job's sentences
+        // (blank crosshair between them) and is hidden only when the whole job
+        // goes idle, via `setSpeechActive(false)`.
         stopTTSWaitCue()
         if !isDictating { onStatus?(.idle) }
         return result
     }
-    func haltSpeech() { tts.stop() }
-    func prefetchSentence(text: String, voiceID: String) async { await tts.prefetch(text: text, voiceID: voiceID) }
+    func haltSpeech() { tts.stop(); wordOverlay.stop() }
+    /// Overlay visibility follows the speech queue: shown when a job starts
+    /// synthesizing (before audio, so the window is warm and no opening words
+    /// are missed), hidden when the queue goes idle.
+    func setSpeechActive(_ active: Bool) { if active { wordOverlay.activate() } else { wordOverlay.stop() } }
+    func prefetchSentence(text: String, voiceID: String) async {
+        await tts.prefetch(text: text, voiceID: voiceID)
+        // Warm word timings for this lookahead sentence too, so when it reaches
+        // playback the overlay has them immediately (no first-word miss). Cached,
+        // so the play-time fetch is then free. Fire-and-forget.
+        let utterance = Utterance(text: text, voiceID: voiceID)
+        Task { _ = await tts.wordTimings(for: utterance) }
+    }
 }
 
 struct DictationContext: Sendable {

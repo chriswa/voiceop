@@ -416,6 +416,31 @@ no reverse-engineering:
   British `bf_`/`bm_`); `NameVoiceTable` maps the full 81-name Cartesia-era roster onto them
   (~3 gender-matched call-signs per voice) so the name pool stays deep, while
   `NameVoiceRegistry` hands each concurrent session a distinct voice until all 27 are in use.
+- `POST {base}/timestamps` (same body as `/synthesize`) returns word-level timings as JSON
+  `{ words: [{ word, start, end }], duration, ... }`, times in seconds from the first audible
+  sample. Kokoro's duration predictor assigns frames to every phoneme before the vocoder runs,
+  so these are the model's own alignment, not a forced-alignment pass. A **separate** call from
+  the audio stream on purpose: `/synthesize`'s body must stay byte-exact PCM, and a word's end
+  time isn't known until its chunk is generated (can't front-load without killing TTFA). Timings
+  are deterministic for a given (text, voice, speed), so the two responses stay in lock-step.
+  `KokoroSynthesizer.wordTimings` fetches them; `TTSEngine` memoizes per clip.
+
+### Word-highlight overlay
+
+While TTS plays, a full-width black bar across the screen centre shows the word currently being
+spoken (`Overlay/WordOverlayController` + `WordOverlayView`, driven from `AudioArbiter`). Each
+word is aligned Spritz/RSVP-style: its **Optimal Recognition Point** (`ORP.pivotIndex`) is pinned
+to a fixed horizontal focal point (marked by the crosshair), so the reader's eye stays parked on one spot.
+A dim (30% white) crosshair inside the band marks the fixation point: a vertical guide spanning the
+band height and a full-width horizontal guide, crossing at the pivot letter's **x-height centre** — the
+word is positioned so its lowercase-body midline lands on screen centre, which is where the eye
+fixates in reading (not the em-box centre, which sits high on ascender space). The overlay window is
+full-screen and transparent, painting only the guides, the band and the word; glyphs carry no stroke
+(a stroke leaves join artifacts in the letters' bowls).
+The bar is anchored at the first audible sample (`onStart`) and advanced by a 60 Hz clock against
+the fetched timings — Kokoro plays a sentence contiguously, so elapsed wall-time tracks the audio
+closely enough without threading a sample clock out of the player. Toggle: menu **Word Overlay**
+(`OverlayPreferences.wordOverlayEnabled`, default on).
 
 ---
 

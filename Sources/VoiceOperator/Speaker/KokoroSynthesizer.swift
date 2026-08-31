@@ -193,6 +193,33 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         return WAVFile(sampleRate: sampleRate, samples: samples).data
     }
 
+    // MARK: - Word timings
+
+    private struct TimingsResponse: Decodable {
+        let words: [Word]
+        struct Word: Decodable { let word: String; let start: Double; let end: Double }
+    }
+
+    /// Fetch per-word timings from Kokoro's `/timestamps` endpoint (same body as
+    /// `/synthesize`). A separate call from the audio stream on purpose — see the
+    /// endpoint's own note — so it never touches the byte-exact PCM path.
+    func wordTimings(text: String, voiceID: String) async throws -> [WordTiming] {
+        var req = URLRequest(url: Self.endpoint("timestamps"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 30
+        Self.applyTTSHeaders(to: &req)
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "text": text, "voice": voiceID, "speed": speed,
+        ])
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw SpeakerError.http(status: (resp as? HTTPURLResponse)?.statusCode ?? -1, body: "")
+        }
+        let decoded = try JSONDecoder().decode(TimingsResponse.self, from: data)
+        return decoded.words.map { WordTiming(word: $0.word, start: $0.start, end: $0.end) }
+    }
+
     // MARK: - Shared request / URL helpers
 
     private func makeRequest(text: String, voiceID: String) -> URLRequest {

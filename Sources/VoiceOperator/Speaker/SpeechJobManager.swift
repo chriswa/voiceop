@@ -39,6 +39,15 @@ actor SpeechJobManager {
     /// Synthesize a clip without playing it, returning when it has settled.
     private var prefetch: (@Sendable (String, String) async -> Void)?
     private var halt: (@Sendable () -> Void)?
+    /// Fires `true` when speech becomes active (a sentence is handed to
+    /// playback) and `false` when the queue goes idle (the whole job finished or
+    /// was interrupted). Drives the word overlay's visibility so it appears at
+    /// synthesis start and persists across a job's sentences. `current != nil`
+    /// is the signal: it is set before audio and stays set across the
+    /// between-sentence gap (reset synchronously by `pump`), going nil only at a
+    /// true finish/interrupt.
+    private var onSpeechActivity: (@Sendable (Bool) -> Void)?
+    private var speechActive = false
 
     /// How many clips may be synthesizing at once, across the whole queue.
     ///
@@ -75,8 +84,22 @@ actor SpeechJobManager {
 
     func configure(play: @escaping @Sendable (String, String, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool,
                    prefetch: @escaping @Sendable (String, String) async -> Void,
-                   halt: @escaping @Sendable () -> Void) {
-        self.play = play; self.prefetch = prefetch; self.halt = halt; configured = true; pump()
+                   halt: @escaping @Sendable () -> Void,
+                   onSpeechActivity: @escaping @Sendable (Bool) -> Void = { _ in }) {
+        self.play = play; self.prefetch = prefetch; self.halt = halt
+        self.onSpeechActivity = onSpeechActivity
+        configured = true; pump()
+    }
+
+    /// Emit an active/idle transition when `current` crosses between nil and set.
+    /// Called from a `defer` in every method that can change `current`, so it
+    /// observes the settled value at method exit — never the transient nil that
+    /// `finishedSentence`→`pump` passes through between a job's sentences.
+    private func refreshActivity() {
+        let active = current != nil
+        guard active != speechActive else { return }
+        speechActive = active
+        onSpeechActivity?(active)
     }
 
     func enqueue(text: String, voice: String, local: Bool = false) -> Result? {
@@ -193,6 +216,7 @@ actor SpeechJobManager {
     }
 
     private func pump() {
+        defer { refreshActivity() }
         guard configured, !dictating, !muted, current == nil, let play else {
             // Waiting behind a dictation, or behind the sentence now playing, is
             // ordinary queueing and says nothing. The states below are the ones
@@ -307,6 +331,7 @@ actor SpeechJobManager {
         update(id) { $0.playbackState = .speaking }
     }
     private func finishedSentence(id: String, completed: Bool) {
+        defer { refreshActivity() }
         guard current == id, let job = jobs[id] else { return }
         current = nil
         if !completed {
@@ -327,6 +352,7 @@ actor SpeechJobManager {
         }
     }
     private func interruptCurrent(state: State) {
+        defer { refreshActivity() }
         guard let id = current, let job = jobs[id] else { return }
         Log.log("speech job \(id): \(state.rawValue) at sentence \(job.next + 1)/\(job.segments.count)")
         // Halt the audio before announcing the state, so a client that reacts

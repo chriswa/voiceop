@@ -26,7 +26,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                                                      onStart: onStart, onSynthesized: onSynthesized) ?? false
                 },
                 prefetch: { [weak self] text, voice in await self?.arbiter.prefetchSentence(text: text, voiceID: voice) },
-                halt: { [weak self] in Task { @MainActor in self?.arbiter.haltSpeech() } })
+                halt: { [weak self] in Task { @MainActor in self?.arbiter.haltSpeech() } },
+                onSpeechActivity: { [weak self] active in Task { @MainActor in self?.arbiter.setSpeechActive(active) } })
         }
 
         menuBar.sttHistoryProvider = { [weak self] in self?.arbiter.sttHistory ?? [] }
@@ -42,6 +43,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onRestart = { Relauncher.restartAfterTermination() }
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
+        arbiter.wordOverlay.isEnabled = OverlayPreferences.wordOverlayEnabled
+        menuBar.wordOverlayState = { OverlayPreferences.wordOverlayEnabled }
+        menuBar.onToggleWordOverlay = { [weak self] in
+            OverlayPreferences.wordOverlayEnabled.toggle()
+            let on = OverlayPreferences.wordOverlayEnabled
+            self?.arbiter.wordOverlay.isEnabled = on
+            Log.log("word overlay: \(on ? "enabled" : "disabled")")
+            return on
+        }
         menuBar.tapToToggleState = { HotkeyPreferences.tapToToggle }
         menuBar.onToggleTapToToggle = { [weak self] in
             HotkeyPreferences.tapToToggle.toggle()

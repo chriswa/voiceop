@@ -10,6 +10,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let secureInputWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
+    private let wordOverlay = NSMenuItem(title: "Word Overlay", action: #selector(toggleWordOverlay), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
     var onMuteSpeech: ((Bool) -> Void)?
@@ -22,6 +23,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// returns the state afterwards so the checkmark can follow it.
     var tapToToggleState: (() -> Bool)?
     var onToggleTapToToggle: (() -> Bool)?
+    var wordOverlayState: (() -> Bool)?
+    var onToggleWordOverlay: (() -> Bool)?
     var sttHistoryProvider: (() -> [STTHistoryEntry])?
     var commandHistoryProvider: (() -> [CommandHistoryEntry])?
     var onRetrySTT: ((UUID) -> Void)?
@@ -57,6 +60,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         summarize.target = self; menu.addItem(summarize)
         menu.addItem(.separator())
         tapToToggle.target = self; menu.addItem(tapToToggle)
+        wordOverlay.target = self; menu.addItem(wordOverlay)
         let copyPath = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
         copyPath.target = self; menu.addItem(copyPath)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -98,6 +102,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         guard menu === self.menu else { return }
         onMenuOpenChanged?(true)
         tapToToggle.state = (tapToToggleState?() ?? false) ? .on : .off
+        wordOverlay.state = (wordOverlayState?() ?? true) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand)
     }
@@ -134,6 +139,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func restart() { onRestart?() }
     @objc private func toggleLogin() { _ = onToggleLaunchAtLogin?() }
     @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
+    @objc private func toggleWordOverlay() { wordOverlay.state = (onToggleWordOverlay?() ?? true) ? .on : .off }
     @objc private func copyLogPath() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(Log.fileURL.path, forType: .string) }
 
     private func refreshIcon() {

@@ -25,6 +25,17 @@ protocol SpeechSynthesizer: Sendable {
 
     /// One-shot WAV. Fallback path (e.g. when live audio playback can't start).
     func synthesizeWAV(text: String, voiceID: String) async throws -> Data
+
+    /// Word-level timings for `text`, in seconds from the first audible sample,
+    /// for read-along / word-highlight overlays. Deterministic for a given
+    /// (text, voice), so it lines up with the audio from `synthesizeStream`.
+    /// Providers that can't produce timings return an empty array.
+    func wordTimings(text: String, voiceID: String) async throws -> [WordTiming]
+}
+
+extension SpeechSynthesizer {
+    /// Default: no timings. A provider that supports them overrides this.
+    func wordTimings(text: String, voiceID: String) async throws -> [WordTiming] { [] }
 }
 
 enum SpeakerError: Error {

@@ -26,6 +26,10 @@ final class TTSEngine {
     /// provider call runs; duplicates await this task and play the cached file.
     private var inFlight: [String: Task<URL, Error>] = [:]
 
+    /// Word timings by cache key, so a replay or a cache-hit clip doesn't
+    /// re-synthesize them. Session-scoped; timings are deterministic per clip.
+    private var timingsCache: [String: [WordTiming]] = [:]
+
     /// Bumped by `halt()`. A stream that was still synthesizing when halted has no
     /// live playback left to stop once it resolves, so playback paths re-check this
     /// counter and skip if a halt happened meanwhile. Synthesis itself always runs
@@ -212,6 +216,21 @@ final class TTSEngine {
         guard haltCount == mark else { return false }
         onStart()
         return await filePlayer.play(url: url)
+    }
+
+    /// Word timings for an utterance, for the highlight overlay. Memoized per
+    /// clip; returns `[]` on any failure (the overlay just shows nothing).
+    func wordTimings(for u: Utterance) async -> [WordTiming] {
+        let key = cache.key(text: u.spokenText, voiceID: u.voiceID)
+        if let hit = timingsCache[key] { return hit }
+        do {
+            let timings = try await synth.wordTimings(text: u.spokenText, voiceID: u.voiceID)
+            timingsCache[key] = timings
+            return timings
+        } catch {
+            Log.log("tts timings: \(Log.clip(u.spokenText)) failed: \(error)")
+            return []
+        }
     }
 
     func halt() {

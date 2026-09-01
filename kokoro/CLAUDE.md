@@ -93,12 +93,14 @@ Recognized vars:
 | `PORT` | `3004` | This Mac uses `56841`. Never change the code default. |
 | `KOKORO_DEVICE` | auto (`cuda`→`mps`→`cpu`) | Force e.g. `cpu` if MPS hits an unsupported op. |
 | `PYTORCH_ENABLE_MPS_FALLBACK` | unset | Set `1` on Mac so unsupported MPS ops fall back to CPU instead of erroring. |
+| `KOKORO_EGRESS_PACING` | `on` | `/synthesize` meters audio out at ~1.3× realtime to smooth a lossy WAN hop (phone → Cloudflare Tunnel → production box). Set `off` on a box whose only client is local — it otherwise throttles delivery of audio that's already generated far faster than realtime. Not auto-detected by client IP: cloudflared runs on the production box, so real WAN requests arrive from 127.0.0.1 there too. |
 
 This Mac's `.env`:
 ```
 PORT=56841
 KOKORO_DEVICE=mps
 PYTORCH_ENABLE_MPS_FALLBACK=1
+KOKORO_EGRESS_PACING=off
 ```
 
 ---
@@ -254,6 +256,11 @@ Despite PLAN.md's OpenAI-compatible aspiration, the live API is native — there
 - `GET /voices` — active voices (block-listed ones filtered out)
 - `POST /synthesize` — body `{ "text": str, "voice"?: str, "speed"?: float }`.
   Returns streaming 16-bit mono WAV @ 24000 Hz.
+- `POST /timestamps` (+ `OPTIONS`) — same body as `/synthesize`. Returns JSON
+  `{ words: [{ word, start, end }], duration, sample_rate, ... }` with word-level
+  timings (seconds from utterance start) for read-along / word-highlight overlays.
+  From Kokoro's own duration predictor (`KPipeline` token `start_ts`/`end_ts`),
+  deterministic for a given (text, voice, speed) so it lines up with `/synthesize`.
 - `POST /voices/block` (+ `OPTIONS`) — manage `blocked_voices.json`.
 
 Defaults/limits: `DEFAULT_VOICE=af_heart`, `DEFAULT_SPEED=1.2`,

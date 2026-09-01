@@ -64,6 +64,24 @@ MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 DEFAULT_SPEED = 1.2
 
+# ── egress pacing toggle ────────────────────────────────────────────────────────
+# When on, /synthesize meters audio out at ~1.3x realtime (see the long note in
+# synthesize()). That smooths a lossy WAN hop (phone -> Cloudflare Tunnel -> the
+# production box), but on a machine whose only client is local it just throttles
+# delivery of audio that's already generated far faster than realtime — turning a
+# ~0.4s job into a multi-second trickle and starving the client's prefetch. So
+# it's a switch, defaulting ON to preserve the production install (which has no
+# .env and relies on defaults); the Mac's .env sets KOKORO_EGRESS_PACING=off.
+# Deliberately NOT auto-detected by client IP: cloudflared runs on the production
+# box, so genuinely-remote requests arrive from 127.0.0.1 there too.
+def _env_flag(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() not in ("0", "off", "false", "no", "")
+
+EGRESS_PACING = _env_flag("KOKORO_EGRESS_PACING", True)
+
 # ── language / voice catalog ───────────────────────────────────────────────────
 # lang_code -> human label. Only languages usable with currently-installed
 # deps (misaki[en] + system espeak-ng). See module docstring.
@@ -200,6 +218,55 @@ def _get_pipeline(lang_code: str):
             _pipelines[lang_code] = KPipeline(lang_code=lang_code, repo_id=REPO_ID, model=_get_model())
         return _pipelines[lang_code]
 
+# ── duration-only model (for /timestamps) ────────────────────────────────────────
+# Word timings come entirely from Kokoro's `pred_dur`, which the model computes
+# *before* the vocoder — and the vocoder is ~76% of a synthesis pass on this box.
+# This wraps the shared KModel and runs only the duration-predictor half, so
+# /timestamps costs ~1/4 of a full synth and stops competing with real audio work
+# on the inference lock. It exposes the few attributes KPipeline reads (device,
+# vocab, context_length) plus a KModel-compatible __call__, so it drops straight
+# into KPipeline.__call__(..., model=<this>). It mirrors KModel.forward /
+# forward_with_tokens up to pred_dur (kokoro 0.9.x internals); if that path ever
+# raises, _word_timings falls back to a full synthesis pass, so a library change
+# costs speed here, never correct timings.
+_duration_model = None
+
+class _DurationOnlyModel:
+    def __init__(self, model):
+        self._m = model
+        self.device = model.device
+        self.vocab = model.vocab
+        self.context_length = model.context_length
+
+    @torch.no_grad()
+    def __call__(self, phonemes, ref_s, speed=1, return_output=False):
+        from kokoro import KModel
+        m = self._m
+        input_ids = [i for i in (m.vocab.get(p) for p in phonemes) if i is not None]
+        assert len(input_ids) + 2 <= m.context_length
+        input_ids = torch.LongTensor([[0, *input_ids, 0]]).to(m.device)
+        ref_s = ref_s.to(m.device)
+        input_lengths = torch.full((input_ids.shape[0],), input_ids.shape[-1],
+                                   device=input_ids.device, dtype=torch.long)
+        text_mask = torch.arange(input_lengths.max()).unsqueeze(0)
+        text_mask = text_mask.expand(input_lengths.shape[0], -1).type_as(input_lengths)
+        text_mask = torch.gt(text_mask + 1, input_lengths.unsqueeze(1)).to(m.device)
+        bert_dur = m.bert(input_ids, attention_mask=(~text_mask).int())
+        d_en = m.bert_encoder(bert_dur).transpose(-1, -2)
+        s = ref_s[:, 128:]
+        d = m.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+        x, _ = m.predictor.lstm(d)
+        duration = m.predictor.duration_proj(x)
+        duration = torch.sigmoid(duration).sum(axis=-1) / speed
+        pred_dur = torch.round(duration).clamp(min=1).long().squeeze().cpu()
+        return KModel.Output(audio=None, pred_dur=pred_dur) if return_output else None
+
+def _get_duration_model():
+    global _duration_model
+    if _duration_model is None:
+        _duration_model = _DurationOnlyModel(_get_model())
+    return _duration_model
+
 # ── startup: always loaded, no /load or /unload — this is the only engine we
 # run, so there's no reason to ever have it not ready.
 print("Loading Kokoro model...", flush=True)
@@ -218,6 +285,34 @@ def _wav_stream_header(sample_rate=SAMPLE_RATE, channels=1, bits=16) -> bytes:
         b'fmt ', 16, 1, channels, sample_rate,
         byte_rate, block_align, bits,
         b'data', 0xFFFFFFFF)
+
+class _BadParams(Exception):
+    """A caller supplied invalid synthesis parameters; the message is safe to
+    hand straight back to the client as a 400."""
+
+def _parse_synth_params(body: dict):
+    """Validate the shared {text, voice, speed} request body used by both
+    /synthesize and /timestamps. Returns the cleaned (text, voice, speed) or
+    raises _BadParams with a client-facing message. Single source of truth so
+    the two endpoints can't drift on what they accept."""
+    text  = (body.get("text") or "").strip()
+    voice = body.get("voice", DEFAULT_VOICE)
+    speed = body.get("speed", DEFAULT_SPEED)
+    if not text:
+        raise _BadParams("text is required")
+    if len(text) > MAX_TEXT_LEN:
+        raise _BadParams(f"text exceeds {MAX_TEXT_LEN} character limit")
+    if voice not in VOICE_IDS:
+        raise _BadParams(f"unknown voice '{voice}'")
+    if voice in BLOCKED_VOICES:
+        raise _BadParams(f"voice '{voice}' is block-listed")
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        raise _BadParams("speed must be a number")
+    if not (MIN_SPEED <= speed <= MAX_SPEED):
+        raise _BadParams(f"speed must be between {MIN_SPEED} and {MAX_SPEED}")
+    return text, voice, speed
 
 def _cors(request: Request | None = None):
     # A bare "*" is rejected by browsers on credentialed requests (fetch with
@@ -284,26 +379,10 @@ async def block_voice(request: Request):
 @app.post("/synthesize")
 async def synthesize(request: Request):
     body = await request.json()
-    text  = (body.get("text") or "").strip()
-    voice = body.get("voice", DEFAULT_VOICE)
-    speed = body.get("speed", DEFAULT_SPEED)
-
-    if not text:
-        return JSONResponse({"error": "text is required"}, status_code=400, headers=_cors(request))
-    if len(text) > MAX_TEXT_LEN:
-        return JSONResponse({"error": f"text exceeds {MAX_TEXT_LEN} character limit"},
-                             status_code=400, headers=_cors(request))
-    if voice not in VOICE_IDS:
-        return JSONResponse({"error": f"unknown voice '{voice}'"}, status_code=400, headers=_cors(request))
-    if voice in BLOCKED_VOICES:
-        return JSONResponse({"error": f"voice '{voice}' is block-listed"}, status_code=400, headers=_cors(request))
     try:
-        speed = float(speed)
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "speed must be a number"}, status_code=400, headers=_cors(request))
-    if not (MIN_SPEED <= speed <= MAX_SPEED):
-        return JSONResponse({"error": f"speed must be between {MIN_SPEED} and {MAX_SPEED}"},
-                             status_code=400, headers=_cors(request))
+        text, voice, speed = _parse_synth_params(body)
+    except _BadParams as e:
+        return JSONResponse({"error": str(e)}, status_code=400, headers=_cors(request))
 
     lang_code = voice[0]
     pipeline = _get_pipeline(lang_code)
@@ -384,17 +463,35 @@ async def synthesize(request: Request):
         return True
 
     async def generate():
-        print(f"[tts {request_id}] start chars={len(text)} voice={voice} speed={speed}", flush=True)
+        print(f"[tts {request_id}] start chars={len(text)} voice={voice} "
+              f"speed={speed} pacing={'on' if EGRESS_PACING else 'off'}", flush=True)
         try:
             yield _wav_stream_header(SAMPLE_RATE)
 
+            buf = bytearray()
+
+            # ── unpaced fast path (local clients) ────────────────────────────
+            # Nothing to smooth over a loopback pipe, and the client does its
+            # own buffering: hand each generated chunk straight through the
+            # instant it's ready. Delivery becomes generation-bound (~RTF), so
+            # a whole sentence lands in a fraction of a second and the client
+            # can prefetch far ahead.
+            if not EGRESS_PACING:
+                while not gen_exhausted:
+                    if await request.is_disconnected():
+                        return
+                    del buf[:]
+                    await _pull_more(buf)
+                    if buf:
+                        yield bytes(buf)
+                return
+
+            # ── paced path (remote/WAN clients) ──────────────────────────────
             bytes_per_ms = SAMPLE_RATE * 2 / 1000  # int16 mono
 
             def _aligned(n_bytes):
                 n = int(n_bytes)
                 return n - (n % 2)  # keep on a 16-bit sample boundary
-
-            buf = bytearray()
 
         # Accumulate chunks until we have enough for the initial burst (or
         # the whole utterance is shorter than that and the pipeline's done).
@@ -434,6 +531,108 @@ async def synthesize(request: Request):
     return StreamingResponse(generate(), media_type="audio/wav",
         headers={**_cors(request), "X-Streaming": "true", "X-Model": "kokoro-82m", "X-Voice": voice,
                  "X-Speed": str(speed)})
+
+# ── word timestamps (for read-along / word-highlight overlays) ──────────────────
+# Kokoro's duration predictor assigns a frame count to every phoneme *before*
+# the vocoder runs, and KPipeline turns that into per-token start_ts/end_ts
+# (see KPipeline.join_timestamps). We surface those as word-level timings so a
+# client can highlight each word as it's spoken.
+#
+# This is a SEPARATE call from /synthesize rather than folded into that stream
+# on purpose: /synthesize streams raw WAV bytes and its clients (the macOS app's
+# PCM parser, the browser Web Audio path) depend on the body being nothing but
+# audio. A word's end time isn't known until its audio chunk has been generated,
+# so the full list can't be sent ahead of the audio without buffering the whole
+# utterance and destroying time-to-first-audio. Keeping timings on their own
+# JSON endpoint leaves the proven audio contract untouched; the client fires
+# both requests together and drives its overlay off a playback clock. Timings
+# are deterministic for a given (text, voice, speed) — the duration predictor
+# runs in eval mode with no sampling — so the two responses stay in lock-step.
+# pred_dur is in duration-predictor frames; join_timestamps counts half-frames
+# against MAGIC_DIVISOR=80, i.e. seconds = frames / 40. We use the same relation
+# to advance the cross-segment offset when there's no audio tensor to measure.
+_FRAMES_PER_SECOND = 40.0
+
+def _collect_timings(result, offset: float, words: list):
+    """Pull one pipeline Result's per-word timings into `words`, shifted by the
+    audio already emitted before it, and return the segment's own duration in
+    seconds. Works whether `result` carries real audio (full synth) or only
+    pred_dur (duration-only path)."""
+    for t in (result.tokens or []):
+        start, end = getattr(t, "start_ts", None), getattr(t, "end_ts", None)
+        word = t.text or ""
+        if start is None or end is None:
+            continue
+        if not any(ch.isalnum() for ch in word):
+            continue
+        words.append({"word": word,
+                      "start": round(offset + start, 3),
+                      "end": round(offset + end, 3)})
+    audio = result.audio
+    if audio is not None:
+        return len(audio) / SAMPLE_RATE
+    pred_dur = result.pred_dur
+    if pred_dur is not None:
+        return float(pred_dur.sum().item()) / _FRAMES_PER_SECOND
+    return 0.0
+
+def _run_timings(pipeline, model, text: str, voice: str, speed: float):
+    """Drive `pipeline` with `model` and collect (words, duration_seconds).
+    Per-chunk locking matches /synthesize: hold the inference lock only across
+    one model advance so a timing pass can't starve audio synthesis (MPS is not
+    safe to enter concurrently — see _inference_lock)."""
+    gen = pipeline(text, voice=voice, speed=speed, model=model)
+    words, offset = [], 0.0  # offset = cumulative seconds of prior chunks
+    while True:
+        with _inference_lock:
+            result = next(gen, None)
+        if result is None:
+            break
+        offset += _collect_timings(result, offset, words)
+    return words, offset
+
+def _word_timings(text: str, voice: str, speed: float):
+    """Return (words, duration_seconds) for `text`. Each word is
+    {"word", "start", "end"} in seconds from the utterance start; bare
+    punctuation/whitespace tokens are dropped (their time falls between the
+    surrounding words).
+
+    Fast path runs only Kokoro's duration predictor (no vocoder — see
+    _DurationOnlyModel), which is all word timings need. If those internals ever
+    change and it raises, fall back to a full synthesis pass so timings stay
+    correct."""
+    pipeline = _get_pipeline(voice[0])
+    try:
+        return _run_timings(pipeline, _get_duration_model(), text, voice, speed)
+    except Exception as e:
+        print(f"[ts] duration-only path failed ({type(e).__name__}: {e}); "
+              f"falling back to full synthesis", flush=True)
+        return _run_timings(pipeline, None, text, voice, speed)
+
+@app.options("/timestamps")
+def timestamps_opts(request: Request):
+    return JSONResponse({}, headers={**_cors(request),
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"})
+
+@app.post("/timestamps")
+async def timestamps(request: Request):
+    body = await request.json()
+    try:
+        text, voice, speed = _parse_synth_params(body)
+    except _BadParams as e:
+        return JSONResponse({"error": str(e)}, status_code=400, headers=_cors(request))
+
+    request_id = _new_request_id()
+    started = time.monotonic()
+    print(f"[ts {request_id}] start chars={len(text)} voice={voice} speed={speed}", flush=True)
+    words, duration = await run_in_threadpool(_word_timings, text, voice, speed)
+    elapsed_ms = (time.monotonic() - started) * 1000
+    print(f"[ts {request_id}] finish words={len(words)} dur={duration:.2f}s elapsed={elapsed_ms:.0f}ms", flush=True)
+    return JSONResponse(
+        {"model": "kokoro-82m", "voice": voice, "speed": speed,
+         "sample_rate": SAMPLE_RATE, "duration": round(duration, 3), "words": words},
+        headers={**_cors(request), "X-Model": "kokoro-82m", "X-Voice": voice, "X-Speed": str(speed)})
 
 # ── web UI ──────────────────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
@@ -545,6 +744,22 @@ HTML = r"""<!DOCTYPE html>
   -d '{"text": "Hello there.", "voice": "af_heart", "speed": 1.2}' \
   --output speech.wav</pre>
       <p>Response headers: <code>X-TTFA-MS</code>, <code>X-Total-MS</code>, <code>X-RTF</code>, <code>X-Audio-Duration</code>, <code>X-Streaming</code>, <code>X-Model</code>, <code>X-Voice</code>, <code>X-Speed</code>.</p>
+    </div>
+
+    <div class="endpoint">
+      <h3><span class="method">POST</span>/timestamps</h3>
+      <p>Returns word-level timings for read-along / word-highlight overlays as JSON. Same body as <code>/synthesize</code> (<code>text</code>, <code>voice</code>, <code>speed</code>). Times are in seconds from the start of the utterance and are deterministic for a given (text, voice, speed), so they line up with the audio from <code>/synthesize</code> requested with the same parameters.</p>
+      <pre>curl -X POST https://tts.chriswa.com/timestamps \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello there.", "voice": "af_heart", "speed": 1.2}'</pre>
+      <pre>{
+  "model": "kokoro-82m", "voice": "af_heart", "speed": 1.2,
+  "sample_rate": 24000, "duration": 0.9,
+  "words": [
+    {"word": "Hello", "start": 0.225, "end": 0.5},
+    {"word": "there", "start": 0.5, "end": 0.825}
+  ]
+}</pre>
     </div>
 
     <div class="endpoint">

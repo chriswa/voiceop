@@ -41,7 +41,10 @@ final class AudioArbiter {
     private(set) var sttHistory: [STTHistoryEntry] = []
     private(set) var commandHistory: [CommandHistoryEntry] = []
     private var lastPastedText: String?
-    private var isDictating = false
+    /// True from key-down until the transcript has been pasted and the closing
+    /// cue has had its moment. This is what "safe to restart" means
+    /// (see `RestartCoordinator`).
+    private(set) var isDictating = false
     private var transcriptionProgressTask: Task<Void, Never>?
     private var ttsWaitCueTask: Task<Void, Never>?
     private var live: LiveDictation?
@@ -229,6 +232,24 @@ final class AudioArbiter {
             guard let self, let current = self.live, current === live, !current.heardAudio else { return }
             Log.log("dictation: WARNING no microphone audio after \(Self.noAudioWarningSeconds)s — check mic permission/device")
             current.trace.note("no audio within \(Self.noAudioWarningSeconds)s")
+        }
+    }
+
+    /// The process is about to exit (`applicationWillTerminate`). Put the system
+    /// output back the way the user had it — a dictation mutes it, and a process
+    /// that dies mid-dictation otherwise leaves the Mac silent — and say so in the
+    /// log if a dictation is being lost, so the user's "where did my words go?"
+    /// has an answer. Nothing here waits: by this point the decision to quit has
+    /// been made (the cooperative path in `RestartCoordinator` is where waiting
+    /// happens).
+    func prepareForTermination() {
+        muter.restore()
+        guard isDictating else { return }
+        Log.log("dictation: WARNING terminating with a dictation in flight — it will not be pasted")
+        if let live {
+            live.trace.note("terminated mid-dictation")
+            live.trace.flush()
+            cancelStream(live)
         }
     }
 
@@ -778,14 +799,19 @@ final class AudioArbiter {
                       onSynthesized: @escaping @Sendable () -> Void = {}) async -> Bool {
         onStatus?(.requestingTTS)
         startTTSWaitCue()
-        let utterance = Utterance(text: text, voiceID: voiceID)
+        // Synthesize (and time) the preprocessed text so compound tokens split
+        // into per-piece timing and separators are spoken/stripped; the overlay
+        // is given the mapping so it shows the ORIGINAL text and highlights each
+        // spoken piece — a `/` said as "slash" still lights up the literal `/`.
+        let prepared = TTSPreprocess.prepare(text)
+        let utterance = Utterance(text: prepared.ttsText, voiceID: voiceID)
         // Fetch word timings alongside synthesis so they're ready when audio
         // starts; the overlay is anchored at the first audible sample.
         let timingsTask = Task { await self.tts.wordTimings(for: utterance) }
         let result = await tts.play(utterance, onStart: { [weak self] in
             self?.stopTTSWaitCue()
             self?.onStatus?(.speaking)
-            self?.wordOverlay.begin(anchor: Date(), timings: { await timingsTask.value })
+            self?.wordOverlay.begin(anchor: Date(), prepared: prepared, timings: { await timingsTask.value })
             onStart()
         }, onSynthesized: { onSynthesized() })
         // The overlay is NOT hidden here: it stays up across the job's sentences
@@ -801,11 +827,14 @@ final class AudioArbiter {
     /// are missed), hidden when the queue goes idle.
     func setSpeechActive(_ active: Bool) { if active { wordOverlay.activate() } else { wordOverlay.stop() } }
     func prefetchSentence(text: String, voiceID: String) async {
-        await tts.prefetch(text: text, voiceID: voiceID)
+        // Must transform identically to `playSentence`, so the cache keys match
+        // and the prefetched audio/timings are the ones playback finds.
+        let ttsText = TTSPreprocess.ttsText(text)
+        await tts.prefetch(text: ttsText, voiceID: voiceID)
         // Warm word timings for this lookahead sentence too, so when it reaches
         // playback the overlay has them immediately (no first-word miss). Cached,
         // so the play-time fetch is then free. Fire-and-forget.
-        let utterance = Utterance(text: text, voiceID: voiceID)
+        let utterance = Utterance(text: ttsText, voiceID: voiceID)
         Task { _ = await tts.wordTimings(for: utterance) }
     }
 }

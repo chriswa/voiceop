@@ -12,11 +12,14 @@ At launch the app binds a loopback TCP listener on a kernel-assigned ephemeral
 port and atomically writes `~/Library/Application Support/VoiceOperator/speech-service.json`:
 
 ```json
-{"version":1,"port":58432,"pid":12345}
+{"version":2,"port":58432,"pid":12345}
 ```
 
 There is no bearer token: this is a same-user, loopback service. Clients read
-the discovery file (and re-read it after a connection failure).
+the discovery file (and re-read it after a connection failure). The file is
+removed when the app quits, so a present file whose `pid` is alive means a
+reachable instance. `version` is the API generation: 2 added `/v1/status` and
+`/v1/restart`.
 
 | Method | Path | Meaning |
 | --- | --- | --- |
@@ -24,6 +27,35 @@ the discovery file (and re-read it after a connection failure).
 | `GET` | `/v1/speech/{id}?wait=0..30[&since=N]` | Inspect or long-poll a job. Pending is `202`; complete is `200`; a dictation barge-in is `409`; cancellation/mute flush is `410`; synthesis failure is `500`. |
 | `DELETE` | `/v1/speech/{id}` | Halt immediately if audible, otherwise retract it. |
 | `GET` | `/v1/voices` | Return the currently available external Kokoro voices. |
+| `GET` | `/v1/status` | `{version, build, commit, pid, status, dictating, restart}` — which build is running and what it is doing. `status` is the menu-bar state (`idle`, `listening`, `transcribing`, `speaking`, …); `restart` is `none`, `pending`, or `restarting`. |
+| `POST` | `/v1/restart` | Ask the app to relaunch itself. `200 {"restart":"restarting"}` when idle; `202 {"restart":"pending","reason":"dictating"}` when a dictation is in flight — it fires once that dictation has been pasted. Idempotent. |
+
+### Cooperative restart
+
+A build script that kills the process can catch the user mid-sentence: the
+dictation is lost, and because the process never reached `applicationWillTerminate`
+the output-mute a dictation applies is never undone, leaving the Mac silent. So
+nothing outside the app decides when it restarts. `scripts/restart-app.sh` (run
+by `make-app.sh`) posts `/v1/restart`; `RestartCoordinator` in the app records the
+request and acts on it in the first main-actor turn in which
+`AudioArbiter.isDictating` is false — key-down through paste, so a check made
+inside the app cannot race a trigger-key press the way an external poll-then-kill
+can. When it fires it plays `SoundEffect.restarting` (after the output mute has
+been restored, so the cue is audible), then hands off to `Relauncher`. If the
+trigger key goes down while the cue is playing, the coordinator steps back to
+pending rather than kill that dictation. Speech playback does not defer a
+restart: a half-spoken sentence is re-queueable by its caller, and a long
+read-aloud should not stall a rebuild. The menu's **Restart Voice Operator** uses
+the same path.
+
+The script then waits for the old pid to exit, for a new discovery file with a
+different pid, and for `/v1/status` to report the version it just built — the
+only proof the new binary is what is running.
+
+SIGTERM is routed through `NSApp.terminate` (`TerminationSignal`), so `kill`
+still restores the output mute and removes the discovery file, but it does not
+wait for a dictation: it remains the escape hatch for a hung app
+(`restart-app.sh --force`).
 
 Every speech response carries a `version` that is monotonic per job and bumped
 on **every** observable change, including playback ones. It exists because
@@ -427,12 +459,31 @@ no reverse-engineering:
 
 ### Word-highlight overlay
 
-While TTS plays, a full-width black bar across the screen centre shows the word currently being
-spoken (`Overlay/WordOverlayController` + `WordOverlayView`, driven from `AudioArbiter`). Each
-word is aligned Spritz/RSVP-style: its **Optimal Recognition Point** (`ORP.pivotIndex`) is pinned
-to a fixed horizontal focal point (marked by the crosshair), so the reader's eye stays parked on one spot.
-A dim (30% white) crosshair inside the band marks the fixation point: a vertical guide spanning the
-band height and a full-width horizontal guide, crossing at the pivot letter's **x-height centre** — the
+While TTS plays, a full-width black bar across the screen centre shows the sentence being spoken
+(`Overlay/WordOverlayController` + `WordOverlayView`, driven from `AudioArbiter`). The whole sentence
+renders as one line — the current word bright, the surrounding context words dim — and the line runs
+off both screen edges (no wrapping). It is aligned Spritz/RSVP-style: the current word's **Optimal
+Recognition Point** (`ORP.pivotIndex`) is pinned to a fixed horizontal focal point (marked by a dim
+vertical guide), so the reader's eye stays parked on one spot as the line shifts word to word. The line
+shows the sentence **as written**: `buildContext` aligns the timing tokens back onto the original text
+with a greedy forward substring scan (`alignedContext`), keeping punctuation and spacing. Kokoro's
+tokens are faithful substrings (numbers, contractions, hyphenates, abbreviations, even curly
+apostrophes all matched in testing), so this holds in practice; if a token can't be located (some
+normalisation), it falls back to joining tokens with spaces and logs it. Cross-sentence context isn't
+stitched — each sentence renders on its own.
+
+To get finer per-piece timing and cleaner speech, `TTSPreprocess.prepare` rewrites the text sent to the
+TTS server (both `/synthesize` and `/timestamps`, so audio and timing match) and returns a character map
+(`origPositions`) from the spoken text back to the original: a `/` between alphanumerics is spoken as
+"slash" (`src/main` → "src slash main"), a `.` inside a path token (one containing `/`) as "dot"
+(`app.swift` → "app dot swift"), a `-`/`_` between alphanumerics becomes a space (`state-of-the-art` →
+per-word timing, separators dim), and `*` is dropped so markdown emphasis isn't read as "asterisk". The
+overlay aligns the timing tokens against the *spoken* text and maps each match back through the character
+map, so it displays the ORIGINAL text and a `/` or `.` spoken as a word still highlights the literal
+character. Without this a whole path or hyphenated compound is one multi-second token that highlights as a
+single block, and stray markdown is read aloud.
+A dim (30% white) vertical guide inside the band marks the fixation point, at the pivot letter's
+**x-height centre** — the
 word is positioned so its lowercase-body midline lands on screen centre, which is where the eye
 fixates in reading (not the em-box centre, which sits high on ascender space). The overlay window is
 full-screen and transparent, painting only the guides, the band and the word; glyphs carry no stroke

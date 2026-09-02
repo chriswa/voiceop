@@ -7,16 +7,27 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let arbiter = AudioArbiter()
     private let hotkey = HotkeyMonitor()
     private let speechService = SpeechHTTPService()
+    private lazy var restart = RestartCoordinator(isBusy: { [unowned self] in self.arbiter.isDictating })
+    private var currentStatus: OperatorStatus = .idle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching — \(BuildInfo.summary)")
+        TerminationSignal.routeSIGTERMToGracefulQuit()
         LaunchAtLogin.enableByDefaultOnce()
         AVCaptureDevice.requestAccess(for: .audio) { granted in Log.log("mic access request → granted=\(granted)") }
-        arbiter.onStatus = { [weak self] in self?.menuBar.update(status: $0) }
+        arbiter.onStatus = { [weak self] in self?.currentStatus = $0; self?.menuBar.update(status: $0) }
         arbiter.onTranscriptStyle = { [weak self] in self?.menuBar.update(style: $0) }
         arbiter.onHistoryChanged = { [weak self] in self?.menuBar.refreshHistory() }
         arbiter.onDictationBegan = { Task { await SpeechJobManager.shared.beginDictation() } }
-        arbiter.onDictationEnded = { Task { await SpeechJobManager.shared.endDictation() } }
+        arbiter.onDictationEnded = { [weak self] in
+            Task { await SpeechJobManager.shared.endDictation() }
+            // A restart asked for mid-dictation has been waiting for exactly this.
+            self?.restart.attempt()
+        }
+        speechService.snapshot = { [unowned self] in
+            .init(status: currentStatus, dictating: arbiter.isDictating, restart: restart.state)
+        }
+        speechService.requestRestart = { [unowned self] in restart.request(source: .http) }
         arbiter.onCommand = { [weak self] text, context in self?.routeCommand(text, context: context) }
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -40,7 +51,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         menuBar.onMuteSpeech = { muted in Task { await SpeechJobManager.shared.setMuted(muted) } }
-        menuBar.onRestart = { Relauncher.restartAfterTermination() }
+        menuBar.onRestart = { [unowned self] in restart.request(source: .menu) }
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
         arbiter.wordOverlay.isEnabled = OverlayPreferences.wordOverlayEnabled
@@ -78,7 +89,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.update(status: .idle)
     }
 
-    func applicationWillTerminate(_ notification: Notification) { speechService.stop() }
+    /// Every way out of the process ends here — menu quit, the restart paths,
+    /// and SIGTERM (see `TerminationSignal`) — so this is where the system output
+    /// is unmuted and the discovery file stops pointing at a pid about to die.
+    func applicationWillTerminate(_ notification: Notification) {
+        arbiter.prepareForTermination()
+        speechService.stop()
+    }
 
     private func routeCommand(_ text: String, context: DictationContext) {
         Log.log("command: captured frontmost bundleID=\(context.bundleIdentifier ?? "(none)")")

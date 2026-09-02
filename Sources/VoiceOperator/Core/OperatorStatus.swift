@@ -6,7 +6,9 @@ import AppKit
 /// The icon is a bullhorn (megaphone) silhouette: **red while recording**,
 /// **yellow while transcribing**, **green while playing audio**, monochrome
 /// otherwise (per product spec).
-enum OperatorStatus: Equatable {
+///
+/// The raw value is the name reported by the loopback `/v1/status` endpoint.
+enum OperatorStatus: String, Equatable {
     case idle
     case listening        // paste dictation capturing the mic    -> RED
     case commandListening // Ctrl+Fn command dictation capturing   -> MAGENTA

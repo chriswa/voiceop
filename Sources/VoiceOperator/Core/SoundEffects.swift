@@ -30,6 +30,7 @@ enum SoundEffect: CaseIterable {
     case clipFinished               // TTS playback finished (very short)
     case narrationMuted             // narration muted — low descending slide
     case narrationUnmuted           // narration unmuted — low ascending slide
+    case restarting                 // the app is about to relaunch itself
 
     /// Global playback-speed multiplier for every cue. This lives with the
     /// cue definitions, rather than on the main-actor SoundBank, because the
@@ -84,6 +85,11 @@ enum SoundEffect: CaseIterable {
         // Mute drops low→lower (A3→E3→A2); unmute climbs very-low→low (A2→E3→A3).
         case .narrationMuted:   return [(220, 0.05), (165, 0.05), (110, 0.11)]
         case .narrationUnmuted: return [(110, 0.05), (165, 0.05), (220, 0.11)]
+        // "Power cycle": a fall through the octave and straight back up
+        // (A5→E5→A4→A5). Mid register, four notes, so it is neither the
+        // pasted arpeggio nor the low mute slides. Plays after the dictation
+        // output-mute has been restored (see RestartCoordinator).
+        case .restarting: return [(880, 0.08), (659, 0.08), (440, 0.12), (880, 0.16)]
         }
     }
 
@@ -133,6 +139,7 @@ enum SoundEffect: CaseIterable {
         case .clipFinished:             return "Clip finished"
         case .narrationMuted:           return "Narration muted"
         case .narrationUnmuted:         return "Narration unmuted"
+        case .restarting:               return "Restarting"
         }
     }
 }

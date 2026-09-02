@@ -42,4 +42,4 @@ else
 fi
 
 echo "built: $APP  (v$VERSION)"
-restart_running_app "$APP"
+restart_running_app "$APP" "$VERSION"

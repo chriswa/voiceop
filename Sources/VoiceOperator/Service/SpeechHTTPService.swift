@@ -6,7 +6,27 @@ import Network
 /// only in the current user's Application Support directory.
 final class SpeechHTTPService: @unchecked Sendable {
     static let discoveryURL = HistoryStore.supportDir.appendingPathComponent("speech-service.json")
+    /// Bumped when the API grows, so a client reading the discovery file can tell
+    /// what it is talking to. 2 added `/v1/status` and `/v1/restart`.
+    static let discoveryVersion = 2
     private var listener: NWListener?
+
+    /// What `/v1/status` reports: which build this is and what it is doing.
+    struct Snapshot: Sendable {
+        var status: OperatorStatus
+        var dictating: Bool
+        var restart: RestartCoordinator.State
+
+        var object: [String: Any] {
+            ["version": BuildInfo.version, "build": BuildInfo.build, "commit": BuildInfo.commit,
+             "pid": Int(ProcessInfo.processInfo.processIdentifier),
+             "status": status.rawValue, "dictating": dictating, "restart": restart.wireName]
+        }
+    }
+    /// Wired by `AppCoordinator`; both run on the main actor because that is where
+    /// dictation state lives and where the restart decision must be made.
+    var snapshot: (@MainActor @Sendable () -> Snapshot)?
+    var requestRestart: (@MainActor @Sendable () -> RestartCoordinator.State)?
 
     func start() throws {
         let parameters = NWParameters.tcp
@@ -24,7 +44,7 @@ final class SpeechHTTPService: @unchecked Sendable {
 
     func stop() { listener?.cancel(); listener = nil; try? FileManager.default.removeItem(at: Self.discoveryURL) }
     private func publish(port: NWEndpoint.Port) {
-        let payload: [String: Any] = ["version": 1, "port": Int(port.rawValue), "pid": ProcessInfo.processInfo.processIdentifier]
+        let payload: [String: Any] = ["version": Self.discoveryVersion, "port": Int(port.rawValue), "pid": ProcessInfo.processInfo.processIdentifier]
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
         try? data.write(to: Self.discoveryURL, options: .atomic)
         Log.log("speech HTTP listening on loopback port \(port.rawValue)")
@@ -63,6 +83,21 @@ final class SpeechHTTPService: @unchecked Sendable {
                        body: data.subdata(in: bodyStart..<(bodyStart + length)))
     }
     private func handle(_ r: Request) async -> Response {
+        if r.method == "GET", r.path == "/v1/status" {
+            guard let snapshot else { return .init(status: 503, object: ["error": "status_unavailable"]) }
+            return .init(status: 200, object: await snapshot().object)
+        }
+        // Ask the app to restart itself. Immediate when idle (200); deferred until
+        // the dictation in flight has been pasted (202). Repeating the request is
+        // harmless. See RestartCoordinator for why the app, not the caller, decides.
+        if r.method == "POST", r.path == "/v1/restart" {
+            guard let requestRestart else { return .init(status: 503, object: ["error": "restart_unavailable"]) }
+            switch await requestRestart() {
+            case .pending: return .init(status: 202, object: ["restart": "pending", "reason": "dictating"])
+            case .restarting: return .init(status: 200, object: ["restart": "restarting"])
+            case .none: return .init(status: 500, object: ["error": "restart_not_recorded"])
+            }
+        }
         if r.method == "GET", r.path == "/v1/voices" {
             do { return .init(status: 200, object: ["provider": "kokoro", "default_voice": "af_heart", "voices": try await KokoroSynthesizer.availableVoiceIDs().map { ["id": $0] }]) }
             catch { return .init(status: 503, object: ["error": "tts_unavailable"]) }

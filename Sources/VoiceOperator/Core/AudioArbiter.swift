@@ -37,6 +37,10 @@ final class AudioArbiter {
     var onCommand: ((String, DictationContext) -> Void)?
     var onDictationBegan: (() -> Void)?
     var onDictationEnded: (() -> Void)?
+    /// Which transcription path the last dictation took — fires on every
+    /// transition, including the launch-time key check in `prewarm`.
+    var onStreamHealth: ((StreamHealth) -> Void)?
+    private(set) var streamHealth: StreamHealth = .unverified
 
     private(set) var sttHistory: [STTHistoryEntry] = []
     private(set) var commandHistory: [CommandHistoryEntry] = []
@@ -112,6 +116,12 @@ final class AudioArbiter {
     /// Establish the warm gRPC connection and pre-fetch the credentials dictation
     /// needs, so the first dictation of a session is as quick as the tenth.
     func prewarm() {
+        // Say so at launch rather than at the first key press: the icon badge and
+        // the menu warning should already be there when the user looks, not
+        // appear after they have sat through a slow dictation.
+        if liveTranscriber != nil, WisprBasetenKey.value == nil {
+            noteStreamHealth(.degraded(reason: TranscriberError.noBasetenKey.userMessage))
+        }
         FlowChannel.shared.warmUp()
         Task { await WisprToken.shared.prewarm() }
         Task { _ = await WisprDictionary.shared.contextWords() }
@@ -119,6 +129,16 @@ final class AudioArbiter {
         // now: the start cue is on the critical path for "safe to talk", and the
         // silence-gate exclusion window is anchored the moment we ask for it.
         _ = SoundBank.shared
+    }
+
+    /// Record a change of transcription path. Idempotent, so the callers can be
+    /// generous: every fallback and every successful commit reports in, and only
+    /// the transitions reach the log, the menu bar and `/v1/status`.
+    private func noteStreamHealth(_ health: StreamHealth) {
+        guard health != streamHealth else { return }
+        streamHealth = health
+        Log.log(health.logLine)
+        onStreamHealth?(health)
     }
 
     // MARK: - Live dictation state
@@ -183,7 +203,10 @@ final class AudioArbiter {
         onDictationBegan?()
 
         let encoder = try? OpusEncoder()
-        if encoder == nil { Log.log("dictation: opus encoder unavailable — live upload disabled") }
+        if encoder == nil {
+            Log.log("dictation: opus encoder unavailable — live upload disabled")
+            noteStreamHealth(.degraded(reason: "opus encoder unavailable"))
+        }
         let live = LiveDictation(trace: trace, mode: decision, encoder: encoder)
         self.live = live
 
@@ -347,6 +370,7 @@ final class AudioArbiter {
                 Log.log("dictation: live stream unavailable (\(reason)) — will transcribe the clip afterwards")
                 live.trace.note("stream open failed: \(reason)")
                 live.broken = true
+                self?.noteStreamHealth(.degraded(reason: reason))
             }
         }
     }
@@ -487,7 +511,11 @@ final class AudioArbiter {
             return
         }
 
-        playClosingCue(mode.finishCue, mode: mode)
+        // Say it at the moment it starts costing: a stream that has already
+        // failed means this dictation goes the long way round, so the finish
+        // cue carries a low tail instead of ending clean (see StreamHealth).
+        let slow = live?.broken ?? false
+        playClosingCue(slow ? mode.slowFinishCue : mode.finishCue, mode: mode)
         onStatus?(.transcribing)
         startTranscriptionProgressCue()
         // Bind the routing context to *this* dictation rather than reading shared
@@ -544,11 +572,15 @@ final class AudioArbiter {
                 _ = await awaitStreamOpen(live)
             }
             if live.session != nil, !live.broken {
-                do { return try await commit(live) }
-                catch {
+                do {
+                    let text = try await commit(live)
+                    noteStreamHealth(.streaming)
+                    return text
+                } catch {
                     let reason = TranscriberError.userMessage(for: error)
                     Log.log("dictation: live stream failed after commit (\(reason)) — re-transcribing the recorded clip")
                     live.trace.note("live failed: \(reason)")
+                    noteStreamHealth(.degraded(reason: reason))
                 }
             }
             // Whatever went wrong, this stream is done: release it rather than
@@ -599,6 +631,7 @@ final class AudioArbiter {
             Log.log("dictation: stream still opening \(grace) after key-up — using the recorded clip")
             live.trace.note("stream open timed out")
             live.broken = true
+            noteStreamHealth(.degraded(reason: "stream did not open in time"))
         }
         return raced
     }

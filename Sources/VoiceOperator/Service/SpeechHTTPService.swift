@@ -7,8 +7,9 @@ import Network
 final class SpeechHTTPService: @unchecked Sendable {
     static let discoveryURL = HistoryStore.supportDir.appendingPathComponent("speech-service.json")
     /// Bumped when the API grows, so a client reading the discovery file can tell
-    /// what it is talking to. 2 added `/v1/status` and `/v1/restart`.
-    static let discoveryVersion = 2
+    /// what it is talking to. 2 added `/v1/status` and `/v1/restart`; 3 added the
+    /// `stream` / `stream_reason` fields to `/v1/status`.
+    static let discoveryVersion = 3
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -16,11 +17,19 @@ final class SpeechHTTPService: @unchecked Sendable {
         var status: OperatorStatus
         var dictating: Bool
         var restart: RestartCoordinator.State
+        /// Which transcription path dictation is on. `restart-app.sh` reads this
+        /// after every restart so a slow-path Mac is caught at build time, not
+        /// after a week of mysteriously slow dictation (see `StreamHealth`).
+        var stream: StreamHealth
 
         var object: [String: Any] {
-            ["version": BuildInfo.version, "build": BuildInfo.build, "commit": BuildInfo.commit,
-             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-             "status": status.rawValue, "dictating": dictating, "restart": restart.wireName]
+            var o: [String: Any] =
+                ["version": BuildInfo.version, "build": BuildInfo.build, "commit": BuildInfo.commit,
+                 "pid": Int(ProcessInfo.processInfo.processIdentifier),
+                 "status": status.rawValue, "dictating": dictating, "restart": restart.wireName,
+                 "stream": stream.wireName]
+            if let reason = stream.reason { o["stream_reason"] = reason }
+            return o
         }
     }
     /// Wired by `AppCoordinator`; both run on the main actor because that is where

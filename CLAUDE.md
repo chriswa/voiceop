@@ -51,6 +51,15 @@ Without the key, it falls back to `WisprTranscriber` (raw `/llm/asr`). Regenerat
 the gRPC/protobuf Swift with `scripts/gen-proto.sh`. Live-test either path with
 `--flow-grpc-test` / `--asr-test`.
 
+**The fallback is loud by design** (`StreamHealth`): while dictation is on the
+slow path the menu carries a `⚠︎ Dictation is slow…` line naming the reason, the
+icon wears an amber dot even at idle, the key-up cue gains a low tail, the log
+gets a `stream health: WARNING degraded` line, `/v1/status` reports
+`"stream":"degraded"` + `stream_reason`, and `restart-app.sh` prints a WARNING
+after every restart. The key is checked at launch, so a fresh Mac shows all of
+this before the first dictation. If you see any of it, fix the cause (usually
+the key file above) rather than the symptom; "no Baseten key" is never normal.
+
 TTS base URL / Access headers: `$VOICEOP_KOKORO_URL` or
 `~/Library/Application Support/VoiceOperator/config.json` (see `Config.swift`).
 **Never commit** Cloudflare Access secrets.
@@ -93,7 +102,8 @@ flight, pastes it, plays a "restarting" cue, and relaunches.
 - To check state without restarting:
   ```bash
   curl -s "127.0.0.1:$(plutil -extract port raw -o - "$HOME/Library/Application Support/VoiceOperator/speech-service.json")/v1/status"
-  # → {"version":"0.1.NN","status":"idle","dictating":false,"restart":"none",...}
+  # → {"version":"0.1.NN","status":"idle","dictating":false,"restart":"none","stream":"streaming",...}
+  #   "stream" is "degraded" (+ "stream_reason") when dictation is on the slow path.
   ```
 
 Every build gets its own version number (`MAJOR.MINOR` from `Resources/Info.plist`,

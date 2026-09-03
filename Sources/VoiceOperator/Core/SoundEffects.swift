@@ -18,6 +18,8 @@ enum SoundEffect: CaseIterable {
     case listeningFinished          // Fn (paste) capture ended
     case commandListeningStarted    // Ctrl+Fn (command) capture began
     case commandListeningFinished   // Ctrl+Fn (command) capture ended
+    case listeningFinishedSlow          // Fn capture ended, but the live stream is down: slow path
+    case commandListeningFinishedSlow   // Ctrl+Fn capture ended, slow path
     case pasted
     case silenceSkipped             // recording had no speech — transcription skipped
     case surfaceRaised              // a voice tool matched + ran
@@ -53,6 +55,11 @@ enum SoundEffect: CaseIterable {
         // distinct from paste so you can hear which mode you're in.
         case .commandListeningStarted:  return [(988, 0.08), (1319, 0.11)]
         case .commandListeningFinished: return [(1319, 0.08), (988, 0.11)]
+        // Slow-path variants: the same finish two-tone, then a beat of silence
+        // and one low held note. The mode stays audible in the first half; the
+        // tail says "this one is going the long way round" (see StreamHealth).
+        case .listeningFinishedSlow:        return [(990, 0.09), (660, 0.11), (0, 0.05), (330, 0.24)]
+        case .commandListeningFinishedSlow: return [(1319, 0.08), (988, 0.11), (0, 0.05), (494, 0.24)]
         // Cheerful rising major arpeggio (C5–E5–G5–C6) — text inserted.
         case .pasted: return [(523, 0.09), (659, 0.09), (784, 0.09), (1047, 0.14)]
         // Gentle low descending two-tone (G4→C4) — recording was silent, so
@@ -127,6 +134,8 @@ enum SoundEffect: CaseIterable {
         case .listeningFinished:        return "Listening finished (paste)"
         case .commandListeningStarted:  return "Listening started (command)"
         case .commandListeningFinished: return "Listening finished (command)"
+        case .listeningFinishedSlow:        return "Listening finished (paste, slow path)"
+        case .commandListeningFinishedSlow: return "Listening finished (command, slow path)"
         case .pasted:                   return "Pasted"
         case .silenceSkipped:           return "Silence skipped (no speech)"
         case .surfaceRaised:            return "Surface raised (tool ran)"

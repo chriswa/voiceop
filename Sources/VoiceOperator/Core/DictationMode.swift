@@ -9,6 +9,9 @@ enum DictationMode: String {
     var startCue: SoundEffect { self == .command ? .commandListeningStarted : .listeningStarted }
     /// The cue that says "we heard you, transcribing now".
     var finishCue: SoundEffect { self == .command ? .commandListeningFinished : .listeningFinished }
+    /// The finish cue when the live stream has already failed and this dictation
+    /// is going the slow way (see `StreamHealth`).
+    var slowFinishCue: SoundEffect { self == .command ? .commandListeningFinishedSlow : .listeningFinishedSlow }
 }
 
 /// The mode of one dictation, which is **not knowable at the instant capture

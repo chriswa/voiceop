@@ -17,6 +17,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         AVCaptureDevice.requestAccess(for: .audio) { granted in Log.log("mic access request → granted=\(granted)") }
         arbiter.onStatus = { [weak self] in self?.currentStatus = $0; self?.menuBar.update(status: $0) }
         arbiter.onTranscriptStyle = { [weak self] in self?.menuBar.update(style: $0) }
+        arbiter.onStreamHealth = { [weak self] in self?.menuBar.update(streamHealth: $0) }
         arbiter.onHistoryChanged = { [weak self] in self?.menuBar.refreshHistory() }
         arbiter.onDictationBegan = { Task { await SpeechJobManager.shared.beginDictation() } }
         arbiter.onDictationEnded = { [weak self] in
@@ -25,7 +26,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             self?.restart.attempt()
         }
         speechService.snapshot = { [unowned self] in
-            .init(status: currentStatus, dictating: arbiter.isDictating, restart: restart.state)
+            .init(status: currentStatus, dictating: arbiter.isDictating, restart: restart.state,
+                  stream: arbiter.streamHealth)
         }
         speechService.requestRestart = { [unowned self] in restart.request(source: .http) }
         arbiter.onCommand = { [weak self] text, context in self?.routeCommand(text, context: context) }

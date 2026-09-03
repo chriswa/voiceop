@@ -635,6 +635,25 @@ optional-name peel and last-referenced fallback apply uniformly.
      Opus via the vendored universal `COpus`/`OpusEncoder` (16 kHz mono, 20 ms / 320-sample frames).
      The Baseten `Api-Key` is read at runtime from `VOICEOP_BASETEN_KEY` or
      `~/Library/Application Support/VoiceOperator/baseten-key` and is **not committed**.
+     **Where the key comes from (bundle, 2026-09-02):** it is *not* per-user and Wispr does
+     not fetch it at login — it is a static constant compiled into the Wispr Flow app
+     (`.webpack/main/index.js`, the config module that also holds `RT="v31pl413"`, the
+     Supabase URL/anon key, and the `api.wisprflow.ai` hosts; `getRpcOptions` sends it as
+     `"baseten-authorization": \`Api-Key ${Rt.Fo}\``). The per-user credential is the
+     Supabase JWT in `authorization: Bearer`. On a fresh Mac, extract the bundle (see
+     `CLAUDE.md`), grep for `baseten-authorization`, follow the `Fo` export to its string
+     constant, and write it to `baseten-key`. Without it every dictation logs
+     `stream open failed: no Baseten key … fell back to raw /llm/asr` and takes 5–10 s.
+     **Surfacing the fallback (2026-09-02).** That log line was the only symptom, and a
+     fresh Mac ran on the slow path for an evening before anyone read it. `StreamHealth`
+     (`Core/StreamHealth.swift`) now tracks the path — `.degraded(reason:)` on a stream
+     open failure, open timeout, post-commit failure, or missing key/encoder, `.streaming`
+     on every successful commit — and `AudioArbiter` publishes each transition to: the
+     log; a persistent menu warning line (the Secure Keyboard Entry pattern); an amber
+     top-right dot on the icon in *every* state so it is seen before the next dictation;
+     the key-up cue (`listeningFinishedSlow`: the normal two-tone plus a low tail, so the
+     mode stays audible); `/v1/status` (`stream`, `stream_reason`); and a WARNING from
+     `restart-app.sh` after each restart. The key check runs in `prewarm()` at launch.
   2. **Baseten `run_remote` HTTP (msgpack)** — decoded but rejected `input is malformed` (server
      schema not in the bundle); superseded by the gRPC path, not implemented.
   3. **`/llm/asr_audio_chunks` / `/llm/asr` (raw fallback)** — `WisprTranscriber`. gRPC falls back

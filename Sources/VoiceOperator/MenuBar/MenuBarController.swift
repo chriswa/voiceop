@@ -8,6 +8,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let status = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
     /// Shown only while some app holds secure event input — see `update(secureInputHolder:)`.
     private let secureInputWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    /// Shown only while dictation is on the slow fallback path — see `update(streamHealth:)`.
+    private let streamWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
     private let wordOverlay = NSMenuItem(title: "Word Overlay", action: #selector(toggleWordOverlay), keyEquivalent: "")
@@ -38,11 +40,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var muted = false
     private var currentStatus: OperatorStatus = .idle
     private var currentStyle: TranscriptStyle = .normal
+    private var streamHealth: StreamHealth = .unverified
 
     override init() {
         super.init(); menu.delegate = self; status.isEnabled = false; menu.addItem(status)
         secureInputWarning.isEnabled = false; secureInputWarning.isHidden = true
         menu.addItem(secureInputWarning)
+        streamWarning.isEnabled = false; streamWarning.isHidden = true
+        menu.addItem(streamWarning)
         mute.keyEquivalent = "b"; mute.keyEquivalentModifierMask = [.command, .control]
         mute.target = self; menu.addItem(mute); menu.addItem(.separator())
         stt.submenu = NSMenu(); commands.submenu = NSMenu(); menu.addItem(stt); menu.addItem(commands)
@@ -97,6 +102,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         secureInputWarning.title = "⚠︎ Secure Keyboard Entry is on in \(holder) — ⌘⌃ shortcuts disabled"
         secureInputWarning.isHidden = false
     }
+    /// Which transcription path dictation is getting. While it is the slow
+    /// fallback the menu carries a warning line naming the reason, and the icon
+    /// wears an amber badge in every state — including idle, so it is seen
+    /// *before* the next dictation rather than after waiting on it.
+    func update(streamHealth health: StreamHealth) {
+        guard health != streamHealth else { return }
+        streamHealth = health
+        if let warning = health.menuWarning {
+            streamWarning.title = warning; streamWarning.isHidden = false
+        } else {
+            streamWarning.isHidden = true
+        }
+        refreshIcon()
+    }
     func refreshHistory() { }
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === self.menu else { return }
@@ -144,22 +163,27 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func refreshIcon() {
         guard let button = statusItem.button else { return }
-        button.image = Self.icon(status: currentStatus, muted: muted, style: currentStyle)
+        button.image = Self.icon(status: currentStatus, muted: muted, style: currentStyle,
+                                 degraded: streamHealth.isDegraded)
         button.image?.accessibilityDescription = currentStatus.accessibilityLabel
             + (Self.badgesVisible(status: currentStatus, style: currentStyle)
                ? " (\(currentStyle.accessibilityLabel))" : "")
+            + (streamHealth.isDegraded ? " — dictation on the slow path" : "")
     }
 
     /// Preserve the original megaphone and its red/magenta/yellow/cyan/green
     /// status palette. Idle remains a template image so macOS adapts it to the
     /// menu-bar appearance.
-    static func icon(status: OperatorStatus, muted: Bool, style: TranscriptStyle = .normal) -> NSImage {
+    static func icon(status: OperatorStatus, muted: Bool, style: TranscriptStyle = .normal,
+                     degraded: Bool = false) -> NSImage {
         let showsDiscard = style.discard && (status == .listening || status == .commandListening)
         let base = NSImage(systemSymbolName: showsDiscard ? "trash.fill" : "megaphone.fill", accessibilityDescription: "Voice Operator")
         let symbol = base?.withSymbolConfiguration(.init(pointSize: showsDiscard ? 18 : 15,
                                                           weight: showsDiscard ? .bold : .regular))
             ?? NSImage(size: NSSize(width: 18, height: 18))
-        let template = status.tint == nil && !muted
+        // A degraded icon is badged in colour, so like the muted ring it cannot
+        // be a template image even at idle.
+        let template = status.tint == nil && !muted && !degraded
         let color = status.tint ?? .labelColor
         let badges = badgesVisible(status: status, style: style)
         let image = NSImage(size: symbol.size, flipped: false) { rect in
@@ -173,6 +197,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             // After the tint fill, or `sourceAtop` would repaint the badges in the
             // status colour and they would vanish into the silhouette.
             if badges && !showsDiscard { drawStyleBadges(style, in: rect) }
+            if degraded { drawDegradedBadge(in: rect) }
             return true
         }
         // A badged icon is no longer monochrome, so it must not be a template
@@ -193,6 +218,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// inside `NSImage`'s drawing handler.
     private nonisolated static var badgeColor: NSColor {
         NSColor(srgbRed: 1.0, green: 0.62, blue: 0.11, alpha: 1)
+    }
+
+    /// The slow-path mark: a filled amber dot in the top-right corner, ringed in
+    /// the label colour (black on a light menu bar, white on a dark one) so it
+    /// separates from the silhouette whatever the status tint — amber on the
+    /// yellow "transcribing" icon has almost no contrast on its own. Top-right
+    /// keeps it clear of the style badges, which own the bottom edge, and of the
+    /// mute slash, which runs corner to corner.
+    private nonisolated static func drawDegradedBadge(in rect: NSRect) {
+        let diameter = round(rect.height * 0.38)
+        // Inset by the ring width so the ring is not clipped at the image edge.
+        let dot = NSRect(x: rect.maxX - diameter - 1, y: rect.maxY - diameter - 1, width: diameter, height: diameter)
+        NSColor.labelColor.setFill(); NSBezierPath(ovalIn: dot.insetBy(dx: -1, dy: -1)).fill()
+        badgeColor.setFill(); NSBezierPath(ovalIn: dot).fill()
     }
 
     /// Draw the style flags as large, transparent bottom-edge badges: `a` for a

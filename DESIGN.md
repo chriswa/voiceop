@@ -276,6 +276,10 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   output device, `kAudioDevicePropertyMute`). If nothing is playing: `Skipping mute`.
 - On stop: restores, tracking `wasPreviouslyMuted` so we never unmute audio the user had muted.
 - It is a **system output-device mute**, not a Spotify-specific pause.
+- Ours mutes unconditionally (no now-playing gate), but it is switchable: the menu's
+  **Mute System Audio While Dictating** checkbox (`AudioPreferences`, default on) sets
+  `OutputMuter.isEnabled`. `restore()` stays ungated, so turning it off mid-dictation
+  still unmutes an output we had already muted.
 
 ### Trigger key
 - Wispr uses Fn (keycode 63) via a "Keyboard Service" push-to-talk (`Ptt action down`).

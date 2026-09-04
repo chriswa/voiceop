@@ -13,6 +13,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
     private let wordOverlay = NSMenuItem(title: "Word Overlay", action: #selector(toggleWordOverlay), keyEquivalent: "")
+    private let muteSystemAudio = NSMenuItem(title: "Mute System Audio While Dictating", action: #selector(toggleMuteSystemAudio), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
     var onMuteSpeech: ((Bool) -> Void)?
@@ -27,6 +28,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onToggleTapToToggle: (() -> Bool)?
     var wordOverlayState: (() -> Bool)?
     var onToggleWordOverlay: (() -> Bool)?
+    /// Reads and flips whether a dictation hardware-mutes the system output for
+    /// its duration. Same shape as the other preference toggles: the flip closure
+    /// returns the state afterwards so the checkmark follows it.
+    var muteSystemAudioState: (() -> Bool)?
+    var onToggleMuteSystemAudio: (() -> Bool)?
     var sttHistoryProvider: (() -> [STTHistoryEntry])?
     var commandHistoryProvider: (() -> [CommandHistoryEntry])?
     var onRetrySTT: ((UUID) -> Void)?
@@ -66,6 +72,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         tapToToggle.target = self; menu.addItem(tapToToggle)
         wordOverlay.target = self; menu.addItem(wordOverlay)
+        muteSystemAudio.target = self; menu.addItem(muteSystemAudio)
         let copyPath = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
         copyPath.target = self; menu.addItem(copyPath)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -122,6 +129,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         onMenuOpenChanged?(true)
         tapToToggle.state = (tapToToggleState?() ?? false) ? .on : .off
         wordOverlay.state = (wordOverlayState?() ?? true) ? .on : .off
+        muteSystemAudio.state = (muteSystemAudioState?() ?? true) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand)
     }
@@ -159,6 +167,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func toggleLogin() { _ = onToggleLaunchAtLogin?() }
     @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
     @objc private func toggleWordOverlay() { wordOverlay.state = (onToggleWordOverlay?() ?? true) ? .on : .off }
+    @objc private func toggleMuteSystemAudio() { muteSystemAudio.state = (onToggleMuteSystemAudio?() ?? true) ? .on : .off }
     @objc private func copyLogPath() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(Log.fileURL.path, forType: .string) }
 
     private func refreshIcon() {

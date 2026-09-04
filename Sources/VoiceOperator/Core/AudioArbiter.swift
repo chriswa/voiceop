@@ -20,7 +20,7 @@ import AppKit
 @MainActor
 final class AudioArbiter {
     private let recorder = AudioRecorder()
-    private let muter = OutputMuter()
+    let muter = OutputMuter()
     private let transcriber: Transcriber
     private let liveTranscriber: LiveTranscriber?
     private let tts = TTSEngine()

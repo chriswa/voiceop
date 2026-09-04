@@ -12,8 +12,14 @@ import Foundation
 final class OutputMuter {
     private var wasPreviouslyMuted: Bool?
 
+    /// Off turns `mute()` into a no-op — the menu's "Mute System Audio While
+    /// Dictating" preference (`AudioPreferences`). `restore()` is deliberately
+    /// *not* gated on it, so flipping this off mid-dictation still puts back an
+    /// output we had already muted rather than stranding the Mac silent.
+    var isEnabled = true
+
     func mute() {
-        guard let device = Self.defaultOutputDevice() else { return }
+        guard isEnabled, let device = Self.defaultOutputDevice() else { return }
         let current = Self.muteState(device)
         wasPreviouslyMuted = current
         if current == false { Self.setMute(device, true) }

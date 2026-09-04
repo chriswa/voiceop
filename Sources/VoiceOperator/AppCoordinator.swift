@@ -65,6 +65,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             Log.log("word overlay: \(on ? "enabled" : "disabled")")
             return on
         }
+        arbiter.muter.isEnabled = AudioPreferences.muteSystemAudioWhileDictating
+        menuBar.muteSystemAudioState = { AudioPreferences.muteSystemAudioWhileDictating }
+        menuBar.onToggleMuteSystemAudio = { [weak self] in
+            AudioPreferences.muteSystemAudioWhileDictating.toggle()
+            let on = AudioPreferences.muteSystemAudioWhileDictating
+            self?.arbiter.muter.isEnabled = on
+            Log.log("mute system audio while dictating: \(on ? "enabled" : "disabled")")
+            return on
+        }
         menuBar.tapToToggleState = { HotkeyPreferences.tapToToggle }
         menuBar.onToggleTapToToggle = { [weak self] in
             HotkeyPreferences.tapToToggle.toggle()

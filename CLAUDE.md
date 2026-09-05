@@ -87,12 +87,14 @@ your proof the change is live; if the script exits non-zero, the change is
 **Do not `kill`, `pkill`, or `killall` Voice Operator, and do not restart it any
 other way than through `make-app.sh` / `restart-app.sh`.** A restart mid-dictation
 throws away what the user was saying, and they have to reconstruct it from
-memory — that costs them far more than the wait costs you. The cooperative
-restart exists so the *app* decides when it is safe: it finishes the dictation in
-flight, pastes it, plays a "restarting" cue, and relaunches.
+memory — that costs them far more than the wait costs you. A restart mid-TTS cuts
+off what they were listening to. The cooperative restart exists so the *app*
+decides when it is safe: it finishes the dictation in flight, pastes it, waits for
+any speech to finish, plays a "restarting" cue, and relaunches.
 
-- If the script prints `waiting: the user is dictating…`, wait with it. It polls
-  until the paste has happened (up to 10 minutes) and then continues on its own.
+- If the script prints `waiting: the user is dictating…` or `waiting: the user is
+  listening to speech…`, wait with it. It polls until the app is idle (up to 10
+  minutes) and then continues on its own.
 - If it times out (exit 3), the request is still pending inside the app and will
   fire when the dictation ends. Tell the user; do not force.
 - `--force` (SIGTERM) is only for an app that is hung or too old to have the
@@ -102,7 +104,8 @@ flight, pastes it, plays a "restarting" cue, and relaunches.
 - To check state without restarting:
   ```bash
   curl -s "127.0.0.1:$(plutil -extract port raw -o - "$HOME/Library/Application Support/VoiceOperator/speech-service.json")/v1/status"
-  # → {"version":"0.1.NN","status":"idle","dictating":false,"restart":"none","stream":"streaming",...}
+  # → {"version":"0.1.NN","status":"idle","dictating":false,"speaking":false,"restart":"none","stream":"streaming",...}
+  #   A restart waits for both "dictating" and "speaking" to be false.
   #   "stream" is "degraded" (+ "stream_reason") when dictation is on the slow path.
   ```
 

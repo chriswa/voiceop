@@ -14,7 +14,7 @@
 # Exit status: 0 restarted (or nothing was running and it was started); 1 the
 # app did not come back, or came back as the wrong version; 2 the running app
 # would not take the request (unresponsive, or too old to have the endpoint) and
-# --force was not given; 3 timed out waiting for a dictation to finish.
+# --force was not given; 3 timed out waiting for the app to become idle.
 #
 # --force falls back to SIGTERM when the request cannot be delivered. The app
 # treats SIGTERM as an ordinary quit (system audio restored, discovery file
@@ -26,7 +26,7 @@
 set -euo pipefail
 
 DISCOVERY="$HOME/Library/Application Support/VoiceOperator/speech-service.json"
-TIMEOUT=600          # how long a dictation may keep us waiting
+TIMEOUT=600          # how long a dictation or a read-aloud may keep us waiting
 RELAUNCH_WAIT=30     # how long the new instance gets to come up
 FORCE=
 
@@ -179,7 +179,12 @@ fi
 case "$HTTP_CODE" in
     200) echo "restarting pid $OLD_PID (idle)" ;;
     202)
-        echo "waiting: the user is dictating — the restart will follow the paste (up to ${TIMEOUT}s)…"
+        # The app says which of the two it is holding for; say the right one
+        # rather than telling the user they are dictating when they are listening.
+        case "$(printf '%s' "$HTTP_BODY" | json_field reason -)" in
+            speaking) echo "waiting: the user is listening to speech — the restart will follow it (up to ${TIMEOUT}s)…" ;;
+            *)        echo "waiting: the user is dictating — the restart will follow the paste (up to ${TIMEOUT}s)…" ;;
+        esac
         start=$SECONDS
         while :; do
             sleep 1
@@ -187,13 +192,13 @@ case "$HTTP_CODE" in
             http GET "$PORT" /v1/status || break
             [ "$(printf '%s' "$HTTP_BODY" | json_field restart -)" = "restarting" ] && break
             if (( SECONDS - start >= TIMEOUT )); then
-                echo "ERROR: still dictating after ${TIMEOUT}s; the restart request is left pending in the app." >&2
-                echo "       It will restart itself when the dictation ends. Do not kill it." >&2
+                echo "ERROR: still busy after ${TIMEOUT}s; the restart request is left pending in the app." >&2
+                echo "       It will restart itself when the dictation or speech ends. Do not kill it." >&2
                 exit 3
             fi
             (( (SECONDS - start) % 15 == 0 )) && echo "  still waiting ($((SECONDS - start))s)…"
         done
-        echo "dictation finished — restarting pid $OLD_PID"
+        echo "app is idle — restarting pid $OLD_PID"
         ;;
     404)
         echo "Voice Operator (pid $OLD_PID) predates the /v1/restart endpoint."

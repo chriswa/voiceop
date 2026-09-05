@@ -2,7 +2,8 @@ import Foundation
 
 /// The one place a restart is decided. Anyone who wants the app restarted — the
 /// menu item, or a build script over the loopback API — *asks* here, and the
-/// restart happens at the first moment the user is not mid-dictation.
+/// restart happens at the first moment the user is neither mid-dictation nor
+/// listening to something.
 ///
 /// Why the app decides rather than the caller: a build script that checks "is a
 /// dictation in flight?" and then kills the process has a window between the two
@@ -11,10 +12,16 @@ import Foundation
 /// check and the commit happen in one main-actor turn, and every path that starts
 /// a dictation runs on that same actor, so nothing can slip between them.
 ///
-/// "Busy" is `AudioArbiter.isDictating`, which spans key-down → transcription →
-/// paste → the closing cue. Speech playback does not count: a half-spoken
-/// sentence is re-queueable by whoever asked for it, and waiting on a long
-/// read-aloud would stall every rebuild.
+/// "Busy" is a dictation in flight (`AudioArbiter.isDictating`: key-down →
+/// transcription → paste → the closing cue) **or** speech the user is listening
+/// to (`AudioArbiter.isSpeaking`).
+///
+/// Speech used to be excluded, on the reasoning that a half-spoken sentence is
+/// re-queueable and that waiting on a long read-aloud would stall every rebuild.
+/// That was wrong in the way that matters: the person listening is mid-thought,
+/// the audio stops dead, and no caller actually re-queues it. A rebuild waiting
+/// out a read-aloud costs the developer a minute; cutting one off costs the user
+/// the thing they were doing. Both are now waited for.
 @MainActor
 final class RestartCoordinator {
     enum Source: String { case menu, http }
@@ -50,7 +57,7 @@ final class RestartCoordinator {
     private let schedule: (TimeInterval, @escaping @MainActor () -> Void) -> Void
 
     /// - Parameters:
-    ///   - isBusy: true while a dictation is in flight (see `AudioArbiter.isDictating`).
+    ///   - isBusy: true while a dictation is in flight or speech is playing.
     ///   - playCue: start the restart cue; returns how long it plays.
     ///   - perform: actually restart (see `Relauncher`).
     ///   - schedule: run a closure after a delay; injectable so tests run synchronously.
@@ -79,15 +86,15 @@ final class RestartCoordinator {
             return state
         case .none:
             state = .pending(source: source, since: Date())
-            Log.log("restart: requested (\(source.rawValue))\(isBusy() ? " — deferred until the current dictation is pasted" : "")")
+            Log.log("restart: requested (\(source.rawValue))\(isBusy() ? " — deferred until the app is idle" : "")")
             attempt()
             return state
         }
     }
 
     /// Fire a pending restart if the app has become idle. Call whenever a
-    /// dictation ends; a no-op when nothing is pending or a dictation is still
-    /// in flight.
+    /// dictation ends *or* speech goes quiet; a no-op when nothing is pending or
+    /// the app is still busy.
     func attempt() {
         guard case .pending(let source, let since) = state, !isBusy() else { return }
         state = .restarting
@@ -96,11 +103,12 @@ final class RestartCoordinator {
         let cueDuration = playCue()
         schedule(cueDuration + Self.cueMargin) { [weak self] in
             guard let self, case .restarting = self.state else { return }
-            // The user may have pressed the trigger key while the cue was playing.
-            // A dictation is worth more than a prompt restart: step back to pending
-            // and let its end bring us here again.
+            // The user may have pressed the trigger key — or started something
+            // speaking — while the cue was playing. Either is worth more than a
+            // prompt restart: step back to pending and let its end bring us here
+            // again.
             if self.isBusy() {
-                Log.log("restart: a dictation started during the cue — waiting for it")
+                Log.log("restart: the app became busy during the cue — waiting for it")
                 self.state = .pending(source: source, since: since)
                 return
             }

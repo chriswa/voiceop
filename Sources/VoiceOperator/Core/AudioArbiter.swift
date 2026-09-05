@@ -49,6 +49,12 @@ final class AudioArbiter {
     /// cue has had its moment. This is what "safe to restart" means
     /// (see `RestartCoordinator`).
     private(set) var isDictating = false
+    /// True while a speech job is audible: from the first sentence handed to
+    /// playback until the whole job finishes or is interrupted. It deliberately
+    /// does not flicker in the gap between a job's sentences (see
+    /// `SpeechJobManager.refreshActivity`), which is what makes it safe to hold a
+    /// restart on.
+    private(set) var isSpeaking = false
     private var transcriptionProgressTask: Task<Void, Never>?
     private var ttsWaitCueTask: Task<Void, Never>?
     private var live: LiveDictation?
@@ -866,7 +872,10 @@ final class AudioArbiter {
     /// Overlay visibility follows the speech queue: shown when a job starts
     /// synthesizing (before audio, so the window is warm and no opening words
     /// are missed), hidden when the queue goes idle.
-    func setSpeechActive(_ active: Bool) { if active { wordOverlay.activate() } else { wordOverlay.stop() } }
+    func setSpeechActive(_ active: Bool) {
+        isSpeaking = active
+        if active { wordOverlay.activate() } else { wordOverlay.stop() }
+    }
     func prefetchSentence(text: String, voiceID: String) async {
         // Must transform identically to `playSentence`, so the cache keys match
         // and the prefetched audio/timings are the ones playback finds.

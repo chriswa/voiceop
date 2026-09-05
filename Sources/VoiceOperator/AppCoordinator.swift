@@ -9,7 +9,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let speechService = SpeechHTTPService()
     /// Watches the default output device, for the "only when using AirPods" rule.
     private let outputWatcher = OutputDeviceWatcher()
-    private lazy var restart = RestartCoordinator(isBusy: { [unowned self] in self.arbiter.isDictating })
+    private lazy var restart = RestartCoordinator(
+        isBusy: { [unowned self] in self.arbiter.isDictating || self.arbiter.isSpeaking })
     private var currentStatus: OperatorStatus = .idle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -28,7 +29,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             self?.restart.attempt()
         }
         speechService.snapshot = { [unowned self] in
-            .init(status: currentStatus, dictating: arbiter.isDictating, restart: restart.state,
+            .init(status: currentStatus, dictating: arbiter.isDictating,
+                  speaking: arbiter.isSpeaking, restart: restart.state,
                   stream: arbiter.streamHealth)
         }
         speechService.requestRestart = { [unowned self] in restart.request(source: .http) }
@@ -42,7 +44,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 },
                 prefetch: { [weak self] text, voice in await self?.arbiter.prefetchSentence(text: text, voiceID: voice) },
                 halt: { [weak self] in Task { @MainActor in self?.arbiter.haltSpeech() } },
-                onSpeechActivity: { [weak self] active in Task { @MainActor in self?.arbiter.setSpeechActive(active) } })
+                onSpeechActivity: { [weak self] active in
+                    Task { @MainActor in
+                        self?.arbiter.setSpeechActive(active)
+                        // Speech going quiet is one of the two ways the app becomes
+                        // idle, so it is one of the two places a restart that has
+                        // been waiting gets to fire.
+                        if !active { self?.restart.attempt() }
+                    }
+                })
         }
 
         menuBar.sttHistoryProvider = { [weak self] in self?.arbiter.sttHistory ?? [] }

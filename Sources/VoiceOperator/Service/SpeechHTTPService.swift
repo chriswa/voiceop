@@ -8,14 +8,18 @@ final class SpeechHTTPService: @unchecked Sendable {
     static let discoveryURL = HistoryStore.supportDir.appendingPathComponent("speech-service.json")
     /// Bumped when the API grows, so a client reading the discovery file can tell
     /// what it is talking to. 2 added `/v1/status` and `/v1/restart`; 3 added the
-    /// `stream` / `stream_reason` fields to `/v1/status`.
-    static let discoveryVersion = 3
+    /// `stream` / `stream_reason` fields to `/v1/status`; 4 added `speaking`,
+    /// which now defers a restart just as `dictating` does.
+    static let discoveryVersion = 4
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
     struct Snapshot: Sendable {
         var status: OperatorStatus
         var dictating: Bool
+        /// Whether speech is audible. Like `dictating`, this holds off a restart —
+        /// `restart-app.sh` reads it to say which of the two it is waiting on.
+        var speaking: Bool
         var restart: RestartCoordinator.State
         /// Which transcription path dictation is on. `restart-app.sh` reads this
         /// after every restart so a slow-path Mac is caught at build time, not
@@ -26,7 +30,8 @@ final class SpeechHTTPService: @unchecked Sendable {
             var o: [String: Any] =
                 ["version": BuildInfo.version, "build": BuildInfo.build, "commit": BuildInfo.commit,
                  "pid": Int(ProcessInfo.processInfo.processIdentifier),
-                 "status": status.rawValue, "dictating": dictating, "restart": restart.wireName,
+                 "status": status.rawValue, "dictating": dictating, "speaking": speaking,
+                 "restart": restart.wireName,
                  "stream": stream.wireName]
             if let reason = stream.reason { o["stream_reason"] = reason }
             return o
@@ -97,12 +102,18 @@ final class SpeechHTTPService: @unchecked Sendable {
             return .init(status: 200, object: await snapshot().object)
         }
         // Ask the app to restart itself. Immediate when idle (200); deferred until
-        // the dictation in flight has been pasted (202). Repeating the request is
-        // harmless. See RestartCoordinator for why the app, not the caller, decides.
+        // the dictation in flight has been pasted, or the speech the user is
+        // listening to has finished (202). Repeating the request is harmless. See
+        // RestartCoordinator for why the app, not the caller, decides.
         if r.method == "POST", r.path == "/v1/restart" {
             guard let requestRestart else { return .init(status: 503, object: ["error": "restart_unavailable"]) }
             switch await requestRestart() {
-            case .pending: return .init(status: 202, object: ["restart": "pending", "reason": "dictating"])
+            case .pending:
+                // Name which of the two it is, so the script can say so rather
+                // than telling the user they are dictating when they are listening.
+                let dictating = await snapshot?().dictating ?? true
+                return .init(status: 202,
+                             object: ["restart": "pending", "reason": dictating ? "dictating" : "speaking"])
             case .restarting: return .init(status: 200, object: ["restart": "restarting"])
             case .none: return .init(status: 500, object: ["error": "restart_not_recorded"])
             }

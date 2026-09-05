@@ -82,7 +82,7 @@ version it just built, printing `restarted: v0.1.NN` on success. That line is
 your proof the change is live; if the script exits non-zero, the change is
 **not** live — read its message.
 
-### Never kill the process while the user may be dictating
+### Never kill the process while the user may be dictating or listening
 
 **Do not `kill`, `pkill`, or `killall` Voice Operator, and do not restart it any
 other way than through `make-app.sh` / `restart-app.sh`.** A restart mid-dictation
@@ -91,6 +91,12 @@ memory — that costs them far more than the wait costs you. A restart mid-TTS c
 off what they were listening to. The cooperative restart exists so the *app*
 decides when it is safe: it finishes the dictation in flight, pastes it, waits for
 any speech to finish, plays a "restarting" cue, and relaunches.
+
+Anything else that can stop audio the user may be hearing — an output-device
+change, a test that reconfigures CoreAudio — waits until you have established
+they are not listening, and waits longer when you cannot tell. If you need to
+watch such an interruption happen, announce it over TTS, start a sample TTS of
+your own, and interrupt that rather than whatever they were playing.
 
 - If the script prints `waiting: the user is dictating…` or `waiting: the user is
   listening to speech…`, wait with it. It polls until the app is idle (up to 10

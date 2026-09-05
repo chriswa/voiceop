@@ -59,6 +59,30 @@ final class AudioRecorder: @unchecked Sendable {
     /// class already takes responsibility for its own state via `lock`.
     private var tapFormat: AVAudioFormat?
 
+    /// Whether the capture graph is held open between dictations — the "Keep
+    /// Microphone Always On" preference (`AudioPreferences`).
+    ///
+    /// A Bluetooth headset renegotiates its codec every time an input stream
+    /// opens or closes, so an AirPods user pays a stall *and* an audible drop in
+    /// playback quality at both ends of every dictation. Holding the input open
+    /// costs a permanently lit microphone indicator and leaves the headset in its
+    /// voice profile for good; in exchange the switch simply never happens.
+    private var alwaysOn = false
+    /// Whether tap buffers are being kept. False between dictations, including
+    /// while the always-on tap is running — that audio is dropped on the audio
+    /// thread without ever reaching the converter.
+    private var capturing = false
+    /// Bumped every time the tap is installed or removed. A buffer still
+    /// unwinding from a tap we have since torn down carries an older value and is
+    /// dropped, the way `generation` retires a stale *recording's* buffers.
+    /// The two are separate because with the microphone held open one tap serves
+    /// every dictation, so tap identity no longer tracks recording identity.
+    private var tapNumber = 0
+    /// Whether the tap is installed and the device running *right now*. Written
+    /// on `engineQueue` once the graph has actually changed; read by `start()` to
+    /// decide whether it can skip the device wake-up entirely.
+    private var micIsOpen = false
+
     /// Duration (seconds) of the most recently stopped clip.
     private(set) var lastDurationSeconds: Double = 0
     /// Peak amplitude and RMS energy of the most recently stopped clip (0…1).
@@ -69,6 +93,14 @@ final class AudioRecorder: @unchecked Sendable {
     enum RecorderError: Error { case alreadyRecording, notRecording, conversionFailed }
 
     private(set) var isRecording = false
+
+    init() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(configurationChanged),
+            name: .AVAudioEngineConfigurationChange, object: engine)
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     /// Fired once per recording, on the audio thread, when the first buffer
     /// containing frames arrives. Set it before `start()`.
@@ -151,8 +183,13 @@ final class AudioRecorder: @unchecked Sendable {
         if auth != .authorized {
             Log.log("recorder: mic not authorized (status \(auth.rawValue)) — capture will be silent")
         }
-        let input = engine.inputNode
-        let format = input.inputFormat(forBus: 0)
+        lock.lock()
+        let openFormat = micIsOpen ? tapFormat : nil
+        lock.unlock()
+        // With the microphone already held open, the running tap's format is the
+        // one buffers will actually arrive in — ask the node again and a device
+        // that has since changed underneath it answers for the wrong hardware.
+        let format = openFormat ?? engine.inputNode.inputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             Log.log("recorder: ERROR invalid input format — no microphone input available")
             throw RecorderError.conversionFailed
@@ -173,9 +210,22 @@ final class AudioRecorder: @unchecked Sendable {
         captured = Data()
         sawFirstAudio = false
         meteringStartByte = 0
+        capturing = true
         self.trace = trace
+        let alreadyOpen = micIsOpen
         lock.unlock()
         isRecording = true
+
+        // Always-on: the microphone is already live and its tap starts feeding
+        // this recording on its very next buffer — no device wake-up, and on
+        // Bluetooth no codec renegotiation. That is the whole point of the
+        // preference, and it is why none of the graph work below runs. (The first
+        // buffer can be up to one buffer-length old, which only ever helps: it is
+        // the audio immediately *before* the key went down.)
+        if alreadyOpen {
+            trace?.mark("engine-live")
+            return
+        }
 
         engineQueue.async { [weak self] in
             guard let self else { return }
@@ -187,22 +237,132 @@ final class AudioRecorder: @unchecked Sendable {
             self.lock.unlock()
             guard !stale, let tapFormat else { return }
 
-            let input = self.engine.inputNode
-            input.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { [weak self] buffer, _ in
-                self?.handleTap(buffer, generation: recording)
-            }
-            self.engine.prepare()
-            trace?.mark("engine-prepare")
-            do {
-                try self.engine.start()
-                trace?.mark("engine-start")
-            } catch {
-                input.removeTap(onBus: 0)
-                let reason = "\(error)"
+            if let reason = self.openMic(format: tapFormat, trace: trace) {
                 Log.log("recorder: engine start failed — \(reason)")
                 trace?.note("engine start failed: \(reason)")
                 self.reportStartFailure(reason, generation: recording)
             }
+        }
+    }
+
+    // MARK: - Holding the microphone open
+
+    /// Whether the microphone is held open between dictations.
+    var isAlwaysOn: Bool {
+        lock.lock(); defer { lock.unlock() }; return alwaysOn
+    }
+
+    /// Turn the always-open microphone on or off.
+    ///
+    /// Applied immediately when idle. Flipped *during* a dictation it only
+    /// records the wish — the graph must not be rebuilt under a live recording —
+    /// and `stop()` reconciles, so turning it on mid-dictation keeps the device
+    /// up afterwards and turning it off releases it.
+    func setAlwaysOn(_ on: Bool) {
+        lock.lock()
+        guard on != alwaysOn else { lock.unlock(); return }
+        alwaysOn = on
+        let recording = capturing
+        lock.unlock()
+        Log.log("recorder: always-on microphone \(on ? "enabled" : "disabled")")
+        guard !recording else { return }
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            if on { self.openMicNow() } else { self.closeMic() }
+        }
+    }
+
+    /// Bring the microphone up against whatever the current default input device
+    /// is, provided anything still wants it open — the preference, or a dictation
+    /// that has begun since this was queued. That second case is not theoretical:
+    /// a device change tears the graph down and queues a rebuild here, and if the
+    /// user presses the trigger key in that window their `start()` sees the
+    /// microphone as already open and does no graph work of its own. This is then
+    /// the only thing that can hand them a live tap. **engineQueue only.**
+    private func openMicNow() {
+        lock.lock()
+        let wanted = alwaysOn || capturing
+        lock.unlock()
+        guard wanted else { return }
+        let format = engine.inputNode.inputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            Log.log("recorder: always-on — no input device available yet")
+            return
+        }
+        lock.lock(); tapFormat = format; lock.unlock()
+        if let reason = openMic(format: format, trace: nil) {
+            Log.log("recorder: holding the microphone open failed — \(reason)")
+        } else {
+            Log.log(String(format: "recorder: microphone held open (%.0f Hz, %d ch)",
+                           format.sampleRate, format.channelCount))
+        }
+    }
+
+    /// Install the tap and spin the device up, returning a rendered failure
+    /// reason or nil.
+    ///
+    /// Idempotent: with the tap already installed it only makes sure the engine
+    /// is running, so a dictation's start and the always-on path can both call it
+    /// without ever racing a double `installTap` (both run here, serially).
+    /// **engineQueue only.**
+    private func openMic(format: AVAudioFormat, trace: DictationTrace?) -> String? {
+        let input = engine.inputNode
+        lock.lock()
+        let alreadyInstalled = micIsOpen
+        if !alreadyInstalled { tapNumber += 1 }
+        let tap = tapNumber
+        lock.unlock()
+        if !alreadyInstalled {
+            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+                self?.handleTap(buffer, tap: tap)
+            }
+        }
+        if engine.isRunning {
+            lock.lock(); micIsOpen = true; lock.unlock()
+            return nil
+        }
+        engine.prepare()
+        trace?.mark("engine-prepare")
+        do {
+            try engine.start()
+            trace?.mark("engine-start")
+            lock.lock(); micIsOpen = true; lock.unlock()
+            return nil
+        } catch {
+            input.removeTap(onBus: 0)
+            lock.lock(); micIsOpen = false; tapNumber += 1; lock.unlock()
+            return "\(error)"
+        }
+    }
+
+    /// Tear the tap down and release the device. **engineQueue only.**
+    private func closeMic() {
+        lock.lock()
+        let wasOpen = micIsOpen
+        micIsOpen = false
+        tapNumber += 1
+        lock.unlock()
+        if wasOpen { engine.inputNode.removeTap(onBus: 0) }
+        engine.stop()
+    }
+
+    /// The input hardware changed under a running graph — AirPods connecting, a
+    /// dock being unplugged, the headset flipping profiles. AVAudioEngine tears
+    /// its graph down when this happens, so a microphone we are holding open has
+    /// to be rebuilt against the new format or it silently stays shut until the
+    /// next dictation wakes it, which is exactly the stall the preference exists
+    /// to remove. Mid-dictation the graph is left alone (the recording keeps what
+    /// it has) and `stop()` reconciles.
+    @objc private func configurationChanged() {
+        lock.lock()
+        let wanted = alwaysOn && !capturing
+        lock.unlock()
+        guard wanted else { return }
+        Log.log("recorder: audio configuration changed — rebuilding the held-open microphone")
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            self.closeMic()
+            self.openMicNow()
         }
     }
 
@@ -219,13 +379,17 @@ final class AudioRecorder: @unchecked Sendable {
 
     /// One tap buffer. Runs on the audio thread; the first-audio callback is
     /// invoked outside the lock and must get off this thread promptly.
-    private func handleTap(_ buffer: AVAudioPCMBuffer, generation: Int) {
+    private func handleTap(_ buffer: AVAudioPCMBuffer, tap: Int) {
         lock.lock()
-        guard generation == self.generation else { lock.unlock(); return }
+        // Dropped here: buffers from a tap we have since torn down, and — while
+        // the microphone is held open between dictations — every buffer that
+        // belongs to no recording at all. Neither reaches the converter.
+        guard tap == tapNumber, capturing else { lock.unlock(); return }
         let isFirstAudio = !sawFirstAudio && buffer.frameLength > 0
         if isFirstAudio { sawFirstAudio = true }
         let trace = self.trace
         let handler = isFirstAudio ? firstAudioHandler : nil
+        rebuildConverterIfNeededLocked(for: buffer.format)
         convertAndStoreLocked(buffer)
         lock.unlock()
 
@@ -248,10 +412,12 @@ final class AudioRecorder: @unchecked Sendable {
         // so tap buffers can still be in flight; the bump makes `handleTap` drop
         // them rather than append audio past the flush.
         generation += 1
+        capturing = false
         convertAndStoreLocked(nil)     // flush the converter's resampling tail
         converter = nil
-        tapFormat = nil
         trace = nil
+        let keepOpen = alwaysOn
+        if !keepOpen { tapFormat = nil }
         let samples = captured
         let meteringStart = meteringStartByte
         lock.unlock()
@@ -260,10 +426,14 @@ final class AudioRecorder: @unchecked Sendable {
         // start and before the next one's. Worst case the device stays up for the
         // remainder of a slow wake-up, which costs nothing but a moment of the
         // microphone-in-use indicator.
+        //
+        // With the microphone held open there is nothing to tear down — the tap
+        // stays installed and `capturing`, cleared above, is what stops its audio
+        // being kept. Opening rather than skipping covers the preference having
+        // been turned on *during* this dictation.
         engineQueue.async { [weak self] in
             guard let self else { return }
-            self.engine.inputNode.removeTap(onBus: 0)
-            self.engine.stop()
+            if keepOpen { self.openMicNow() } else { self.closeMic() }
         }
 
         lastDurationSeconds = Double(samples.count / 2) / Double(Self.asrSampleRate)
@@ -309,6 +479,23 @@ final class AudioRecorder: @unchecked Sendable {
         let buffer: AVAudioPCMBuffer?
         var fed = false
         init(_ buffer: AVAudioPCMBuffer?) { self.buffer = buffer }
+    }
+
+    /// Rebuild the converter when the tap starts delivering a format it was not
+    /// built for. A held-open tap outlives any one input device, so a headset
+    /// swapped mid-capture would otherwise have its samples reinterpreted at the
+    /// old rate — audible as a chipmunked or slurred transcript rather than as an
+    /// error. **The caller must already hold `lock`.**
+    private func rebuildConverterIfNeededLocked(for format: AVAudioFormat) {
+        guard let current = converter,
+              format.sampleRate != current.inputFormat.sampleRate
+                || format.channelCount != current.inputFormat.channelCount,
+              let rebuilt = AVAudioConverter(from: format, to: current.outputFormat) else { return }
+        Log.log(String(format: "recorder: input format changed mid-capture %.0fHz/%dch → %.0fHz/%dch — converter rebuilt",
+                       current.inputFormat.sampleRate, current.inputFormat.channelCount,
+                       format.sampleRate, format.channelCount))
+        converter = rebuilt
+        inputSampleRate = format.sampleRate
     }
 
     /// Convert one captured buffer (or, with nil, drain the converter at end of

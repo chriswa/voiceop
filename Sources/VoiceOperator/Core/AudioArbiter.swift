@@ -53,6 +53,14 @@ final class AudioArbiter {
     private var ttsWaitCueTask: Task<Void, Never>?
     private var live: LiveDictation?
 
+    /// Whether the microphone is held open between dictations rather than being
+    /// woken for each one — see `AudioRecorder.setAlwaysOn`. Set from the menu's
+    /// keep-open preference (`AudioPreferences`).
+    var microphoneAlwaysOn: Bool {
+        get { recorder.isAlwaysOn }
+        set { recorder.setAlwaysOn(newValue) }
+    }
+
     /// Voice-energy thresholds below which a clip counts as "said nothing".
     private static let silencePeak: Float = 0.025
     private static let silenceRMS: Float = 0.005

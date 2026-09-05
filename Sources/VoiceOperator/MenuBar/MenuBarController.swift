@@ -2,7 +2,7 @@ import AppKit
 import Carbon
 
 @MainActor
-final class MenuBarController: NSObject, NSMenuDelegate {
+final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let status = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
@@ -14,6 +14,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
     private let wordOverlay = NSMenuItem(title: "Word Overlay", action: #selector(toggleWordOverlay), keyEquivalent: "")
     private let muteSystemAudio = NSMenuItem(title: "Mute System Audio While Dictating", action: #selector(toggleMuteSystemAudio), keyEquivalent: "")
+    private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
+    private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
     var onMuteSpeech: ((Bool) -> Void)?
@@ -33,6 +35,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// returns the state afterwards so the checkmark follows it.
     var muteSystemAudioState: (() -> Bool)?
     var onToggleMuteSystemAudio: (() -> Bool)?
+    /// Reads and flips whether the microphone is held open between dictations.
+    /// `keepMicOpenState` reports the state the recorder is *actually* in, which
+    /// while the AirPods rule is on is the rule's answer rather than the manual
+    /// one — the checkmark has to follow the hardware, not the stored choice.
+    var keepMicOpenState: (() -> Bool)?
+    var onToggleKeepMicOpen: (() -> Bool)?
+    var keepMicOpenForWirelessState: (() -> Bool)?
+    var onToggleKeepMicOpenForWireless: (() -> Bool)?
     var sttHistoryProvider: (() -> [STTHistoryEntry])?
     var commandHistoryProvider: (() -> [CommandHistoryEntry])?
     var onRetrySTT: ((UUID) -> Void)?
@@ -73,6 +83,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         tapToToggle.target = self; menu.addItem(tapToToggle)
         wordOverlay.target = self; menu.addItem(wordOverlay)
         muteSystemAudio.target = self; menu.addItem(muteSystemAudio)
+        keepMicOpen.target = self; menu.addItem(keepMicOpen)
+        // Indented under the checkbox it takes over, the way System Settings nests
+        // a rule under the switch it drives.
+        keepMicOpenForWireless.indentationLevel = 1
+        keepMicOpenForWireless.target = self; menu.addItem(keepMicOpenForWireless)
         let copyPath = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
         copyPath.target = self; menu.addItem(copyPath)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -130,6 +145,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         tapToToggle.state = (tapToToggleState?() ?? false) ? .on : .off
         wordOverlay.state = (wordOverlayState?() ?? true) ? .on : .off
         muteSystemAudio.state = (muteSystemAudioState?() ?? true) ? .on : .off
+        keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
+        keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand)
     }
@@ -168,6 +185,22 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
     @objc private func toggleWordOverlay() { wordOverlay.state = (onToggleWordOverlay?() ?? true) ? .on : .off }
     @objc private func toggleMuteSystemAudio() { muteSystemAudio.state = (onToggleMuteSystemAudio?() ?? true) ? .on : .off }
+    @objc private func toggleKeepMicOpen() { keepMicOpen.state = (onToggleKeepMicOpen?() ?? false) ? .on : .off }
+    @objc private func toggleKeepMicOpenForWireless() {
+        keepMicOpenForWireless.state = (onToggleKeepMicOpenForWireless?() ?? false) ? .on : .off
+        // The rule just took the manual checkbox over (or handed it back), so the
+        // tick above has to be re-read rather than left where the rule found it.
+        keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
+    }
+
+    /// AppKit's automatic validation, which matters for exactly one item: while
+    /// the AirPods rule is on, the manual "Keep Microphone Always On" checkbox is
+    /// no longer what decides, so it is shown greyed at whatever the rule has
+    /// currently made true. Everything else validates as it always did.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard item === keepMicOpen else { return true }
+        return !(keepMicOpenForWirelessState?() ?? false)
+    }
     @objc private func copyLogPath() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(Log.fileURL.path, forType: .string) }
 
     private func refreshIcon() {

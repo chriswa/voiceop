@@ -7,6 +7,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let arbiter = AudioArbiter()
     private let hotkey = HotkeyMonitor()
     private let speechService = SpeechHTTPService()
+    /// Watches the default output device, for the "only when using AirPods" rule.
+    private let outputWatcher = OutputDeviceWatcher()
     private lazy var restart = RestartCoordinator(isBusy: { [unowned self] in self.arbiter.isDictating })
     private var currentStatus: OperatorStatus = .idle
 
@@ -74,6 +76,26 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             Log.log("mute system audio while dictating: \(on ? "enabled" : "disabled")")
             return on
         }
+        menuBar.keepMicOpenState = { [unowned self] in shouldKeepMicrophoneOpen }
+        menuBar.onToggleKeepMicOpen = { [unowned self] in
+            AudioPreferences.keepMicrophoneOpen.toggle()
+            applyMicrophonePolicy(reason: "menu")
+            return shouldKeepMicrophoneOpen
+        }
+        menuBar.keepMicOpenForWirelessState = { AudioPreferences.keepMicrophoneOpenForWireless }
+        menuBar.onToggleKeepMicOpenForWireless = { [unowned self] in
+            AudioPreferences.keepMicrophoneOpenForWireless.toggle()
+            applyMicrophonePolicy(reason: "menu")
+            return AudioPreferences.keepMicrophoneOpenForWireless
+        }
+        // AirPods arriving or leaving is what drives the rule; recompute on every
+        // output change rather than sampling it at dictation time, so the headset
+        // is already in the profile it will stay in before the key is pressed.
+        outputWatcher.onChange = { [weak self] in
+            MainActor.assumeIsolated { self?.applyMicrophonePolicy(reason: "output device changed") }
+        }
+        outputWatcher.start()
+        applyMicrophonePolicy(reason: "launch")
         menuBar.tapToToggleState = { HotkeyPreferences.tapToToggle }
         menuBar.onToggleTapToToggle = { [weak self] in
             HotkeyPreferences.tapToToggle.toggle()
@@ -100,10 +122,31 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.update(status: .idle)
     }
 
+    /// Whether the microphone should be held open right now: the AirPods rule's
+    /// answer when that rule is on, the manual checkbox's otherwise. One place
+    /// decides, so the menu's checkmark and the recorder can never disagree.
+    private var shouldKeepMicrophoneOpen: Bool {
+        AudioPreferences.keepMicrophoneOpenForWireless
+            ? OutputDevice.isWireless
+            : AudioPreferences.keepMicrophoneOpen
+    }
+
+    /// Push that decision into the recorder. Cheap and idempotent — `setAlwaysOn`
+    /// ignores a value it is already at — so every input that can change the
+    /// answer (either checkbox, an output-device change, launch) just calls this.
+    private func applyMicrophonePolicy(reason: String) {
+        let wanted = shouldKeepMicrophoneOpen
+        guard wanted != arbiter.microphoneAlwaysOn else { return }
+        Log.log("microphone: \(wanted ? "holding open" : "releasing between dictations") "
+                + "— \(reason), output \(OutputDevice.summary)")
+        arbiter.microphoneAlwaysOn = wanted
+    }
+
     /// Every way out of the process ends here — menu quit, the restart paths,
     /// and SIGTERM (see `TerminationSignal`) — so this is where the system output
     /// is unmuted and the discovery file stops pointing at a pid about to die.
     func applicationWillTerminate(_ notification: Notification) {
+        outputWatcher.stop()
         arbiter.prepareForTermination()
         speechService.stop()
     }

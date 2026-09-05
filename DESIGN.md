@@ -281,6 +281,40 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   `OutputMuter.isEnabled`. `restore()` stays ungated, so turning it off mid-dictation
   still unmutes an output we had already muted.
 
+### Holding the microphone open (2026-09-05)
+
+Opening or closing an input stream on a Bluetooth headset makes it renegotiate its
+codec: the AirPods drop out of their music profile into the voice one and back
+again, once at the start of a dictation and once at the end. The user hears a delay
+plus an obvious quality shift on whatever is playing, and it happens on every single
+dictation.
+
+`AudioRecorder.setAlwaysOn(true)` removes the switch by never closing the stream:
+the tap and the engine stay up between dictations, and `capturing` (cleared by
+`stop()`, set by `start()`) is what decides whether tap buffers are kept or dropped
+on the audio thread. `start()` then does **no graph work at all** — it builds a
+converter, flips `capturing`, and returns, so the first buffer arrives ~1 buffer
+later instead of after a device wake-up. Costs: the microphone indicator stays lit,
+and the headset stays in its voice profile for good.
+
+Two things this has to survive, both handled on `engineQueue`:
+- **Device changes.** `AVAudioEngineConfigurationChange` tears the graph down when
+  AirPods connect or leave, so the held-open tap is rebuilt against the new hardware
+  format (`openMicNow`). If a dictation began while that rebuild was queued, the
+  rebuild opens for *it* — its own `start()` saw the mic as open and did nothing.
+- **A format that changes under a live recording.** `rebuildConverterIfNeededLocked`
+  rebuilds the `AVAudioConverter` when tap buffers stop matching it, so a swapped
+  device gives a correct transcript rather than a resampled-at-the-wrong-rate one.
+
+Two menu checkboxes drive it (`AudioPreferences`, both default off):
+**Keep Microphone Always On**, and, indented under it, **Only When Using AirPods
+(Bluetooth)** — which takes the first one over (greyed via `validateMenuItem`, shown
+at whatever the rule currently makes true) and follows the default *output* device's
+CoreAudio transport type (`OutputDevice.isWireless`, watched by
+`OutputDeviceWatcher`). Transport, not device name: AirPods can be renamed and every
+other Bluetooth headset has the identical problem. `AppCoordinator.shouldKeepMicrophoneOpen`
+is the single place the two settings are resolved into one answer.
+
 ### Trigger key
 - Wispr uses Fn (keycode 63) via a "Keyboard Service" push-to-talk (`Ptt action down`).
 - **Ours**: default to **Right Shift (keycode 60)** during development via a `CGEventTap` on

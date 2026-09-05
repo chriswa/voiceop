@@ -54,9 +54,12 @@ final class AudioRecorder: @unchecked Sendable {
     private var trace: DictationTrace?
     private var firstAudioHandler: (@Sendable () -> Void)?
     private var startFailureHandler: (@Sendable (String) -> Void)?
-    /// The hardware format the tap is installed with. Held here rather than
-    /// captured into the queue block: `AVAudioFormat` is not `Sendable`, and this
-    /// class already takes responsibility for its own state via `lock`.
+    /// The bus format the live tap is delivering, recorded when the tap was
+    /// installed. Held here rather than captured into a queue block:
+    /// `AVAudioFormat` is not `Sendable`, and this class already takes
+    /// responsibility for its own state via `lock`. It seeds the converter for a
+    /// dictation that reuses a held-open tap; `rebuildConverterIfNeededLocked`
+    /// is what keeps the converter honest if it turns out to be stale.
     private var tapFormat: AVAudioFormat?
 
     /// Whether the capture graph is held open between dictations — the "Keep
@@ -233,11 +236,10 @@ final class AudioRecorder: @unchecked Sendable {
             // blocked in the driver). Don't wake a device nobody is listening to.
             self.lock.lock()
             let stale = recording != self.generation
-            let tapFormat = self.tapFormat
             self.lock.unlock()
-            guard !stale, let tapFormat else { return }
+            guard !stale else { return }
 
-            if let reason = self.openMic(format: tapFormat, trace: trace) {
+            if let reason = self.openMic(trace: trace) {
                 Log.log("recorder: engine start failed — \(reason)")
                 trace?.note("engine start failed: \(reason)")
                 self.reportStartFailure(reason, generation: recording)
@@ -266,9 +268,27 @@ final class AudioRecorder: @unchecked Sendable {
         lock.unlock()
         Log.log("recorder: always-on microphone \(on ? "enabled" : "disabled")")
         guard !recording else { return }
-        engineQueue.async { [weak self] in
-            guard let self else { return }
-            if on { self.openMicNow() } else { self.closeMic() }
+        if on { openMicAfterSettling() } else { engineQueue.async { [weak self] in self?.closeMic() } }
+    }
+
+    /// How long to let the audio system settle before opening the microphone in
+    /// response to a device change, and how many times to try again after that.
+    private static let deviceSettle: DispatchTimeInterval = .milliseconds(400)
+    private static let openAttempts = 8
+
+    /// Open the microphone once the hardware has stopped moving.
+    ///
+    /// **The delay is the fix for a crash** (v0.1.24, 2026-09-05: `abort()` inside
+    /// `installTapOnBus:`, one second after AirPods reconnected). Opening the
+    /// instant the default *output* device changed meant reading the input node's
+    /// format while the *input* device was still switching underneath it, and
+    /// `installTap` raises an ObjC exception — which Swift cannot catch, so it
+    /// takes the process with it — when the format it is handed disagrees with
+    /// the bus's real one. Waiting is only half the answer; `openMic` no longer
+    /// hands it a format at all.
+    private func openMicAfterSettling() {
+        engineQueue.asyncAfter(deadline: .now() + Self.deviceSettle) { [weak self] in
+            self?.openMicNow()
         }
     }
 
@@ -279,22 +299,30 @@ final class AudioRecorder: @unchecked Sendable {
     /// user presses the trigger key in that window their `start()` sees the
     /// microphone as already open and does no graph work of its own. This is then
     /// the only thing that can hand them a live tap. **engineQueue only.**
-    private func openMicNow() {
+    private func openMicNow(attemptsLeft: Int = openAttempts) {
         lock.lock()
         let wanted = alwaysOn || capturing
         lock.unlock()
         guard wanted else { return }
-        let format = engine.inputNode.inputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            Log.log("recorder: always-on — no input device available yet")
+
+        guard let reason = openMic(trace: nil) else {
+            lock.lock(); let format = tapFormat; lock.unlock()
+            Log.log(String(format: "recorder: microphone held open (%.0f Hz, %d ch)",
+                           format?.sampleRate ?? 0, format?.channelCount ?? 0))
             return
         }
-        lock.lock(); tapFormat = format; lock.unlock()
-        if let reason = openMic(format: format, trace: nil) {
-            Log.log("recorder: holding the microphone open failed — \(reason)")
-        } else {
-            Log.log(String(format: "recorder: microphone held open (%.0f Hz, %d ch)",
-                           format.sampleRate, format.channelCount))
+        // A device that is still arriving reports no usable format for a moment.
+        // Keep asking rather than leaving the microphone shut until the next
+        // dictation wakes it — that stall is the whole thing this avoids.
+        guard attemptsLeft > 1 else {
+            Log.log("recorder: gave up holding the microphone open — \(reason)")
+            return
+        }
+        if attemptsLeft == Self.openAttempts {
+            Log.log("recorder: microphone not ready yet (\(reason)) — retrying")
+        }
+        engineQueue.asyncAfter(deadline: .now() + Self.deviceSettle) { [weak self] in
+            self?.openMicNow(attemptsLeft: attemptsLeft - 1)
         }
     }
 
@@ -304,16 +332,36 @@ final class AudioRecorder: @unchecked Sendable {
     /// Idempotent: with the tap already installed it only makes sure the engine
     /// is running, so a dictation's start and the always-on path can both call it
     /// without ever racing a double `installTap` (both run here, serially).
-    /// **engineQueue only.**
-    private func openMic(format: AVAudioFormat, trace: DictationTrace?) -> String? {
+    ///
+    /// **Every precondition here is one that `installTap` would otherwise answer
+    /// with `abort()`.** It raises an ObjC exception, which no Swift `do/catch`
+    /// can contain, so the alternative to checking is losing the process — and
+    /// with it whatever the user was dictating. Hence: a validated bus format, a
+    /// nil format on the call itself (meaning "the bus's own", which cannot
+    /// disagree with itself the way a format read a moment earlier can), and a
+    /// `removeTap` first so a second install is impossible even if `micIsOpen`
+    /// were ever wrong. **engineQueue only.**
+    private func openMic(trace: DictationTrace?) -> String? {
         let input = engine.inputNode
         lock.lock()
         let alreadyInstalled = micIsOpen
-        if !alreadyInstalled { tapNumber += 1 }
-        let tap = tapNumber
         lock.unlock()
         if !alreadyInstalled {
-            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            // The format the tap will actually be handed. Read here only to be
+            // checked and remembered — a device still switching underneath us
+            // reports 0 Hz / 0 channels, and installing against that aborts.
+            let bus = input.outputFormat(forBus: 0)
+            guard bus.sampleRate > 0, bus.channelCount > 0 else {
+                return String(format: "input bus not ready (%.0f Hz, %d ch)",
+                              bus.sampleRate, bus.channelCount)
+            }
+            lock.lock()
+            tapFormat = bus
+            tapNumber += 1
+            let tap = tapNumber
+            lock.unlock()
+            input.removeTap(onBus: 0)
+            input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
                 self?.handleTap(buffer, tap: tap)
             }
         }
@@ -362,7 +410,7 @@ final class AudioRecorder: @unchecked Sendable {
         engineQueue.async { [weak self] in
             guard let self else { return }
             self.closeMic()
-            self.openMicNow()
+            self.openMicAfterSettling()
         }
     }
 

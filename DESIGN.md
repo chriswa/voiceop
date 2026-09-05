@@ -297,6 +297,17 @@ converter, flips `capturing`, and returns, so the first buffer arrives ~1 buffer
 later instead of after a device wake-up. Costs: the microphone indicator stays lit,
 and the headset stays in its voice profile for good.
 
+`installTap` is the sharp edge. It answers a bad argument with an ObjC exception,
+which no Swift `do/catch` can contain, so it takes the process down — v0.1.24
+aborted a second after AirPods reconnected, in `openMic` off the output-device
+listener: the default *output* had switched, so the policy asked for the
+microphone, but the *input* device was still moving and the format read from the
+node no longer matched the bus. The tap is therefore installed with a **nil**
+format (meaning "the bus's own", which cannot disagree with itself), only after a
+400 ms settle, only with a validated non-zero bus format, always after a
+`removeTap` so a double install is impossible, and with retries while the device
+is still arriving.
+
 Two things this has to survive, both handled on `engineQueue`:
 - **Device changes.** `AVAudioEngineConfigurationChange` tears the graph down when
   AirPods connect or leave, so the held-open tap is rebuilt against the new hardware

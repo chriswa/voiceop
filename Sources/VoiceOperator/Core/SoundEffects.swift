@@ -92,14 +92,14 @@ enum SoundEffect: CaseIterable {
         // Mute drops low→lower (A3→E3→A2); unmute climbs very-low→low (A2→E3→A3).
         case .narrationMuted:   return [(220, 0.05), (165, 0.05), (110, 0.11)]
         case .narrationUnmuted: return [(110, 0.05), (165, 0.05), (220, 0.11)]
-        // "R.I.P.": Chopin's funeral march motif (B♭ B♭ B♭ B♭ / D♭ C C B♭) at
-        // the pace of an 8-bit death jingle, then a low B♭3 thud — the tombstone
-        // landing. Nothing else descends into that register, so the app dying to
-        // come back is unmistakable. Plays after the dictation output-mute has
-        // been restored (see RestartCoordinator).
-        case .restarting: return [(466, 0.18), (0, 0.02), (466, 0.09), (466, 0.18), (0, 0.02), (466, 0.09),
-                                  (554, 0.18), (0, 0.02), (523, 0.09), (523, 0.18), (0, 0.02), (466, 0.24),
-                                  (0, 0.04), (233, 0.34)]
+        // Classic sad trombone ("wah wah wah waaah"): C–B♭–A♭–G with gaps so
+        // each wah articulates as a discrete tone. Dense game-death melodies
+        // collapse into mush on this sine-chirp synth; this one stays
+        // unmistakable. Written already brisk; `speedup` compresses it further.
+        // Plays after the dictation output-mute has been restored
+        // (see RestartCoordinator).
+        case .restarting: return [(523, 0.16), (0, 0.05), (466, 0.16), (0, 0.05),
+                                  (415, 0.16), (0, 0.05), (392, 0.42)]
         }
     }
 

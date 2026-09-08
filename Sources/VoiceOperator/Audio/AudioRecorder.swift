@@ -86,6 +86,21 @@ final class AudioRecorder: @unchecked Sendable {
     /// decide whether it can skip the device wake-up entirely.
     private var micIsOpen = false
 
+    /// When the held-open microphone was last brought up by `openMicNow`. A
+    /// configuration change arriving within `selfInflictedWindow` of it is one we
+    /// caused, and must not be rebuilt for — see `configurationChanged`.
+    private var lastHeldOpenAt: Date?
+    /// Rebuilds attempted inside the current `rebuildWindow`, and when that
+    /// window opened. The burst limiter that stops us fighting a device
+    /// something else keeps moving.
+    private var rebuildCount = 0
+    private var rebuildWindowStart: Date?
+    /// Set when the limiter has given up: the preference is still on, but we have
+    /// stopped rebuilding the graph for configuration changes. Cleared whenever
+    /// `setAlwaysOn` turns the hold back on, which is what an AirPod going back
+    /// in the ear does (via `AppCoordinator.applyMicrophonePolicy`).
+    private var holdSuspended = false
+
     /// Duration (seconds) of the most recently stopped clip.
     private(set) var lastDurationSeconds: Double = 0
     /// Peak amplitude and RMS energy of the most recently stopped clip (0…1).
@@ -264,6 +279,13 @@ final class AudioRecorder: @unchecked Sendable {
         lock.lock()
         guard on != alwaysOn else { lock.unlock(); return }
         alwaysOn = on
+        // A fresh decision deserves a fresh budget: whatever made us stand down
+        // last time (AirPods out, music fighting us for the device) is over as
+        // far as we know, so the limiter starts again from zero.
+        holdSuspended = false
+        rebuildCount = 0
+        rebuildWindowStart = nil
+        lastHeldOpenAt = nil
         let recording = capturing
         lock.unlock()
         Log.log("recorder: always-on microphone \(on ? "enabled" : "disabled")")
@@ -275,6 +297,24 @@ final class AudioRecorder: @unchecked Sendable {
     /// response to a device change, and how many times to try again after that.
     private static let deviceSettle: DispatchTimeInterval = .milliseconds(400)
     private static let openAttempts = 8
+
+    /// Opening the microphone on a Bluetooth headset *is itself* a configuration
+    /// change — the device flips into its voice profile a beat later. A change
+    /// this soon after our own open is therefore ours, not the hardware moving.
+    private static let selfInflictedWindow: TimeInterval = 1.0
+    /// How many rebuilds we will attempt in `rebuildWindow` seconds before
+    /// concluding that something else is moving the device faster than we can
+    /// follow, and standing down.
+    ///
+    /// **Calibrated against the slow flap, not the fast one.** Music playing
+    /// through the same headset trades the device back and forth on a ~3.4 s
+    /// cycle (v0.1.32, 2026-09-06) — far too slow to look like a burst, and the
+    /// first values here (4 in 10 s) never tripped on it while it cut the user's
+    /// audio indefinitely. A genuine device change is isolated, and reconnecting
+    /// a headset re-arms this through `setAlwaysOn` anyway, so the budget can be
+    /// this small without costing anything real.
+    private static let rebuildWindow: TimeInterval = 30
+    private static let maxRebuildsPerWindow = 2
 
     /// Open the microphone once the hardware has stopped moving.
     ///
@@ -306,7 +346,7 @@ final class AudioRecorder: @unchecked Sendable {
         guard wanted else { return }
 
         guard let reason = openMic(trace: nil) else {
-            lock.lock(); let format = tapFormat; lock.unlock()
+            lock.lock(); let format = tapFormat; lastHeldOpenAt = Date(); lock.unlock()
             Log.log(String(format: "recorder: microphone held open (%.0f Hz, %d ch)",
                            format?.sampleRate ?? 0, format?.channelCount ?? 0))
             return
@@ -404,8 +444,47 @@ final class AudioRecorder: @unchecked Sendable {
     @objc private func configurationChanged() {
         lock.lock()
         let wanted = alwaysOn && !capturing
+        guard wanted, !holdSuspended else { lock.unlock(); return }
+
+        // **The rebuild must not answer its own notification.** Bringing the
+        // microphone up pulls a Bluetooth headset into its voice profile, and
+        // that is itself a configuration change — which, rebuilt for, reopens the
+        // microphone and changes the configuration again. Left unguarded that is
+        // a loop with no exit but the device disappearing, and every turn of it
+        // is an audible gap in whatever the user is listening to.
+        if let opened = lastHeldOpenAt, Date().timeIntervalSince(opened) < Self.selfInflictedWindow {
+            lock.unlock()
+            return
+        }
+
+        // Past that, the changes are real but may still be unwinnable: music
+        // playing through the same headset pulls it back to its media profile as
+        // fast as we pull it into the voice one. Rebuilding into that fight is
+        // what cuts the user's audio every few seconds, so we count the attempts
+        // and stand down rather than keep trying.
+        let now = Date()
+        if let start = rebuildWindowStart, now.timeIntervalSince(start) < Self.rebuildWindow {
+            rebuildCount += 1
+        } else {
+            rebuildWindowStart = now
+            rebuildCount = 1
+        }
+        let standDown = rebuildCount > Self.maxRebuildsPerWindow
+        if standDown { holdSuspended = true }
         lock.unlock()
-        guard wanted else { return }
+
+        if standDown {
+            // Deliberately loud: the preference is still on, so the menu still
+            // says the microphone is held open, and the user is about to start
+            // paying the stall it exists to avoid.
+            Log.log("recorder: the audio device changed \(Self.maxRebuildsPerWindow + 1) times in "
+                    + "\(Int(Self.rebuildWindow))s — releasing the held-open microphone instead of "
+                    + "rebuilding it again. Dictation will wake it on demand; it is held open again "
+                    + "the next time the output device changes.")
+            engineQueue.async { [weak self] in self?.closeMic() }
+            return
+        }
+
         Log.log("recorder: audio configuration changed — rebuilding the held-open microphone")
         engineQueue.async { [weak self] in
             guard let self else { return }

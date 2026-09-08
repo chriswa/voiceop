@@ -326,6 +326,18 @@ CoreAudio transport type (`OutputDevice.isWireless`, watched by
 other Bluetooth headset has the identical problem. `AppCoordinator.shouldKeepMicrophoneOpen`
 is the single place the two settings are resolved into one answer.
 
+**The rebuild must not answer its own notification.** Bringing the microphone up
+on a Bluetooth headset *is itself* an `AVAudioEngineConfigurationChange` — the
+device flips profile a beat later — so rebuilding for it reopens the microphone
+and changes the configuration again. Unguarded that is a loop with no exit but
+the device disappearing, and every turn of it is an audible gap in whatever is
+playing; with music fighting for the same headset it ran for 23 s straight
+(v0.1.28, 2026-09-06). `configurationChanged` therefore ignores a change landing
+within `selfInflictedWindow` (1 s) of its own open, and stands down entirely —
+closing the microphone and logging loudly — after more than
+`maxRebuildsPerWindow` rebuilds in `rebuildWindow` seconds. `setAlwaysOn` clears
+that, so an AirPod going back in the ear re-arms it.
+
 ### Trigger key
 - Wispr uses Fn (keycode 63) via a "Keyboard Service" push-to-talk (`Ptt action down`).
 - **Ours**: default to **Right Shift (keycode 60)** during development via a `CGEventTap` on

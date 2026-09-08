@@ -92,11 +92,14 @@ enum SoundEffect: CaseIterable {
         // Mute drops low→lower (A3→E3→A2); unmute climbs very-low→low (A2→E3→A3).
         case .narrationMuted:   return [(220, 0.05), (165, 0.05), (110, 0.11)]
         case .narrationUnmuted: return [(110, 0.05), (165, 0.05), (220, 0.11)]
-        // "Power cycle": a fall through the octave and straight back up
-        // (A5→E5→A4→A5). Mid register, four notes, so it is neither the
-        // pasted arpeggio nor the low mute slides. Plays after the dictation
-        // output-mute has been restored (see RestartCoordinator).
-        case .restarting: return [(880, 0.08), (659, 0.08), (440, 0.12), (880, 0.16)]
+        // "R.I.P.": Chopin's funeral march motif (B♭ B♭ B♭ B♭ / D♭ C C B♭) at
+        // the pace of an 8-bit death jingle, then a low B♭3 thud — the tombstone
+        // landing. Nothing else descends into that register, so the app dying to
+        // come back is unmistakable. Plays after the dictation output-mute has
+        // been restored (see RestartCoordinator).
+        case .restarting: return [(466, 0.18), (0, 0.02), (466, 0.09), (466, 0.18), (0, 0.02), (466, 0.09),
+                                  (554, 0.18), (0, 0.02), (523, 0.09), (523, 0.18), (0, 0.02), (466, 0.24),
+                                  (0, 0.04), (233, 0.34)]
         }
     }
 

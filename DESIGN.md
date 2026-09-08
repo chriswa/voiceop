@@ -281,6 +281,17 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   `OutputMuter.isEnabled`. `restore()` stays ungated, so turning it off mid-dictation
   still unmutes an output we had already muted.
 
+### Duck-during-narration — Voice Processing I/O
+
+- While a speech job is active, `NarrationDucker` starts an independent silent
+  Voice Processing I/O graph configured for medium other-audio ducking. The
+  normal TTS players remain their own output path: Voice I/O startup failure
+  therefore cannot make a sentence silent.
+- The graph is released when the queue goes idle, a dictation barges in, or the
+  app terminates. If a device cannot initialize it, narration continues without
+  ducking and the reason is logged.
+
+
 ### Holding the microphone open (2026-09-05)
 
 Opening or closing an input stream on a Bluetooth headset makes it renegotiate its
@@ -346,7 +357,7 @@ that, so an AirPod going back in the ear re-arms it.
 
 #### Two invariants the key path must keep (2026-08-12)
 
-Both were violated at once, and on a 2019 Intel MacBook Pro (Ventura 13.7.8) the
+Both were violated at once, and on a 2019 Intel MacBook Pro running the then-current macOS the
 symptom was: tap Fn twice, nothing happens for a second, then the start and stop
 cues fire back to back and no dictation runs.
 
@@ -674,14 +685,14 @@ optional-name peel and last-referenced fallback apply uniformly.
   live API** (see `CLAUDE.md`).
 
 - **Milestone C — SHIPPED: formatted gRPC dictation (Wispr parity) (2026-07-08; client
-  on grpc-swift 1.x as of 2026-08-02 for macOS 13 / universal).**
+  on grpc-swift 1.x as of 2026-08-02 for the latest macOS release / universal).**
   Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest` + the
   `flow_api.v1` protobuf), captured in `spike/flow_request.md`, `spike/flow_spike.py`, and
   `proto/flow_api_v1.proto`. Three transports Wispr uses, in fallback order:
   1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowTranscriber` + `FlowSession`).**
      Bidirectional `flow_api.v1.TranscriptionService/**TranscribeStream**` on
      `model-v31pl413.grpc.api.baseten.co:443` (TLS, grpc-swift **1.x** — 2.x floors the
-     deployment target at macOS 15), over one process-wide keepalive'd connection
+     generated clients), over one process-wide keepalive'd connection
      (`FlowChannel`, mirroring Wispr's `ensureClient` + 4 s/2 s/permit-without-calls pings).
      Note the **unary** `Transcribe` RPC is Wispr's *fallback* (`makeHttpRequest`), not its
      primary — using it as the primary is what made dictation slow, see "Streaming dictation".

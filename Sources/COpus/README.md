@@ -6,8 +6,7 @@ wrapped as a SwiftPM `systemLibrary` target so `OpusEncoder` can produce the
 `proto/flow_api_v1.proto`, DESIGN.md Milestone C, and the project `CLAUDE.md`).
 
 - `include/` — opus public headers (from opus 1.5.2)
-- `lib/libopus.a` — prebuilt universal static archive (`arm64` + `x86_64`,
-  macOS 13 deployment target)
+- `lib/libopus.a` — prebuilt universal static archive (`arm64` + `x86_64`)
 - `module.modulemap` + `shim.h` — expose `opus.h` to Swift as `import COpus`
 - Linked via `-LSources/COpus/lib -lopus` in `Package.swift`.
 
@@ -21,16 +20,16 @@ tar xzf opus-1.5.2.tar.gz && cd opus-1.5.2
 ./configure --disable-doc --disable-extra-programs --enable-static \
   --prefix=/tmp/opus-arm64 --host=aarch64-apple-darwin \
   CC="clang -arch arm64" \
-  CFLAGS="-arch arm64 -mmacosx-version-min=13.0" \
-  LDFLAGS="-arch arm64 -mmacosx-version-min=13.0"
+  CFLAGS="-arch arm64" \
+  LDFLAGS="-arch arm64"
 make -j"$(sysctl -n hw.ncpu)" && make install && make distclean
 
 # x86_64
 ./configure --disable-doc --disable-extra-programs --enable-static \
   --prefix=/tmp/opus-x86_64 --host=x86_64-apple-darwin \
   CC="clang -arch x86_64" \
-  CFLAGS="-arch x86_64 -mmacosx-version-min=13.0" \
-  LDFLAGS="-arch x86_64 -mmacosx-version-min=13.0"
+  CFLAGS="-arch x86_64" \
+  LDFLAGS="-arch x86_64"
 make -j"$(sysctl -n hw.ncpu)" && make install
 
 lipo -create /tmp/opus-arm64/lib/libopus.a /tmp/opus-x86_64/lib/libopus.a \

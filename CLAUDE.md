@@ -43,8 +43,8 @@ call — that was the old design and it cost 5–10 s per dictation. The connect
 process-wide and keepalive'd (`FlowChannel`); never build a channel per call.
 Every dictation logs one `trace …` line with the full phase timeline.
 
-Client is **grpc-swift 1.x** (not 2.x) so the app
-can target macOS 13 / universal. It needs Wispr's Baseten `Api-Key`, read at
+Client is **grpc-swift 1.x**. The app targets the latest macOS release / universal.
+It needs Wispr's Baseten `Api-Key`, read at
 runtime from `$VOICEOP_BASETEN_KEY` or
 `~/Library/Application Support/VoiceOperator/baseten-key` (**never commit it**).
 Without the key, it falls back to `WisprTranscriber` (raw `/llm/asr`). Regenerate

@@ -1,8 +1,8 @@
 # Releasing
 
 How to cut a new version: a **universal** (Intel + Apple Silicon), Developer ID–signed,
-Apple-notarized, stapled `.app`, published as a GitHub Release. Runs on macOS 13
-(Ventura) and later.
+Apple-notarized, stapled `.app`, published as a GitHub Release. Targets the
+latest macOS release.
 
 The build/sign/notarize/staple mechanics live in [`scripts/make-release.sh`](../scripts/make-release.sh).
 This runbook covers the whole flow around it, so a fresh agent (or a fresh machine)

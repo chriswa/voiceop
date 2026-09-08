@@ -3,13 +3,11 @@ import PackageDescription
 
 let package = Package(
     name: "VoiceOperator",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v15)],
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.28.0"),
-        // grpc-swift 1.x (not 2.x): 2.x floors the deployment target at macOS 15
-        // via @available on generated clients. 1.x tracks SwiftNIO (macOS 10.15+),
-        // which lets us ship a universal binary for Intel/Ventura. See
-        // COMPATIBILITY-PLAN.md Workstream 1.
+        // grpc-swift 1.x matches the checked-in generated Flow client. The app
+        // targets the current macOS release line; see COMPATIBILITY-PLAN.md.
         .package(url: "https://github.com/grpc/grpc-swift.git", from: "1.27.0"),
         // Declared explicitly rather than leaned on transitively through
         // grpc-swift: the streaming transcription path names NIO types directly

@@ -21,6 +21,7 @@ import AppKit
 final class AudioArbiter {
     private let recorder = AudioRecorder()
     let muter = OutputMuter()
+    private let narrationDucker = NarrationDucker()
     private let transcriber: Transcriber
     private let liveTranscriber: LiveTranscriber?
     private let tts = TTSEngine()
@@ -281,6 +282,7 @@ final class AudioArbiter {
     /// happens).
     func prepareForTermination() {
         muter.restore()
+        narrationDucker.stop()
         guard isDictating else { return }
         Log.log("dictation: WARNING terminating with a dictation in flight — it will not be pasted")
         if let live {
@@ -874,7 +876,13 @@ final class AudioArbiter {
     /// are missed), hidden when the queue goes idle.
     func setSpeechActive(_ active: Bool) {
         isSpeaking = active
-        if active { wordOverlay.activate() } else { wordOverlay.stop() }
+        if active {
+            narrationDucker.start()
+            wordOverlay.activate()
+        } else {
+            narrationDucker.stop()
+            wordOverlay.stop()
+        }
     }
     func prefetchSentence(text: String, voiceID: String) async {
         // Must transform identically to `playSentence`, so the cache keys match

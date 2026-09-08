@@ -8,7 +8,7 @@ See `DESIGN.md` for architecture, reverse-engineering findings, and the phased p
 
 ## Requirements
 
-**Runtime:** macOS 13 (Ventura) or newer, Apple Silicon or Intel. Distributable
+**Runtime:** the latest macOS release, Apple Silicon or Intel. Distributable
 builds are universal (`arm64` + `x86_64`); see [`docs/RELEASING.md`](docs/RELEASING.md).
 
 **Building from source** still needs a full Xcode 16+ toolchain on an Apple Silicon
@@ -87,7 +87,7 @@ them the app would follow Access's login redirect and try to play HTML as audio
 
 ## Install
 
-Runs on **macOS 13 (Ventura) or later**, on both Apple Silicon and Intel Macs.
+Runs on the **latest macOS release**, on both Apple Silicon and Intel Macs.
 
 1. Download `VoiceOperator.zip` from the [latest release](../../releases/latest).
 2. Unzip it and drag **Voice Operator.app** into `/Applications`.

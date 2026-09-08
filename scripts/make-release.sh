@@ -2,7 +2,7 @@
 # Build a distributable, notarized "Voice Operator.app".
 #
 # Produces a UNIVERSAL binary (arm64 + x86_64) so it runs on both Apple Silicon
-# and Intel Macs, targets macOS 13 (Ventura) as the floor, signs with a
+# and Intel Macs, targets the latest macOS release, signs with a
 # Developer ID Application certificate under a hardened runtime, notarizes with
 # Apple, and staples the ticket so it launches cleanly on any Mac — offline and
 # without Gatekeeper prompts.

@@ -5,7 +5,7 @@ mutually exclusive, and the app needs the microphone. Recorded here so nobody
 spends another afternoon rediscovering it.
 
 Hardware under test: `chriswa's AirPods`, vendor `0x004C` product `0x201B`,
-macOS 26.6.2 (build 25G83), Voice Operator v0.1.27–v0.1.33.
+the then-current macOS release, Voice Operator v0.1.27–v0.1.33.
 
 ---
 
@@ -66,7 +66,7 @@ winner-take-all, whatever last published owns the commands, and there is no
 **Passive `NSSystemDefined` observation — dead.** A global monitor on
 `.systemDefined` (subtype 8, `NX_KEYTYPE_PLAY`/`FAST`/`REWIND`) saw **0 of 6**
 media events, including ones `MPRemoteCommandCenter` received in the same
-instant. Bluetooth AVRCP does not reach that event stream on macOS 26, and
+instant. Bluetooth AVRCP does not reach that event stream on the current macOS release, and
 neither, apparently, do the keyboard's own media keys. There is no way to observe
 media commands without taking Now Playing away from whatever is playing.
 

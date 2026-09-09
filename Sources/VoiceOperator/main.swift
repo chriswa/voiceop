@@ -33,6 +33,16 @@ if CommandLine.arguments.contains("--flow-grpc-test") {
             ?? "Claude and kubectl and Coda are proper nouns.")
     exit(0)
 }
+// Manual microphone check for the barge-in capture race: `--duck-race-test
+// ordered[:ms]` releases the narration-ducking lease before capture starts (what
+// the app does), `racing[:ms]` releases it that many ms afterwards (what it used
+// to do). See DebugCLI.runDuckRaceTest.
+if let i = CommandLine.arguments.firstIndex(of: "--duck-race-test") {
+    let spec = (CommandLine.arguments.dropFirst(i + 1).first ?? "ordered").split(separator: ":")
+    await DebugCLI.runDuckRaceTest(ordered: spec.first != "racing",
+                                   delayMS: spec.count > 1 ? Int(spec[1]) ?? 0 : 0)
+    exit(0)
+}
 if CommandLine.arguments.contains("--chirp-test") {
     await DebugCLI.runChirpTest()
     exit(0)

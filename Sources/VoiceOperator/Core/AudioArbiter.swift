@@ -215,6 +215,18 @@ final class AudioArbiter {
     func beginDictation(mode decision: DictationModeDecision, trace: DictationTrace = DictationTrace()) {
         guard !recorder.isRecording else { return }
         isDictating = true
+        // Release the narration ducker here, ahead of `recorder.start()`, rather
+        // than leaving it to the speech queue's `setSpeechActive(false)`.
+        //
+        // Dictation always silences narration, so the lease is over either way —
+        // what matters is *when*. The queue's answer arrives one actor hop later,
+        // by which time capture has started, and the ducker's Voice Processing
+        // I/O graph owns the same input device: dropping it then reconfigures the
+        // microphone out from under the tap we just installed and the dictation
+        // records nothing at all. Both engines mutate on `AudioGraphQueue`, so
+        // enqueueing the teardown first is what guarantees it finishes before the
+        // tap goes in. Idempotent, so the queue's later call is a no-op.
+        narrationDucker.stop()
         onDictationBegan?()
 
         let encoder = try? OpusEncoder()
@@ -282,7 +294,7 @@ final class AudioArbiter {
     /// happens).
     func prepareForTermination() {
         muter.restore()
-        narrationDucker.stop()
+        narrationDucker.stopSynchronously()
         guard isDictating else { return }
         Log.log("dictation: WARNING terminating with a dictation in flight — it will not be pasted")
         if let live {
@@ -479,7 +491,11 @@ final class AudioArbiter {
         let style = live?.style ?? .normal
         onTranscriptStyle?(.normal)   // the badge belongs to the recording, which is over
         let announcedListening = live?.announcedListening ?? false
-        live?.trace.mark("key-up")
+        // How long the trigger key was actually held. Deliberately not the clip's
+        // length: the two agree in normal operation and diverge exactly when
+        // capture fails, because a clip's length is zero *because* nothing was
+        // recorded, however long the user spoke for.
+        let heldSeconds = (live?.trace.mark("key-up") ?? 0) / 1000
         live?.pump?.invalidate()
         live?.pump = nil
 
@@ -508,6 +524,26 @@ final class AudioArbiter {
         let silent = peak < Self.silencePeak && rms < Self.silenceRMS
         if silent {
             if let live { cancelStream(live) }
+            // Nothing was captured at all, on a press far too long to be a brush
+            // of the key. The microphone is broken, not the room quiet — and this
+            // is the one failure that would otherwise pass in complete silence,
+            // because both cues are gated on audio that never arrived. Say so.
+            if pcm.isEmpty, heldSeconds > Self.accidentalTapSeconds {
+                Log.log(String(format: "dictation: WARNING captured no audio in %.1fs of recording — "
+                               + "nothing to transcribe. The capture graph never delivered a buffer "
+                               + "(check the microphone device, or a configuration change that killed it).",
+                               heldSeconds))
+                live?.trace.note(String(format: "captured nothing in %.1fs", heldSeconds))
+                live?.trace.flush()
+                try? FileManager.default.removeItem(at: wav)
+                // Not `playClosingCue`: there is no closing to announce, and the
+                // start chirp this would silence never played either.
+                SoundEffect.captureFailed.play()
+                record(wav: nil, duration: heldSeconds, transcript: "", command: isCommand,
+                       error: "the microphone captured no audio")
+                finishDictation()
+                return
+            }
             // A stray brush of the trigger key: stay completely quiet about it
             // unless the start cue already told the user we were listening.
             if duration <= Self.accidentalTapSeconds {
@@ -836,9 +872,12 @@ final class AudioArbiter {
         try? FileManager.default.copyItem(at: wav, to: dst); try? FileManager.default.removeItem(at: wav)
         return FileManager.default.fileExists(atPath: dst.path) ? dst : nil
     }
-    private func record(wav: URL, duration: TimeInterval, transcript: String, command: Bool, error: String?) {
-        if command { commandHistory.insert(CommandHistoryEntry(date: Date(), duration: duration, transcript: transcript, recognized: false, error: error, wavURL: persist(wav)), at: 0) }
-        else { sttHistory.insert(STTHistoryEntry(date: Date(), duration: duration, transcript: transcript, error: error, wavURL: persist(wav)), at: 0) }
+    /// File the dictation in history. `wav` is nil when there is no clip worth
+    /// keeping — a capture that produced no samples has nothing to retry from.
+    private func record(wav: URL?, duration: TimeInterval, transcript: String, command: Bool, error: String?) {
+        let stored = wav.flatMap(persist)
+        if command { commandHistory.insert(CommandHistoryEntry(date: Date(), duration: duration, transcript: transcript, recognized: false, error: error, wavURL: stored), at: 0) }
+        else { sttHistory.insert(STTHistoryEntry(date: Date(), duration: duration, transcript: transcript, error: error, wavURL: stored), at: 0) }
         save()
     }
     private func save() { historyStore.save(.init(stt: sttHistory, commands: commandHistory)); onHistoryChanged?() }

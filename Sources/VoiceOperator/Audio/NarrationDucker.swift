@@ -7,14 +7,38 @@ import AVFoundation
 /// their own proven output graphs. Coupling them made a Voice I/O start failure
 /// turn into a silent sentence. Here a failure only means narration proceeds
 /// without ducking.
-@MainActor
-final class NarrationDucker {
+///
+/// The lease owns the *input* device, which is the microphone a dictation is
+/// about to record from, so its graph work runs on `AudioGraphQueue` alongside
+/// the recorder's — see that type for why the two cannot be allowed to race.
+/// `start()` and `stop()` therefore only enqueue: they are safe to call from the
+/// trigger key's event-tap callback, which `engine.start()`/`stop()` (~600 ms
+/// each) would not be.
+final class NarrationDucker: @unchecked Sendable {
+    /// Both fields are touched only on `AudioGraphQueue.shared`.
     private var engine: AVAudioEngine?
     /// Kept alive by the graph. Its silent render makes Voice Processing I/O an
     /// active output client without adding microphone audio or an audible tone.
     private var silence: AVAudioSourceNode?
 
     func start() {
+        AudioGraphQueue.shared.async { [self] in startOnQueue() }
+    }
+
+    /// Release the lease. Ordering, not completion, is what callers rely on: work
+    /// enqueued after this — a dictation's tap install, above all — runs after the
+    /// teardown has finished.
+    func stop() {
+        AudioGraphQueue.shared.async { [self] in stopOnQueue() }
+    }
+
+    /// Release the lease before returning. Only for `applicationWillTerminate`,
+    /// where there is no later turn of the run loop to finish the job in.
+    func stopSynchronously() {
+        AudioGraphQueue.shared.sync { [self] in stopOnQueue() }
+    }
+
+    private func startOnQueue() {
         guard engine == nil else { return }
         let candidate = AVAudioEngine()
         do {
@@ -45,7 +69,7 @@ final class NarrationDucker {
         }
     }
 
-    func stop() {
+    private func stopOnQueue() {
         guard let engine else { return }
         engine.stop()
         engine.disconnectNodeInput(engine.mainMixerNode)

@@ -22,6 +22,7 @@ enum SoundEffect: CaseIterable {
     case commandListeningFinishedSlow   // Ctrl+Fn capture ended, slow path
     case pasted
     case silenceSkipped             // recording had no speech — transcription skipped
+    case captureFailed              // the microphone delivered no audio at all
     case surfaceRaised              // a voice tool matched + ran
     case unrecognized               // command matched no tool ("sad")
     case transcriptionFailed        // transcription request errored
@@ -66,6 +67,12 @@ enum SoundEffect: CaseIterable {
         // transcription was skipped. A soft "deflating" cue, distinct from
         // the command "unrecognized" and the harsher error tone.
         case .silenceSkipped: return [(392, 0.12), (262, 0.22)]
+        // Two flat low blats on one note (G3), like a buzzer. Every other cue
+        // moves in pitch, so a tone that refuses to is unmistakably "that did
+        // not work" rather than "that finished". Reserved for the microphone
+        // having produced nothing at all, which is the one dictation failure
+        // that otherwise passes in complete silence.
+        case .captureFailed: return [(196, 0.20), (0, 0.07), (196, 0.30)]
         // Rising three-tone "swoop" — a voice tool matched + ran.
         case .surfaceRaised: return [(700, 0.06), (950, 0.06), (1300, 0.11)]
         // Descending low two-tone — "sad": command matched no tool.
@@ -141,6 +148,7 @@ enum SoundEffect: CaseIterable {
         case .commandListeningFinishedSlow: return "Listening finished (command, slow path)"
         case .pasted:                   return "Pasted"
         case .silenceSkipped:           return "Silence skipped (no speech)"
+        case .captureFailed:            return "Capture failed (no microphone audio)"
         case .surfaceRaised:            return "Surface raised (tool ran)"
         case .unrecognized:             return "Unrecognized (no match)"
         case .transcriptionFailed:      return "Transcription failed"

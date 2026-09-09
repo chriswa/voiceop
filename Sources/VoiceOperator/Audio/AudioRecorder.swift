@@ -22,7 +22,8 @@ final class AudioRecorder: @unchecked Sendable {
     private let engine = AVAudioEngine()
 
     /// Every touch of the engine graph — tap install/removal, start, stop — runs
-    /// here, and nowhere else. Two reasons, and the second is the important one:
+    /// here, and nowhere else. Three reasons, and the last two are the important
+    /// ones:
     ///
     ///  1. `AVAudioEngine.start()` blocks until the input device is actually
     ///     running, which on an idle built-in microphone is routinely 700–1000 ms
@@ -33,8 +34,9 @@ final class AudioRecorder: @unchecked Sendable {
     ///     next dictation's tap install always executes after that stop. Ordering
     ///     the graph mutations any other way lets a new recording's tap be torn
     ///     down by the previous recording's stop.
-    private let engineQueue = DispatchQueue(label: "com.voiceoperator.audio-engine",
-                                            qos: .userInitiated)
+    ///  3. It is shared with `NarrationDucker`, whose Voice Processing I/O graph
+    ///     owns the same input device — see `AudioGraphQueue`.
+    private let engineQueue = AudioGraphQueue.shared
 
     /// Everything the audio-tap thread and the main thread share. `AVAudioConverter`
     /// is not thread-safe and `stop()` flushes it from the main thread, so it lives
@@ -86,10 +88,6 @@ final class AudioRecorder: @unchecked Sendable {
     /// decide whether it can skip the device wake-up entirely.
     private var micIsOpen = false
 
-    /// When the held-open microphone was last brought up by `openMicNow`. A
-    /// configuration change arriving within `selfInflictedWindow` of it is one we
-    /// caused, and must not be rebuilt for — see `configurationChanged`.
-    private var lastHeldOpenAt: Date?
     /// Rebuilds attempted inside the current `rebuildWindow`, and when that
     /// window opened. The burst limiter that stops us fighting a device
     /// something else keeps moving.
@@ -222,6 +220,11 @@ final class AudioRecorder: @unchecked Sendable {
         lock.lock()
         generation += 1
         let recording = generation
+        // A fresh dictation deserves a fresh rebuild budget: whatever the device
+        // was doing earlier is over as far as we know, and a headset that flapped
+        // an hour ago must not be why this dictation gives up on its microphone.
+        rebuildCount = 0
+        rebuildWindowStart = nil
         converter = conv
         inputSampleRate = format.sampleRate
         tapFormat = format
@@ -285,7 +288,6 @@ final class AudioRecorder: @unchecked Sendable {
         holdSuspended = false
         rebuildCount = 0
         rebuildWindowStart = nil
-        lastHeldOpenAt = nil
         let recording = capturing
         lock.unlock()
         Log.log("recorder: always-on microphone \(on ? "enabled" : "disabled")")
@@ -298,10 +300,6 @@ final class AudioRecorder: @unchecked Sendable {
     private static let deviceSettle: DispatchTimeInterval = .milliseconds(400)
     private static let openAttempts = 8
 
-    /// Opening the microphone on a Bluetooth headset *is itself* a configuration
-    /// change — the device flips into its voice profile a beat later. A change
-    /// this soon after our own open is therefore ours, not the hardware moving.
-    private static let selfInflictedWindow: TimeInterval = 1.0
     /// How many rebuilds we will attempt in `rebuildWindow` seconds before
     /// concluding that something else is moving the device faster than we can
     /// follow, and standing down.
@@ -346,7 +344,7 @@ final class AudioRecorder: @unchecked Sendable {
         guard wanted else { return }
 
         guard let reason = openMic(trace: nil) else {
-            lock.lock(); let format = tapFormat; lastHeldOpenAt = Date(); lock.unlock()
+            lock.lock(); let format = tapFormat; lock.unlock()
             Log.log(String(format: "recorder: microphone held open (%.0f Hz, %d ch)",
                            format?.sampleRate ?? 0, format?.channelCount ?? 0))
             return
@@ -435,33 +433,51 @@ final class AudioRecorder: @unchecked Sendable {
     }
 
     /// The input hardware changed under a running graph — AirPods connecting, a
-    /// dock being unplugged, the headset flipping profiles. AVAudioEngine tears
-    /// its graph down when this happens, so a microphone we are holding open has
-    /// to be rebuilt against the new format or it silently stays shut until the
-    /// next dictation wakes it, which is exactly the stall the preference exists
-    /// to remove. Mid-dictation the graph is left alone (the recording keeps what
-    /// it has) and `stop()` reconciles.
+    /// dock being unplugged, the headset flipping profiles, another engine in
+    /// this process releasing Voice Processing I/O. AVAudioEngine tears its graph
+    /// down when this happens, so the tap has to be rebuilt against the new
+    /// format or it silently stays shut.
+    ///
+    /// **This fires mid-dictation too, and rebuilding then is not optional.** The
+    /// tap is already dead by the time we hear about it: a recording left alone
+    /// keeps only the audio captured before the change and takes in nothing
+    /// afterwards, which reaches the user as a dictation that transcribes half a
+    /// sentence — or, when the change lands during the opening moments, as one
+    /// that never chirps, records nothing and pastes nothing. Rebuilding costs a
+    /// few hundred milliseconds of audio; not rebuilding costs the rest of the
+    /// dictation. The captured bytes survive the rebuild, so what was said before
+    /// the change still reaches the transcript.
     @objc private func configurationChanged() {
+        engineQueue.async { [weak self] in self?.handleConfigurationChange() }
+    }
+
+    /// **engineQueue only** — it reads the graph, and hopping here also means the
+    /// decision is made after any open or close already queued ahead of it.
+    private func handleConfigurationChange() {
         lock.lock()
-        let wanted = alwaysOn && !capturing
-        guard wanted, !holdSuspended else { lock.unlock(); return }
+        let recording = capturing
+        // `holdSuspended` says we have stopped chasing the device around for the
+        // *hold*. A recording still needs its microphone either way.
+        guard recording || (alwaysOn && !holdSuspended) else { lock.unlock(); return }
+        lock.unlock()
 
         // **The rebuild must not answer its own notification.** Bringing the
         // microphone up pulls a Bluetooth headset into its voice profile, and
         // that is itself a configuration change — which, rebuilt for, reopens the
-        // microphone and changes the configuration again. Left unguarded that is
-        // a loop with no exit but the device disappearing, and every turn of it
-        // is an audible gap in whatever the user is listening to.
-        if let opened = lastHeldOpenAt, Date().timeIntervalSince(opened) < Self.selfInflictedWindow {
-            lock.unlock()
-            return
-        }
+        // microphone and changes the configuration again. AVAudioEngine stops the
+        // engine before posting, so a graph that is still running is not one that
+        // needs rebuilding, and testing that answers the question directly rather
+        // than guessing at it from how recently we last opened the device.
+        guard !engine.isRunning else { return }
 
         // Past that, the changes are real but may still be unwinnable: music
         // playing through the same headset pulls it back to its media profile as
         // fast as we pull it into the voice one. Rebuilding into that fight is
         // what cuts the user's audio every few seconds, so we count the attempts
-        // and stand down rather than keep trying.
+        // and stand down rather than keep trying. The budget is per dictation as
+        // well as per window — `start()` re-arms it — so a headset that flapped
+        // an hour ago never costs someone their next dictation.
+        lock.lock()
         let now = Date()
         if let start = rebuildWindowStart, now.timeIntervalSince(start) < Self.rebuildWindow {
             rebuildCount += 1
@@ -470,27 +486,36 @@ final class AudioRecorder: @unchecked Sendable {
             rebuildCount = 1
         }
         let standDown = rebuildCount > Self.maxRebuildsPerWindow
-        if standDown { holdSuspended = true }
+        // Only the hold stands down. A recording gets the same budget but keeps
+        // the device it already has, and says so.
+        if standDown, !recording { holdSuspended = true }
+        let trace = self.trace
         lock.unlock()
 
         if standDown {
-            // Deliberately loud: the preference is still on, so the menu still
-            // says the microphone is held open, and the user is about to start
-            // paying the stall it exists to avoid.
-            Log.log("recorder: the audio device changed \(Self.maxRebuildsPerWindow + 1) times in "
-                    + "\(Int(Self.rebuildWindow))s — releasing the held-open microphone instead of "
-                    + "rebuilding it again. Dictation will wake it on demand; it is held open again "
-                    + "the next time the output device changes.")
-            engineQueue.async { [weak self] in self?.closeMic() }
+            // Deliberately loud either way: the user is about to start paying for
+            // something the app normally hides from them, and a dictation that has
+            // stopped capturing must say so rather than quietly come back short.
+            if recording {
+                Log.log("recorder: WARNING the audio device changed \(Self.maxRebuildsPerWindow + 1) times in "
+                        + "\(Int(Self.rebuildWindow))s — no longer rebuilding the capture graph. This "
+                        + "dictation keeps only the audio captured so far.")
+                trace?.note("device kept changing — capture abandoned")
+            } else {
+                Log.log("recorder: the audio device changed \(Self.maxRebuildsPerWindow + 1) times in "
+                        + "\(Int(Self.rebuildWindow))s — releasing the held-open microphone instead of "
+                        + "rebuilding it again. Dictation will wake it on demand; it is held open again "
+                        + "the next time the output device changes.")
+                closeMic()
+            }
             return
         }
 
-        Log.log("recorder: audio configuration changed — rebuilding the held-open microphone")
-        engineQueue.async { [weak self] in
-            guard let self else { return }
-            self.closeMic()
-            self.openMicAfterSettling()
-        }
+        Log.log("recorder: audio configuration changed — rebuilding the "
+                + (recording ? "capture graph mid-dictation" : "held-open microphone"))
+        trace?.note("device changed — capture graph rebuilt")
+        closeMic()
+        openMicAfterSettling()
     }
 
     /// Hand a failed device start back to the caller on the main thread, unless a
@@ -522,6 +547,14 @@ final class AudioRecorder: @unchecked Sendable {
 
         if isFirstAudio {
             trace?.mark("audio")
+            // The level of the very first buffer *as the device handed it over*,
+            // before conversion. When a dictation comes back silent this is the
+            // line that says which half is at fault: a raw peak of exactly zero
+            // is a microphone feeding us digital silence (a graph that never
+            // really came up, an input muted by something else), while a healthy
+            // raw peak against a silent transcript points at the conversion or
+            // the upload instead.
+            trace?.note(Self.firstBufferSummary(buffer))
             handler?()
         }
     }
@@ -597,6 +630,17 @@ final class AudioRecorder: @unchecked Sendable {
             offset += bytesPerBin
         }
         return profile
+    }
+
+    /// Format and un-converted level of a recording's first tap buffer, for the
+    /// trace line. Scans one buffer per dictation.
+    private static func firstBufferSummary(_ buffer: AVAudioPCMBuffer) -> String {
+        var rawPeak: Float = 0
+        if let channels = buffer.floatChannelData {
+            for i in 0..<Int(buffer.frameLength) { rawPeak = max(rawPeak, abs(channels[0][i])) }
+        }
+        return String(format: "first buffer %.0fHz/%dch raw-peak=%.4f",
+                      buffer.format.sampleRate, buffer.format.channelCount, rawPeak)
     }
 
     /// One tap buffer being handed to the converter's input block. The block is

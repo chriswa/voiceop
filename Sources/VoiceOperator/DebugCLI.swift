@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import AVFoundation
 
 /// Developer self-tests, invoked from `main.swift` via CLI flags. Not part of
 /// the shipping menu-bar app.
@@ -216,5 +217,75 @@ enum DebugCLI {
         })
         note(String(format: "tts-test %@ (%.2fs total)",
                     ok ? "finished" : "failed/halted", Date().timeIntervalSince(t0)))
+    }
+
+    /// Reproduce (and now verify the fix for) "dictation after barge-in captures
+    /// nothing": hold a narration-ducking lease, then release it around the start
+    /// of a recording the way interrupting TTS with the trigger key does, and
+    /// report whether the microphone ever delivers a buffer.
+    ///
+    /// `ordered` releases the lease before `AudioRecorder.start()` and waits
+    /// `delayMS` first — 0, the default, is back-to-back, which is what
+    /// `beginDictation` does; both engines sharing `AudioGraphQueue` is what makes
+    /// that ordering hold. `racing` releases it `delayMS` *after* the start
+    /// instead, which is the arrangement that killed capture outright.
+    ///
+    /// Needs the microphone, so it is a manual check rather than a unit test:
+    /// `swift run VoiceOperator --duck-race-test ordered|racing[:ms]`.
+    @MainActor
+    static func runDuckRaceTest(ordered: Bool, delayMS: Int) async {
+        @Sendable func note(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { _ in
+                note("  ! AVAudioEngineConfigurationChange")
+            }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let ducker = NarrationDucker()
+        ducker.start()
+        try? await Task.sleep(for: .milliseconds(1_500))
+
+        let recorder = AudioRecorder()
+        let heard = Heard()
+        recorder.onFirstAudio = { heard.mark() }
+        recorder.onStartFailed = { reason in note("  ! start failed: \(reason)") }
+
+        // delayMS < 0 in ordered mode: never release the lease during the
+        // recording at all — the "hold it through the dictation" alternative.
+        let held = ordered && delayMS < 0
+        if ordered, !held {
+            ducker.stop()
+            if delayMS > 0 { try? await Task.sleep(for: .milliseconds(delayMS)) }
+        }
+        let t0 = Date()
+        do { try recorder.start() } catch { note("start threw \(error)"); return }
+        note("  recorder.start() returned after \(Int(Date().timeIntervalSince(t0) * 1000))ms")
+        if !ordered {
+            try? await Task.sleep(for: .milliseconds(delayMS))
+            ducker.stop()
+        }
+        try? await Task.sleep(for: .seconds(4))
+        let clip = try? recorder.stop()
+        ducker.stopSynchronously()
+        let first = heard.at.map { "\(Int($0.timeIntervalSince(t0) * 1000))ms" } ?? "NEVER"
+        if let pcm = clip?.pcm {
+            let perSecond = stride(from: 0, to: pcm.count, by: AudioRecorder.asrSampleRate * 2).map { off -> String in
+                let end = min(off + AudioRecorder.asrSampleRate * 2, pcm.count)
+                return String(format: "%.4f", AudioRecorder.levels(pcm16: Data(pcm[off..<end])).peak)
+            }
+            note("  peak per second: " + perSecond.joined(separator: " "))
+        }
+        note(String(format: "duck-race %@ delay=%dms: firstAudio=%@ bytes=%d peak=%.4f rms=%.4f",
+                    held ? "held" : (ordered ? "ordered" : "racing"), delayMS, first,
+                    clip?.pcm.count ?? -1, recorder.lastPeak, recorder.lastRMS))
+
+    }
+
+    /// First-audio timestamp, written from the audio thread.
+    private final class Heard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stamp: Date?
+        var at: Date? { lock.lock(); defer { lock.unlock() }; return stamp }
+        func mark() { lock.lock(); if stamp == nil { stamp = Date() }; lock.unlock() }
     }
 }

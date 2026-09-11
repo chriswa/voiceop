@@ -18,6 +18,17 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
+    private let playbackSpeed = NSMenuItem(title: "Playback Speed: 1.0×", action: nil, keyEquivalent: "")
+    private let fasterSpeech = NSMenuItem(title: "Faster Speech", action: #selector(faster), keyEquivalent: ".")
+    private let slowerSpeech = NSMenuItem(title: "Slower Speech", action: #selector(slower), keyEquivalent: ",")
+    private let rewindSpeech = NSMenuItem(title: "Rewind 3 Seconds", action: #selector(rewind), keyEquivalent: String(UnicodeScalar(NSLeftArrowFunctionKey)!))
+    private let forwardSpeech = NSMenuItem(title: "Skip Ahead 3 Seconds", action: #selector(forward), keyEquivalent: String(UnicodeScalar(NSRightArrowFunctionKey)!))
+    var onFasterSpeech: (() -> Void)?
+    var onSlowerSpeech: (() -> Void)?
+    var onRewindSpeech: (() -> Void)?
+    var onForwardSpeech: (() -> Void)?
+    private var canAdjustSpeech = false
+    private var canRewindSpeech = false
     var onMuteSpeech: ((Bool) -> Void)?
     var onSpeakClipboard: (() -> Void)?
     var onSummarizeClipboard: (() -> Void)?
@@ -80,6 +91,13 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         summarize.keyEquivalentModifierMask = [.command, .control]
         summarize.target = self; menu.addItem(summarize)
         menu.addItem(.separator())
+        playbackSpeed.isEnabled = false; menu.addItem(playbackSpeed)
+        for item in [fasterSpeech, slowerSpeech, rewindSpeech, forwardSpeech] {
+            item.target = self
+            item.keyEquivalentModifierMask = [.command, .control]
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
         tapToToggle.target = self; menu.addItem(tapToToggle)
         wordOverlay.target = self; menu.addItem(wordOverlay)
         muteSystemAudio.target = self; menu.addItem(muteSystemAudio)
@@ -106,6 +124,15 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         currentStatus = state
         status.title = state.accessibilityLabel.replacingOccurrences(of: "Voice Operator — ", with: "")
         refreshIcon()
+    }
+    func updatePlayback(rate: Float, canAdjust: Bool, canRewind: Bool) {
+        playbackSpeed.title = String(format: "Playback Speed: %.1f×", rate)
+        canAdjustSpeech = canAdjust
+        canRewindSpeech = canRewind
+        fasterSpeech.isEnabled = canAdjust && rate < 5
+        slowerSpeech.isEnabled = canAdjust && rate > 0.5
+        rewindSpeech.isEnabled = canRewind
+        forwardSpeech.isEnabled = canAdjust
     }
     /// The transcript style of the dictation being recorded, shown as badges on
     /// the icon. Only visible while capturing, which is where the key that cycles
@@ -179,6 +206,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// listener stay in step however it was triggered.
     func toggleNarrationMute() { toggleMute() }
     @objc private func speakClipboard() { onSpeakClipboard?() }
+    @objc private func faster() { onFasterSpeech?() }
+    @objc private func slower() { onSlowerSpeech?() }
+    @objc private func rewind() { onRewindSpeech?() }
+    @objc private func forward() { onForwardSpeech?() }
     @objc private func summarizeClipboard() { onSummarizeClipboard?() }
     @objc private func restart() { onRestart?() }
     @objc private func toggleLogin() { _ = onToggleLaunchAtLogin?() }
@@ -198,6 +229,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// no longer what decides, so it is shown greyed at whatever the rule has
     /// currently made true. Everything else validates as it always did.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item === fasterSpeech || item === slowerSpeech { return canAdjustSpeech && item.isEnabled }
+        if item === rewindSpeech { return canRewindSpeech }
+        if item === forwardSpeech { return canAdjustSpeech }
         guard item === keepMicOpen else { return true }
         return !(keepMicOpenForWirelessState?() ?? false)
     }

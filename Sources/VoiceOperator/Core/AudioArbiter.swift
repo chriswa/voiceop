@@ -25,6 +25,18 @@ final class AudioArbiter {
     private let transcriber: Transcriber
     private let liveTranscriber: LiveTranscriber?
     private let tts = TTSEngine()
+    private var speechSessionID: String?
+    private var playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
+    private var speechExpiry: Task<Void, Never>?
+    private var queueSpeechActive = false
+    var onSpeechIdle: (() -> Void)?
+    var onPlaybackControlsChanged: (() -> Void)?
+    var speechRate: Float { playbackControls.rate }
+    var canAdjustSpeech: Bool { speechSessionID != nil && isSpeaking && !isDictating }
+    var canRewindSpeech: Bool {
+        speechSessionID != nil && !isDictating && tts.duration > 0
+            && playbackControls.canRewind(now: ProcessInfo.processInfo.systemUptime)
+    }
     /// Full-width word-highlight bar, driven in time with TTS playback.
     let wordOverlay = WordOverlayController()
     private let historyStore = HistoryStore()
@@ -215,6 +227,7 @@ final class AudioArbiter {
     func beginDictation(mode decision: DictationModeDecision, trace: DictationTrace = DictationTrace()) {
         guard !recorder.isRecording else { return }
         isDictating = true
+        haltSpeech()
         // Release the narration ducker here, ahead of `recorder.start()`, rather
         // than leaving it to the speech queue's `setSpeechActive(false)`.
         //
@@ -737,6 +750,7 @@ final class AudioArbiter {
     // MARK: - Other actions
 
     func speakClipboard() {
+        if playbackControls.replaying { haltSpeech(); return }
         // Toggle: stop whatever is speaking/queued; otherwise speak the clipboard.
         let text = NSPasteboard.general.string(forType: .string) ?? ""
         Log.log("speak-clipboard: \(text.count) char(s) on the clipboard")
@@ -882,46 +896,134 @@ final class AudioArbiter {
     }
     private func save() { historyStore.save(.init(stt: sttHistory, commands: commandHistory)); onHistoryChanged?() }
 
-    func playSentence(text: String, voiceID: String,
+    func playSentence(_ request: SpeechJobManager.SentencePlayback,
                       onStart: @escaping @Sendable () -> Void = {},
                       onSynthesized: @escaping @Sendable () -> Void = {}) async -> Bool {
+        guard !isDictating else { onSynthesized(); return false }
+        let id = request.jobID
+        if speechSessionID != id {
+            speechExpiry?.cancel()
+            tts.beginSession(rate: PlaybackPreferences().rate)
+            speechSessionID = id
+            playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
+            wordOverlay.beginSession(position: { [weak self] in self?.tts.position ?? 0 })
+            tts.onDrain = { [weak self] in
+                guard let self, self.speechSessionID == id, self.playbackControls.completed else { return }
+                self.finishSpeechPlayback()
+            }
+        }
+        queueSpeechActive = true
+        refreshSpeechActivity()
+        onPlaybackControlsChanged?()
         onStatus?(.requestingTTS)
         startTTSWaitCue()
-        // Synthesize (and time) the preprocessed text so compound tokens split
-        // into per-piece timing and separators are spoken/stripped; the overlay
-        // is given the mapping so it shows the ORIGINAL text and highlights each
-        // spoken piece — a `/` said as "slash" still lights up the literal `/`.
-        let prepared = TTSPreprocess.prepare(text)
-        let utterance = Utterance(text: prepared.ttsText, voiceID: voiceID)
-        // Fetch word timings alongside synthesis so they're ready when audio
-        // starts; the overlay is anchored at the first audible sample.
+        let prepared = TTSPreprocess.prepare(request.text)
+        let utterance = Utterance(text: prepared.ttsText, voiceID: request.voice)
         let timingsTask = Task { await self.tts.wordTimings(for: utterance) }
+        wordOverlay.appendSentence(start: tts.duration, prepared: prepared, timings: { await timingsTask.value })
         let result = await tts.play(utterance, onStart: { [weak self] in
-            self?.stopTTSWaitCue()
-            self?.onStatus?(.speaking)
-            self?.wordOverlay.begin(anchor: Date(), prepared: prepared, timings: { await timingsTask.value })
+            guard let self, self.speechSessionID == id, !self.isDictating else { return }
+            self.stopTTSWaitCue()
+            self.onStatus?(.speaking)
+            self.onPlaybackControlsChanged?()
             onStart()
         }, onSynthesized: { onSynthesized() })
-        // The overlay is NOT hidden here: it stays up across the job's sentences
-        // (blank crosshair between them) and is hidden only when the whole job
-        // goes idle, via `setSpeechActive(false)`.
+        guard speechSessionID == id else { return false }
         stopTTSWaitCue()
-        if !isDictating { onStatus?(.idle) }
+        if result && request.isLast {
+            finishSpeechPlayback()
+            // A rewind can arrive after the last sample's completion callback
+            // but before this await resumes. Keep that local replay audible.
+            if !tts.atEnd {
+                _ = playbackControls.rewind(now: ProcessInfo.processInfo.systemUptime)
+                speechExpiry?.cancel()
+                refreshSpeechActivity()
+            }
+        } else if !result {
+            haltSpeech()
+        }
         return result
     }
-    func haltSpeech() { tts.stop(); wordOverlay.stop() }
-    /// Overlay visibility follows the speech queue: shown when a job starts
-    /// synthesizing (before audio, so the window is warm and no opening words
-    /// are missed), hidden when the queue goes idle.
+
+    func haltSpeech() {
+        speechExpiry?.cancel(); speechExpiry = nil
+        speechSessionID = nil
+        playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
+        queueSpeechActive = false
+        tts.stop()
+        stopTTSWaitCue()
+        wordOverlay.stop()
+        refreshSpeechActivity()
+        onPlaybackControlsChanged?()
+    }
+
+    func adjustSpeechRate(by delta: Float) {
+        guard canAdjustSpeech else { return }
+        playbackControls.adjust(by: delta)
+        PlaybackPreferences().rate = playbackControls.rate
+        tts.setPlaybackRate(playbackControls.rate)
+        wordOverlay.refresh()
+        onPlaybackControlsChanged?()
+    }
+
+    func rewindSpeech(seconds: Double) {
+        guard canRewindSpeech, tts.rewind(seconds: seconds) else { return }
+        _ = playbackControls.rewind(now: ProcessInfo.processInfo.systemUptime)
+        speechExpiry?.cancel(); speechExpiry = nil
+        stopTTSWaitCue()
+        refreshSpeechActivity()
+        onStatus?(.speaking)
+        wordOverlay.refresh()
+        onPlaybackControlsChanged?()
+        Log.log(String(format: "tts rewind: %.1fs → %.2fs (job %@)", seconds, tts.position, speechSessionID ?? ""))
+    }
+
+    func skipSpeechAhead(seconds: Double) {
+        guard canAdjustSpeech, tts.skipAhead(seconds: seconds) else { return }
+        wordOverlay.refresh()
+        onPlaybackControlsChanged?()
+        Log.log(String(format: "tts skip ahead: %.1fs (job %@)", seconds, speechSessionID ?? ""))
+    }
+
+    /// Natural completion retains the local session for two seconds. HTTP jobs
+    /// still complete normally: replay never reopens a terminal external job.
+    private func finishSpeechPlayback() {
+        guard let id = speechSessionID else { return }
+        playbackControls.finish(now: ProcessInfo.processInfo.systemUptime)
+        speechExpiry?.cancel()
+        speechExpiry = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            guard let self, self.speechSessionID == id,
+                  !self.playbackControls.replaying, self.tts.atEnd else { return }
+            self.speechSessionID = nil
+            self.playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
+            self.tts.stop()
+            self.wordOverlay.stop()
+            self.onPlaybackControlsChanged?()
+        }
+        refreshSpeechActivity()
+        onPlaybackControlsChanged?()
+    }
+
     func setSpeechActive(_ active: Bool) {
+        queueSpeechActive = active && !isDictating
+        refreshSpeechActivity()
+    }
+
+    private func refreshSpeechActivity() {
+        let active = !isDictating && (queueSpeechActive || playbackControls.replaying)
+        let wasSpeaking = isSpeaking
         isSpeaking = active
         if active {
             narrationDucker.start()
             wordOverlay.activate()
         } else {
             narrationDucker.stop()
-            wordOverlay.stop()
+            wordOverlay.hide()
+            if !isDictating { onStatus?(.idle) }
         }
+        if wasSpeaking && !active { onSpeechIdle?() }
+        onPlaybackControlsChanged?()
     }
     func prefetchSentence(text: String, voiceID: String) async {
         // Must transform identically to `playSentence`, so the cache keys match

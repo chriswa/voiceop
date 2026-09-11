@@ -3,6 +3,30 @@ import XCTest
 @testable import VoiceOperator
 
 final class SpeechJobManagerTests: XCTestCase {
+    func testSentenceSessionIdentityAndNextJobHandoff() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let requests = PlaybackRequests()
+        await manager.configure(
+            play: { request, onStart, _ in
+                await requests.append(request)
+                return await gate.play(onStart: onStart)
+            }, prefetch: { _, _ in }, halt: {})
+        let first = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
+        let second = await manager.enqueue(text: "Another job.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        await gate.finishNext()
+        await gate.waitForStarts(2)
+        await gate.finishNext()
+        await gate.waitForStarts(3)
+        let seen = await requests.values
+        XCTAssertEqual(seen.map(\.jobID), [first.id, first.id, second.id])
+        XCTAssertEqual(seen.map(\.isLast), [false, true, true])
+        let completed = await manager.result(id: first.id)
+        XCTAssertEqual(completed?.state, .completed)
+        await gate.finishNext()
+    }
+
     func testQueueRejectsMutedRequests() async {
         let manager = SpeechJobManager()
         await manager.setMuted(true)
@@ -15,7 +39,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let gate = PlaybackGate()
         let halts = Counter()
         await manager.configure(
-            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: { Task { await halts.increment() } })
 
@@ -42,7 +66,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
-            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: {})
 
@@ -88,7 +112,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
-            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: {})
 
@@ -117,7 +141,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
-            play: { _, _, onStart, _ in await gate.play(onStart: onStart) },
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: {})
 
@@ -235,7 +259,7 @@ private func startWindowHarness(sentences: Int) async -> WindowHarness {
     let synth = SynthesisGate()
     let words = ["One.", "Two.", "Three.", "Four.", "Five."]
     await manager.configure(
-        play: { _, _, onStart, onSynthesized in
+        play: { _, onStart, onSynthesized in
             await gate.play(onStart: onStart, onSynthesized: onSynthesized)
         },
         prefetch: { text, _ in await synth.synthesize(text) },
@@ -281,6 +305,11 @@ private actor SynthesisGate {
 private actor Counter {
     private(set) var value = 0
     func increment() { value += 1 }
+}
+
+private actor PlaybackRequests {
+    private(set) var values: [SpeechJobManager.SentencePlayback] = []
+    func append(_ request: SpeechJobManager.SentencePlayback) { values.append(request) }
 }
 
 private actor PlaybackGate {

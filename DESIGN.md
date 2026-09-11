@@ -560,10 +560,49 @@ word is positioned so its lowercase-body midline lands at the centre of the bott
 fixates in reading (not the em-box centre, which sits high on ascender space). The overlay window is
 full-screen and transparent, painting only the guides, the band and the word; glyphs carry no stroke
 (a stroke leaves join artifacts in the letters' bowls).
-The bar is anchored at the first audible sample (`onStart`) and advanced by a 60 Hz clock against
-the fetched timings — Kokoro plays a sentence contiguously, so elapsed wall-time tracks the audio
-closely enough without threading a sample clock out of the player. Toggle: menu **Word Overlay**
-(`OverlayPreferences.wordOverlayEnabled`, default on).
+The bar samples the player's source-audio position at 60 Hz against the fetched timings.
+Each sentence's timings are offset by its actual PCM start in the job timeline. Speed changes,
+network gaps and cross-sentence rewind therefore move the reader with the audio; there is no
+wall-clock sentence anchor. Toggle: menu **Word Overlay** (`OverlayPreferences.wordOverlayEnabled`,
+default on).
+
+### Live TTS playback controls
+
+- **⌘⌃,** / **⌘⌃.** slow down / speed up playback by **0.2×**, clamped to **0.5×–5.0×**.
+  The multiplier is relative to the existing Kokoro rendition (synthesized with its unchanged
+  1.2 generation speed). `PlaybackPreferences` saves `vo.playbackRate` in the app's UserDefaults
+  preferences file, surviving new jobs, cancellation and restart. Missing/invalid settings
+  default to 1.0×; out-of-range values are clamped.
+- **⌘⌃←** rewinds **3 source-audio seconds**, crossing any number of preceding sentences
+  within the same job and clamping only at the job's beginning.
+- **⌘⌃→** skips ahead **3 source-audio seconds** within the active job. A target beyond
+  received audio carries forward through subsequent packets/sentences, skipping them until
+  the target is reached (or the job ends). Skipped PCM remains available for rewind.
+- The finished job stays rewindable for **two seconds**. Rewind revives its local audio and
+  visual reader, keeps its rate, and opens another two-second window when replay finishes.
+  Its HTTP result stays completed. A new job replaces the retained session immediately;
+  dictation, mute or stopping playback discards it. Replayed speech counts as speaking for
+  ducking, `/v1/status` and cooperative restart.
+
+`TTSEngine` feeds both cached WAVs and fresh PCM into one job-scoped `StreamingSpeechPlayer`
+(`AVAudioPlayerNode → AVAudioUnitTimePitch → mixer`). Received buffers are retained until the
+grace expires or the job is replaced/cancelled (float32 mono uses about 5.8 MB per minute of
+source audio). Rewind reschedules these buffers without restarting synthesis or fetching
+audio again. A generation token ignores completion callbacks from pre-seek schedules.
+`PlaybackTimeline` maps node sample positions into source audio, excluding underrun gaps;
+the overlay keeps each original sentence's text/timings so it can follow backwards as well
+as forwards. The stall watchdog watches progress, not total playing time, so slow playback
+and repeated rewinds cannot trigger a false timeout.
+
+The reader draws tiny solid black directional triangles centered vertically and horizontally
+within its top white border. Each 0.2× difference from 1.0× adds a triangle (partial clamp steps round
+up); slower points left, faster points right, and 1.0× draws nothing. This refreshes immediately
+on adjustment and stays visible through sentence gaps. Menu equivalents show the controls
+and current speed. The event tap consumes reader chords
+only while their actions are available, leaving them to the frontmost app at idle. The menu
+handles its own equivalents while tracking, and Secure Keyboard Entry has the same limitations
+as the existing global shortcuts. `PlaybackTimelineTests` silently exercise the real audio
+graph in offline rendering mode, including live rate changes and cross-sentence seeks.
 
 ---
 

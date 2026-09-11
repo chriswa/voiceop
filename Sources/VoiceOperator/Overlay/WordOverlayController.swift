@@ -1,73 +1,99 @@
 import AppKit
 import CoreGraphics
 
-/// Shows the word currently being spoken as a crosshair-anchored overlay,
-/// flipping words in time with TTS playback.
-///
-/// Visibility is job-scoped, timing is sentence-scoped. `activate()` puts the
-/// overlay on screen the moment synthesis begins — before any audio — so the
-/// window is already warm and no per-sentence spin-up eats the opening words;
-/// it then stays up (showing just the crosshair between sentences) until the
-/// whole job finishes and `stop()` hides it. `begin(anchor:)` (re)starts the
-/// word clock for one sentence, anchored at its first audible sample.
-///
-/// The clock is monotonic wall-time from that anchor, not playback callbacks:
-/// Kokoro plays a sentence's audio contiguously, so elapsed time tracks the
-/// audio position closely enough to highlight words without threading a sample
-/// clock out of the player.
+/// The visual reader follows source-audio position across the retained job.
+/// Context stays available during the two-second completion grace, so rewind
+/// restores the original sentence and word without fetching timings again.
 @MainActor
 final class WordOverlayController {
-    /// Master on/off. When false, `activate`/`begin` do nothing and any visible
-    /// overlay hides.
-    var isEnabled = true { didSet { if !isEnabled { stop() } } }
-
+    var playbackRate: Float = 1 { didSet { view?.playbackRate = playbackRate } }
+    var isEnabled = true {
+        didSet {
+            if !isEnabled { panel?.orderOut(nil) }
+            else if active { show(); refresh() }
+        }
+    }
     private var panel: NSPanel?
     private var view: WordOverlayView?
     private var timer: Timer?
-    /// Whether the overlay window is currently on screen for a speech job.
     private var active = false
-
-    /// One word's timing, its UTF-16 range in the rendered line, and its pivot.
     private struct WordSpan { let start: Double; let end: Double; let range: NSRange; let pivotOffset: Int }
-    /// The whole sentence as one rendered line, plus each word's span within it.
-    /// Built once when a sentence's timings arrive.
     private struct Context { let text: String; let spans: [WordSpan] }
-
-    private var anchor: Date?
-    private var context: Context?
-    /// Grace period after the last word before the line is cleared, so a
-    /// trailing word doesn't blink out the instant its `end` passes.
+    private struct Sentence {
+        let start: Double
+        var context: Context?
+    }
+    private var sentences: [Sentence] = []
+    private var session = UUID()
+    private var position: (() -> Double)?
     private let tailSeconds = 0.3
-    private var shownIndex: Int?
-    /// A zero-width character rendered while the overlay is up but no word is
-    /// current yet, so Core Text's font/glyph machinery is warm before the first
-    /// real word — otherwise the opening word of a fresh job can render a beat late.
     private static let warmLine = OverlayLine(text: "\u{00A0}", pivotUTF16Offset: 0, highlightRange: NSRange(location: 0, length: 0))
 
-    /// Put the overlay on screen (crosshair only, no word yet). Call when a
-    /// speech job starts synthesizing. Idempotent; leaves it up across the job.
-    func activate() {
-        guard isEnabled, !active else { return }
-        show()
-        view?.line = Self.warmLine   // prime Core Text before the first word
-        active = true
+    func beginSession(position: @escaping () -> Double) {
+        stop()
+        self.position = position
     }
 
-    /// Start the word clock for one sentence. The window is already visible from
-    /// `activate`; this anchors at the first audible sample and installs the
-    /// sentence's timings as they arrive.
-    func begin(anchor: Date, prepared: TTSPrepared, timings: @escaping @Sendable () async -> [WordTiming]) {
-        guard isEnabled else { return }
-        activate()   // belt-and-suspenders: ensure visible even without a prior activate
-        self.anchor = anchor
-        self.context = nil
-        self.shownIndex = nil
-        startTimer()
-        Task { [weak self] in
+    @discardableResult
+    func appendSentence(start: Double, prepared: TTSPrepared,
+                        timings: @escaping @Sendable () async -> [WordTiming]) -> Task<Void, Never> {
+        let token = session
+        let index = sentences.count
+        sentences.append(Sentence(start: start))
+        return Task { [weak self] in
             let resolved = await timings()
-            guard let self, self.anchor == anchor else { return }   // superseded meanwhile
-            self.context = Self.buildContext(prepared: prepared, words: resolved)
-            self.tick()
+            guard let self, self.session == token else { return }
+            self.sentences[index].context = Self.buildContext(prepared: prepared, words: resolved)
+            self.refresh()
+        }
+    }
+
+    func activate() {
+        guard !active else { return }
+        active = true
+        if isEnabled { show() }
+        view?.line = Self.warmLine
+        let timer = Timer(timeInterval: 1 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        refresh()
+    }
+
+    /// Hide on natural completion while retaining contexts for a quick rewind.
+    func hide() {
+        active = false
+        timer?.invalidate(); timer = nil
+        view?.line = nil
+        panel?.orderOut(nil)
+    }
+
+    func stop() {
+        hide()
+        session = UUID() // discard late timing responses from the old session
+        sentences.removeAll()
+        position = nil
+    }
+
+    func refresh() {
+        guard active, isEnabled, let position else { return }
+        view?.line = line(at: position())
+    }
+
+    /// Pure display lookup, also used by silent tests without creating a panel.
+    func line(at seconds: Double) -> OverlayLine? {
+        guard let sentenceIndex = sentences.lastIndex(where: { $0.start <= seconds }),
+              let context = sentences[sentenceIndex].context else { return nil }
+        let elapsed = seconds - sentences[sentenceIndex].start
+        let index = context.spans.lastIndex(where: { $0.start <= elapsed })
+        if let last = context.spans.last, elapsed > last.end + tailSeconds {
+            // Do not destroy contexts here: the next key can rewind into them.
+            return nil
+        }
+        return index.map {
+            let span = context.spans[$0]
+            return OverlayLine(text: context.text, pivotUTF16Offset: span.pivotOffset, highlightRange: span.range)
         }
     }
 
@@ -145,63 +171,6 @@ final class WordOverlayController {
                                    to: charIndex.samePosition(in: word.utf16) ?? word.utf16.startIndex)
     }
 
-    /// Hide the overlay entirely. Call when the whole speech job has finished or
-    /// been interrupted. Idempotent.
-    func stop() {
-        endSentence()
-        active = false
-        panel?.orderOut(nil)
-    }
-
-    // MARK: - Timing
-
-    private func startTimer() {
-        timer?.invalidate()
-        // 60 Hz is far finer than word granularity, but keeps the flip crisp and
-        // clears the word promptly at the tail. Common mode so it keeps firing
-        // while a menu is tracking.
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
-    }
-
-    private func tick() {
-        guard let anchor, let context else { return }
-        let elapsed = Date().timeIntervalSince(anchor)
-
-        // Hold the latest word whose start has passed (so it stays lit through
-        // the pause after punctuation) until the next word begins.
-        var index: Int?
-        for (i, s) in context.spans.enumerated() where s.start <= elapsed { index = i }
-
-        if let last = context.spans.last, elapsed > last.end + tailSeconds {
-            endSentence()   // sentence spoken; clear the line but keep the overlay up
-            return
-        }
-        if index != shownIndex {
-            shownIndex = index
-            // Render the whole sentence, highlighting the current word bright and
-            // pinning its pivot to the focal point; nil before the first word.
-            view?.line = index.map { i in
-                let s = context.spans[i]
-                return OverlayLine(text: context.text, pivotUTF16Offset: s.pivotOffset, highlightRange: s.range)
-            }
-        }
-    }
-
-    /// One sentence finished; stop its clock and clear its line, but leave the
-    /// crosshair on screen so the overlay persists through the gap before the
-    /// next sentence.
-    private func endSentence() {
-        timer?.invalidate(); timer = nil
-        anchor = nil
-        context = nil
-        shownIndex = nil
-        view?.line = nil
-    }
-
     // MARK: - Window
 
     private func show() {
@@ -223,6 +192,7 @@ final class WordOverlayController {
         panel.level = .screenSaver               // above ordinary and full-screen app windows
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         let view = WordOverlayView(frame: .zero)
+        view.playbackRate = playbackRate
         panel.contentView = view
         self.panel = panel
         self.view = view

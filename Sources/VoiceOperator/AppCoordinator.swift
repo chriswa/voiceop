@@ -38,8 +38,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await SpeechJobManager.shared.configure(
-                play: { [weak self] text, voice, onStart, onSynthesized in
-                    await self?.arbiter.playSentence(text: text, voiceID: voice,
+                play: { [weak self] request, onStart, onSynthesized in
+                    await self?.arbiter.playSentence(request,
                                                      onStart: onStart, onSynthesized: onSynthesized) ?? false
                 },
                 prefetch: { [weak self] text, voice in await self?.arbiter.prefetchSentence(text: text, voiceID: voice) },
@@ -64,7 +64,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onMenuOpenChanged = { [weak self] open in self?.hotkey.chordsSuppressed = open }
         menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
-        menuBar.onMuteSpeech = { muted in Task { await SpeechJobManager.shared.setMuted(muted) } }
+        menuBar.onMuteSpeech = { [weak self] muted in
+            if muted { self?.arbiter.haltSpeech() }
+            Task { await SpeechJobManager.shared.setMuted(muted) }
+        }
+        arbiter.onSpeechIdle = { [weak self] in self?.restart.attempt() }
         menuBar.onRestart = { [unowned self] in restart.request(source: .menu) }
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
@@ -122,6 +126,24 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
+        hotkey.onFasterSpeech = { [weak self] in self?.arbiter.adjustSpeechRate(by: 0.2) }
+        hotkey.onSlowerSpeech = { [weak self] in self?.arbiter.adjustSpeechRate(by: -0.2) }
+        hotkey.onRewindSpeech = { [weak self] in self?.arbiter.rewindSpeech(seconds: 3) }
+        hotkey.onForwardSpeech = { [weak self] in self?.arbiter.skipSpeechAhead(seconds: 3) }
+        menuBar.onFasterSpeech = hotkey.onFasterSpeech
+        menuBar.onSlowerSpeech = hotkey.onSlowerSpeech
+        menuBar.onRewindSpeech = hotkey.onRewindSpeech
+        menuBar.onForwardSpeech = hotkey.onForwardSpeech
+        arbiter.onPlaybackControlsChanged = { [weak self] in
+            guard let self else { return }
+            self.arbiter.wordOverlay.playbackRate = self.arbiter.speechRate
+            self.hotkey.setPlaybackControls(canAdjust: self.arbiter.canAdjustSpeech,
+                                           canRewind: self.arbiter.canRewindSpeech)
+            self.menuBar.updatePlayback(rate: self.arbiter.speechRate,
+                                        canAdjust: self.arbiter.canAdjustSpeech,
+                                        canRewind: self.arbiter.canRewindSpeech)
+        }
+        arbiter.onPlaybackControlsChanged?()
         hotkey.tapToToggle = HotkeyPreferences.tapToToggle
         installHotkeyWhenTrusted()
         watchSecureInput()

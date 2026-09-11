@@ -22,6 +22,12 @@ actor SpeechJobManager {
         let version: Int
     }
     private struct Segment: Sendable { let text: String; let end: Int }
+    struct SentencePlayback: Sendable {
+        let jobID: String
+        let text: String
+        let voice: String
+        let isLast: Bool
+    }
     private struct Job: Sendable { let id: String; let voice: String; let segments: [Segment]; var next = 0; var state: State = .inProgress; var playbackState: PlaybackState? = .queued; var local = false; var version = 0 }
 
     private var jobs: [String: Job] = [:]
@@ -30,12 +36,12 @@ actor SpeechJobManager {
     private var dictating = false
     private var muted = false
     private var configured = false
-    /// `(text, voice, onStart, onSynthesized) -> finishedNaturally`. Closure
+    /// `(sentence, onStart, onSynthesized) -> finishedNaturally`. Closure
     /// types cannot carry argument labels, so the two callbacks are positional:
     /// `onStart` is the first audible sample, `onSynthesized` is the clip's
     /// audio being fully in hand. See `fillSynthesisWindow` for why the second
     /// one is a scheduling input rather than just a log line.
-    private var play: (@Sendable (String, String, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool)?
+    private var play: (@Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool)?
     /// Synthesize a clip without playing it, returning when it has settled.
     private var prefetch: (@Sendable (String, String) async -> Void)?
     private var halt: (@Sendable () -> Void)?
@@ -82,7 +88,7 @@ actor SpeechJobManager {
     private struct Waiter { let since: Int?; let continuation: CheckedContinuation<Result, Never> }
     private var waiters: [String: [Waiter]] = [:]
 
-    func configure(play: @escaping @Sendable (String, String, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool,
+    func configure(play: @escaping @Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool,
                    prefetch: @escaping @Sendable (String, String) async -> Void,
                    halt: @escaping @Sendable () -> Void,
                    onSpeechActivity: @escaping @Sendable (Bool) -> Void = { _ in }) {
@@ -245,7 +251,9 @@ actor SpeechJobManager {
             Task { [weak self] in
                 // Positional callbacks: first audible sample, then audio fully
                 // in hand. See the `play` property for why they are unlabelled.
-                let completed = await play(segment.text, job.voice, { [weak self] in
+                let request = SentencePlayback(jobID: id, text: segment.text, voice: job.voice,
+                                               isLast: index == job.segments.count - 1)
+                let completed = await play(request, { [weak self] in
                     Task { await self?.startedSentence(id: id) }
                 }, { [weak self] in
                     Task { await self?.synthesisSettled(job: id, index: index) }
@@ -346,6 +354,7 @@ actor SpeechJobManager {
             Log.log("speech job \(id): completed all \(job.segments.count) sentence(s)")
             update(id) { $0.next = next; $0.state = .completed; $0.playbackState = nil }
             order.removeAll { $0 == id }
+            pump()
         } else {
             update(id) { $0.next = next; $0.playbackState = dictating ? .waitingForUser : .queued }
             pump()

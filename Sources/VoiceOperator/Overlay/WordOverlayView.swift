@@ -25,6 +25,7 @@ struct OverlayLine: Equatable {
 final class WordOverlayView: NSView {
     /// The line currently shown. `nil` paints the band and crosshair with no text.
     var line: OverlayLine? { didSet { if line != oldValue { needsDisplay = true } } }
+    var playbackRate: Float = 1 { didSet { if playbackRate != oldValue { needsDisplay = true } } }
 
     /// The word's font. Large by design — this is a glanceable overlay.
     private let font = NSFont.systemFont(ofSize: 64, weight: .semibold)
@@ -67,6 +68,7 @@ final class WordOverlayView: NSView {
         ctx.setFillColor(wordColor.cgColor)
         ctx.fill(NSRect(x: bounds.minX, y: band.maxY, width: bounds.width, height: borderHeight))
         ctx.fill(NSRect(x: bounds.minX, y: band.minY - borderHeight, width: bounds.width, height: borderHeight))
+        drawSpeedIndicator(in: ctx, top: band.maxY + borderHeight, centerX: focalX)
 
         // Dim vertical guide, spanning only the band's height, marking the focal
         // point the eye should fixate on — the current word's ORP pivot, pinned
@@ -76,6 +78,30 @@ final class WordOverlayView: NSView {
 
         guard let line, !line.text.isEmpty else { return }
         drawLine(line, focalX: focalX, in: ctx)
+    }
+
+    /// Solid black triangles centered vertically and horizontally in the top white strip.
+    /// Draw before the text guard so they remain visible between sentences.
+    private func drawSpeedIndicator(in ctx: CGContext, top: CGFloat, centerX: CGFloat) {
+        let steps = PlaybackPreferences.indicatorSteps(for: playbackRate)
+        guard steps != 0 else { return }
+        let count = abs(steps)
+        let width: CGFloat = 5, height: CGFloat = 4, spacing: CGFloat = 3
+        let total = CGFloat(count) * width + CGFloat(count - 1) * spacing
+        let y = top - borderHeight / 2
+        ctx.saveGState()
+        ctx.setFillColor(NSColor.black.cgColor)
+        for index in 0..<count {
+            let x = centerX - total / 2 + CGFloat(index) * (width + spacing)
+            let tip = steps > 0 ? x + width : x
+            let tail = steps > 0 ? x : x + width
+            ctx.move(to: CGPoint(x: tail, y: y - height / 2))
+            ctx.addLine(to: CGPoint(x: tip, y: y))
+            ctx.addLine(to: CGPoint(x: tail, y: y + height / 2))
+            ctx.closePath()
+        }
+        ctx.fillPath()
+        ctx.restoreGState()
     }
 
     /// Draw the line in white, positioned so the pinned character sits on

@@ -36,7 +36,7 @@ struct PCMReframer {
 
 /// Conversions between the raw `pcm_f32le` we receive live from a synthesizer and
 /// the s16le WAV the audio cache stores (matching the app's canonical `WAVFile` format, so cached
-/// clips replay unchanged through `AVAudioPlayer`).
+/// clips decode back into the same seekable PCM playback timeline).
 enum PCMAudio {
     /// Convert accumulated `pcm_f32le` bytes to s16le sample bytes, clamping to
     /// [-1, 1] first (a boosted `volume` can push samples past full scale).

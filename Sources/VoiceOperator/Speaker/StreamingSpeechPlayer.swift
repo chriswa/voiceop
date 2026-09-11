@@ -1,105 +1,198 @@
 import AVFoundation
 
-/// Plays PCM audio incrementally as it arrives, so playback starts on the first
-/// chunk instead of waiting for a complete file (unlike file-based
-/// `SpeechPlayer`). Buffers are `schedule`d as they're decoded; the caller signals
-/// `endOfStream()` when no more will come. `awaitCompletion()` resolves `true` on
-/// natural finish (stream ended *and* every scheduled buffer played) or `false`
-/// on `halt()` (barge-in) / `fail()` (synthesis or engine error).
+/// One seekable PCM timeline for an entire speech job. Sentence producers append
+/// to it; ending a sentence resolves its waiter but retains the audio for rewind.
+/// Cache hits and live streams both enter this graph in the same source format.
 @MainActor
 final class StreamingSpeechPlayer {
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
-
-    // Completion bookkeeping. Playback is "done" only when the stream has ended
-    // AND every scheduled buffer has finished playing — re-checked from both the
-    // per-buffer completion callback and `endOfStream()`, so a network underrun
-    // (played == scheduled while more is still coming) doesn't finish early, and a
-    // stream that ends after the last buffer drained doesn't hang.
-    private var scheduled = 0
-    private var played = 0
+    private let timePitch = AVAudioUnitTimePitch()
+    private var format: AVAudioFormat!
+    private struct Chunk { let start: Int64; let buffer: AVAudioPCMBuffer }
+    private var chunks: [Chunk] = []
+    private var timeline = PlaybackTimeline()
+    private(set) var frameCount: Int64 = 0
     private var streamEnded = false
-
+    private var halted = false
+    private var running = false
+    private var completed = false
     private var continuation: CheckedContinuation<Bool, Never>?
-    /// Set once when playback resolves. Lets a resolution that happens before
-    /// `awaitCompletion()` is called still be returned (and enforces resolve-once).
-    private var settled: Bool?
-    private var started = false
+    private var firstBuffer: (() -> Void)?
+    private var manualRendering = false
+    private var preSeekRenderTime: AVAudioTime?
+    /// A forward seek can run beyond the received PCM. Carry the absolute
+    /// source target through subsequent packets/sentences without re-synthesis.
+    private var pendingSeekFrame: Int64?
+    private(set) var rate: Float = 1
+    var onDrain: (() -> Void)?
 
-    /// Fired the moment the first buffer is scheduled (audio is about to sound).
-    var onFirstBuffer: (@MainActor () -> Void)?
-
-    /// Completion bookkeeping as one log-ready line.
-    ///
-    /// This is what tells a stalled clip's two failure modes apart. `scheduled=0`
-    /// means no audio ever arrived from the provider, so the stall is upstream in
-    /// synthesis; `played < scheduled` with `streamEnded=true` means the audio
-    /// arrived but `AVAudioPlayerNode` stopped delivering its completion
-    /// callbacks, which is the engine being torn out from under us.
+    var duration: Double { Double(frameCount) / (format?.sampleRate ?? 24_000) }
+    var atEnd: Bool { completed }
     var progress: String {
-        "scheduled=\(scheduled) played=\(played) streamEnded=\(streamEnded) "
-            + "settled=\(settled.map { "\($0)" } ?? "pending")"
+        "frames=\(frameCount) played=\(timeline.acknowledged) ended=\(streamEnded) generation=\(timeline.generation)"
+    }
+    private var nodeFrame: Int64 {
+        guard let render = node.lastRenderTime,
+              render.isSampleTimeValid || render.isHostTimeValid else { return 0 }
+        // stop() resets player time, but lastRenderTime can still describe the
+        // old playback until the next render. Converting that stale timestamp
+        // would make the reader jump forward immediately after a rewind.
+        if let stale = preSeekRenderTime,
+           stale.sampleTime == render.sampleTime && stale.hostTime == render.hostTime { return 0 }
+        preSeekRenderTime = nil
+        guard let time = node.playerTime(forNodeTime: render), time.isSampleTimeValid else { return 0 }
+        return max(0, time.sampleTime)
+    }
+    var position: Double {
+        guard let format else { return 0 }
+        if completed { return duration }
+        // The source node can be ahead of the loudspeaker by the DSP/output
+        // latency. Convert that small delay back into source samples. Clock
+        // rate itself comes from the node, not from elapsed wall-clock time.
+        let delay = Int64(max(0, node.outputPresentationLatency) * format.sampleRate * Double(rate))
+        let frame = max(timeline.acknowledged, timeline.position(nodeFrame: max(0, nodeFrame - delay)))
+        return Double(min(frameCount, frame)) / format.sampleRate
     }
 
-    /// Start the engine for `format` (float32 mono). Throws if the audio engine
-    /// can't start, so the caller can fall back to the one-shot WAV path.
-    func start(format: AVAudioFormat) throws {
+    /// Manual rendering is for deterministic, silent transport tests only; it
+    /// never opens or changes the user's audio device.
+    func start(format: AVAudioFormat, manualRendering: Bool = false) throws {
+        self.format = format
+        self.manualRendering = manualRendering
         engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
+        engine.attach(timePitch)
+        engine.connect(node, to: timePitch, format: format)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        if manualRendering {
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
+        }
         try engine.start()
-        node.play()
-        started = true
     }
 
-    /// Schedule one decoded buffer for playback. No-op after resolution.
+    func beginSentence(onStart: @escaping () -> Void) {
+        guard !halted else { return }
+        streamEnded = false
+        completed = false
+        firstBuffer = onStart
+    }
+
     func schedule(_ buffer: AVAudioPCMBuffer) {
-        guard started, settled == nil else { return }
-        let isFirst = scheduled == 0
-        scheduled += 1
-        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            // Completion callbacks run off the main actor; hop back to mutate state
-            // (mirrors SpeechPlayer.audioPlayerDidFinishPlaying).
+        guard !halted, buffer.frameLength > 0 else { return }
+        let start = frameCount
+        chunks.append(Chunk(start: start, buffer: buffer))
+        frameCount += Int64(buffer.frameLength)
+        if let target = pendingSeekFrame, target >= frameCount {
+            timeline.reset(at: frameCount)
+        } else if let target = pendingSeekFrame {
+            pendingSeekFrame = nil
+            timeline.reset(at: target)
+            enqueueSlice(buffer, start: start, from: target)
+        } else {
+            enqueue(buffer, sourceStart: start)
+        }
+        if let firstBuffer { self.firstBuffer = nil; firstBuffer() }
+    }
+
+    private func enqueue(_ buffer: AVAudioPCMBuffer, sourceStart: Int64) {
+        // Explicit node times let us exclude underrun silence from the source
+        // playhead. Leave two render quanta when resuming a starved node.
+        let current = nodeFrame
+        let start = current > timeline.nodeEnd
+            ? current + 1024 : timeline.nodeEnd
+        timeline.schedule(sourceStart: sourceStart, count: Int64(buffer.frameLength), nodeStart: start)
+        let generation = timeline.generation
+        let end = sourceStart + Int64(buffer.frameLength)
+        node.scheduleBuffer(buffer, at: AVAudioTime(sampleTime: start, atRate: format.sampleRate),
+                            options: [], completionCallbackType: manualRendering ? .dataRendered : .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
-                self.played += 1
+                guard let self, !self.halted,
+                      self.timeline.acknowledge(end: end, generation: generation) else { return }
                 self.checkDone()
             }
         }
-        if isFirst { onFirstBuffer?() }
+        if !running { node.play(); running = true }
     }
 
-    /// No more buffers will be scheduled. May resolve immediately if everything
-    /// scheduled has already played (including the empty-clip case).
-    func endOfStream() {
-        streamEnded = true
-        checkDone()
+    func endOfStream() { streamEnded = true; checkDone() }
+
+    @discardableResult
+    func skipAhead(seconds: Double) -> Bool {
+        let target = pendingSeekFrame.map { Double($0) / format.sampleRate } ?? position
+        return seek(to: target + seconds)
     }
 
-    /// Await natural completion (`true`) or halt/failure (`false`).
     func awaitCompletion() async -> Bool {
-        if let settled { return settled }
+        if halted { return false }
+        if completed { return true }
         return await withCheckedContinuation { continuation = $0 }
     }
 
-    /// Barge-in: stop playback now and resolve `false`.
-    func halt() { resolve(false) }
-
-    /// Stream or engine error: stop playback and resolve `false`.
-    func fail() { resolve(false) }
-
-    private func checkDone() {
-        if streamEnded && played == scheduled { resolve(true) }
+    /// Rebuild only the node's scheduled audio, leaving the synthesis producer,
+    /// the sentence waiter and all already-received PCM intact.
+    @discardableResult
+    func seek(to seconds: Double) -> Bool {
+        guard !halted, frameCount > 0 else { return false }
+        let frame = max(0, Int64(seconds * format.sampleRate))
+        pendingSeekFrame = frame >= frameCount ? frame : nil
+        preSeekRenderTime = node.lastRenderTime
+        timeline.reset(at: min(frame, frameCount)) // invalidate callbacks BEFORE stop emits them
+        node.stop()
+        timePitch.auAudioUnit.reset()
+        running = false
+        completed = false
+        if pendingSeekFrame != nil {
+            checkDone()
+            return true
+        }
+        for chunk in chunks {
+            let end = chunk.start + Int64(chunk.buffer.frameLength)
+            guard end > frame else { continue }
+            enqueueSlice(chunk.buffer, start: chunk.start, from: frame)
+        }
+        return true
     }
 
-    private func resolve(_ ok: Bool) {
-        guard settled == nil else { return }
-        // Logged at every resolution, not just the unhappy ones: the pairing of
-        // "stream: playing" with a resolve line is what proves a clip finished,
-        // and its absence is the whole signature of the hang this exists to find.
-        Log.log("tts player: resolved \(ok ? "finished" : "stopped") — scheduled=\(scheduled) played=\(played) streamEnded=\(streamEnded)")
-        settled = ok
+    private func enqueueSlice(_ buffer: AVAudioPCMBuffer, start: Int64, from frame: Int64) {
+        let skip = max(0, frame - start)
+        guard skip > 0 else { enqueue(buffer, sourceStart: start); return }
+        let count = buffer.frameLength - AVAudioFrameCount(skip)
+        guard let slice = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count),
+              let dst = slice.floatChannelData, let src = buffer.floatChannelData else { return }
+        slice.frameLength = count
+        memcpy(dst[0], src[0].advanced(by: Int(skip)), Int(count) * MemoryLayout<Float>.size)
+        enqueue(slice, sourceStart: frame)
+    }
+
+    func setRate(_ value: Float) {
+        rate = min(5, max(0.5, value))
+        timePitch.rate = rate
+    }
+
+    func halt() {
+        guard !halted else { return }
+        halted = true
+        timeline.reset(at: 0)
         node.stop()
         engine.stop()
-        if let c = continuation { continuation = nil; c.resume(returning: ok) }
+        chunks.removeAll()
+        if let continuation { self.continuation = nil; continuation.resume(returning: false) }
+    }
+    func fail() { halt() }
+
+    private func checkDone() {
+        guard !halted, !completed, streamEnded, timeline.acknowledged >= frameCount else { return }
+        completed = true
+        node.pause()
+        running = false
+        // Keep the graph warm and PCM retained until the job's two-second grace
+        // expires (or a replacement job/dictation/cancellation invalidates it).
+        if let continuation { self.continuation = nil; continuation.resume(returning: true) }
+        onDrain?()
+    }
+
+    /// Exercise the real time-pitch graph without touching CoreAudio hardware.
+    func renderOffline(frames: AVAudioFrameCount, into buffer: AVAudioPCMBuffer) throws -> AVAudioEngineManualRenderingStatus {
+        try engine.renderOffline(frames, to: buffer)
     }
 }

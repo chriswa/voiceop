@@ -185,6 +185,16 @@ Fire from any app (they run off the CGEvent tap, so no window focus needed):
 - **⌘⌃S** — speak the clipboard aloud; press again to stop.
 - **⌘⌃A** — replace the clipboard with a one- or two-sentence Haiku summary of it.
 - **⌘⌃B** — mute or unmute narration (same as the menu-bar **Mute Speech** item).
+- **⌘⌃,** / **⌘⌃.** — slow down / speed up active speech by **0.2×**, from **0.5× to 5.0×**.
+  Speed is saved between reads and app restarts; the default is 1.0×.
+- **⌘⌃←** — rewind **3 seconds**, including previous sentences of the same read.
+  Works for **two seconds after speech finishes**, too. The visual reader follows the audio.
+- **⌘⌃→** — skip ahead **3 seconds**, including into upcoming sentences of the same read.
+
+Playback controls and the current speed also appear in the menu. Rewind after completion
+keeps the same speed; a new read, dictation, mute or stopping playback clears that replay window.
+Tiny solid black triangles centered within the reader's upper white border show the speed setting:
+left for slower, right for faster, one triangle per 0.2× away from normal. At 1.0× none appear.
 
 They stop working entirely — with no other symptom, while dictation carries on —
 whenever an app holds macOS **secure event input** (Terminal's "Secure Keyboard

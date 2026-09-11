@@ -105,6 +105,10 @@ final class HotkeyMonitor: @unchecked Sendable {
     var onSpeakClipboard: Action?
     /// Fired on ⌘⌃A — summarize the clipboard via Haiku.
     var onSummarizeClipboard: Action?
+    var onFasterSpeech: Action?
+    var onSlowerSpeech: Action?
+    var onRewindSpeech: Action?
+    var onForwardSpeech: Action?
     /// A deliberate tap of the **left Shift key while a dictation is recording**:
     /// advance that dictation's `TranscriptStyle` by one. Never fires outside a
     /// dictation, and never for Shift used as a modifier — see `shiftArmed`.
@@ -120,6 +124,17 @@ final class HotkeyMonitor: @unchecked Sendable {
     }
     private let stateLock = NSLock()
     private var suppressChords = false
+    private var adjustPlaybackEnabled = false
+    private var rewindPlaybackEnabled = false
+    private var swallowedPlaybackKeys: Set<Int64> = [] // tap thread only
+    private var lastPlaybackRepeat: UInt64 = 0
+
+    func setPlaybackControls(canAdjust: Bool, canRewind: Bool) {
+        stateLock.lock()
+        adjustPlaybackEnabled = canAdjust
+        rewindPlaybackEnabled = canRewind
+        stateLock.unlock()
+    }
 
     /// Selects the trigger's gesture model — see the tap-to-toggle section above.
     /// Guarded by `stateLock` because the menu flips it from the main thread while
@@ -151,6 +166,7 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// Raw values are the `kVK_ANSI_*` keycodes the chord is typed on.
     private enum Chord: Int64, CaseIterable {
         case repaste = 9, toggleMute = 11, speakClipboard = 1, summarizeClipboard = 0
+        case fasterSpeech = 47, slowerSpeech = 43, rewindSpeech = 123, forwardSpeech = 124
 
         var name: String {
             switch self {
@@ -158,6 +174,10 @@ final class HotkeyMonitor: @unchecked Sendable {
             case .toggleMute:         return "⌘⌃B (toggle mute)"
             case .speakClipboard:     return "⌘⌃S (speak clipboard)"
             case .summarizeClipboard: return "⌘⌃A (summarize clipboard)"
+            case .fasterSpeech:       return "⌘⌃. (faster speech)"
+            case .slowerSpeech:       return "⌘⌃, (slower speech)"
+            case .rewindSpeech:       return "⌘⌃← (rewind speech)"
+            case .forwardSpeech:      return "⌘⌃→ (skip ahead)"
             }
         }
     }
@@ -168,6 +188,10 @@ final class HotkeyMonitor: @unchecked Sendable {
         case .toggleMute:         return onToggleMute
         case .speakClipboard:     return onSpeakClipboard
         case .summarizeClipboard: return onSummarizeClipboard
+        case .fasterSpeech:       return onFasterSpeech
+        case .slowerSpeech:       return onSlowerSpeech
+        case .rewindSpeech:       return onRewindSpeech
+        case .forwardSpeech:      return onForwardSpeech
         }
     }
 
@@ -248,6 +272,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         guard thread == nil else { return tap != nil }
         let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
             | (1 << CGEventType.keyDown.rawValue)   // for the ⌘⌃-chord shortcuts
+            | (1 << CGEventType.keyUp.rawValue)
             // Clicks are of no interest in themselves; they only tell us a held
             // Shift is being used as a modifier (shift-click to extend a
             // selection) rather than tapped — see `shiftArmed`.
@@ -257,10 +282,11 @@ final class HotkeyMonitor: @unchecked Sendable {
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
-            options: .listenOnly, eventsOfInterest: mask,
+            options: .defaultTap, eventsOfInterest: mask,
             callback: { _, type, event, refcon in
                 if let refcon {
                     let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
+                    if monitor.handlePlaybackKey(type: type, event: event) { return nil }
                     monitor.handle(type: type, event: event)
                 }
                 return Unmanaged.passUnretained(event)
@@ -292,6 +318,29 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// start can never overtake the stop that preceded it.
     private func onMain(_ body: @escaping @MainActor @Sendable () -> Void) {
         DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
+    }
+
+    /// Consume only active reader controls, so the frontmost editor/browser
+    /// does not also navigate or change zoom. Everything else still passes
+    /// through this tap. Menu tracking owns its own key equivalents.
+    private func handlePlaybackKey(type: CGEventType, event: CGEvent) -> Bool {
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
+        if type == .keyUp { return swallowedPlaybackKeys.remove(code) != nil }
+        guard type == .keyDown, [43, 47, 123, 124].contains(code),
+              event.flags.contains(.maskCommand), event.flags.contains(.maskControl),
+              !event.flags.contains(.maskAlternate),
+              !event.flags.contains(.maskShift) else { return false }
+        stateLock.lock()
+        let enabled = !suppressChords && (code == 123 ? rewindPlaybackEnabled : adjustPlaybackEnabled)
+        stateLock.unlock()
+        guard enabled, let chord = Chord(rawValue: code), let action = action(for: chord) else { return false }
+        swallowedPlaybackKeys.insert(code)
+        let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        if repeated && event.timestamp >= lastPlaybackRepeat && event.timestamp - lastPlaybackRepeat < 150_000_000 { return true }
+        lastPlaybackRepeat = event.timestamp
+        Log.log("hotkey chord: \(chord.name)")
+        onMain { action() }
+        return true
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
@@ -332,6 +381,8 @@ final class HotkeyMonitor: @unchecked Sendable {
             let keycode = event.getIntegerValueField(.keyboardEventKeycode)
             guard event.flags.contains(.maskCommand), event.flags.contains(.maskControl) else { return }
             guard let chord = Chord(rawValue: keycode) else { return }
+            // Reader controls have their own active-only consuming handler.
+            if chord == .fasterSpeech || chord == .slowerSpeech || chord == .rewindSpeech || chord == .forwardSpeech { return }
             // Every recognised chord logs, whatever becomes of it: a shortcut that
             // fires and does nothing is indistinguishable from one that never
             // arrived unless the tap says which of the two happened. (Nothing at

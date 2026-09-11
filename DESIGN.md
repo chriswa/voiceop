@@ -531,7 +531,7 @@ no reverse-engineering:
 
 ### Word-highlight overlay
 
-While TTS plays, a full-width black bar across the screen centre shows the sentence being spoken
+While TTS plays, a full-width black bar aligned to the bottom of the screen shows the sentence being spoken
 (`Overlay/WordOverlayController` + `WordOverlayView`, driven from `AudioArbiter`). The whole sentence
 renders as one line — the current word bright, the surrounding context words dim — and the line runs
 off both screen edges (no wrapping). It is aligned Spritz/RSVP-style: the current word's **Optimal
@@ -556,7 +556,7 @@ character. Without this a whole path or hyphenated compound is one multi-second 
 single block, and stray markdown is read aloud.
 A dim (30% white) vertical guide inside the band marks the fixation point, at the pivot letter's
 **x-height centre** — the
-word is positioned so its lowercase-body midline lands on screen centre, which is where the eye
+word is positioned so its lowercase-body midline lands at the centre of the bottom band, which is where the eye
 fixates in reading (not the em-box centre, which sits high on ascender space). The overlay window is
 full-screen and transparent, painting only the guides, the band and the word; glyphs carry no stroke
 (a stroke leaves join artifacts in the letters' bowls).

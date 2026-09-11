@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 
 /// Shows the word currently being spoken as a crosshair-anchored overlay,
 /// flipping words in time with TTS playback.
@@ -228,13 +229,26 @@ final class WordOverlayController {
         return panel
     }
 
-    /// Cover the current main screen. The view paints only the crosshair, the
-    /// word band and the word; the rest stays transparent and click-through.
-    /// Re-run on every `activate` so it follows the active screen.
+    /// Cover the primary display. The view paints only the crosshair, the word
+    /// band and the word; the rest stays transparent and click-through.
+    /// Re-run on every `activate` so it follows a display reconnection.
     private func layout(_ panel: NSPanel) {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = Self.primaryScreen else { return }
         panel.setFrame(screen.frame, display: true)
         view?.frame = panel.contentView?.bounds ?? .zero
         view?.needsDisplay = true
+    }
+
+    /// `NSScreen.main` follows keyboard focus, which can be a secondary
+    /// display. Match the screen's display ID to Core Graphics' primary display
+    /// ID so TTS always appears on the primary display instead.
+    private static var primaryScreen: NSScreen? {
+        let primaryID = CGMainDisplayID()
+        return NSScreen.screens.first { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return number.uint32Value == primaryID
+        } ?? NSScreen.screens.first
     }
 }

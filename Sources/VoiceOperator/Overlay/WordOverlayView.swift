@@ -14,7 +14,7 @@ struct OverlayLine: Equatable {
     let highlightRange: NSRange
 }
 
-/// Draws the reading overlay: a full-width black band across screen centre with
+/// Draws the reading overlay: a full-width black band along the screen bottom with
 /// a dim vertical guide inside it, and a line of the sentence's text with the
 /// current word's ORP pivot letter (see `ORP`) pinned to that guide, so the
 /// reader's eye stays parked on one spot as words flip past. The line runs off
@@ -54,8 +54,11 @@ final class WordOverlayView: NSView {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let focalX = bounds.midX
 
-        // The word band: a full-width black rectangle centred vertically.
-        let band = NSRect(x: bounds.minX, y: bounds.midY - bandHeight / 2, width: bounds.width, height: bandHeight)
+        // The word band: a full-width black rectangle flush with the bottom of
+        // the screen. Leave room for the lower border strip so the complete
+        // black-and-white band, rather than just its black interior, is aligned
+        // to the screen edge.
+        let band = NSRect(x: bounds.minX, y: bounds.minY + borderHeight, width: bounds.width, height: bandHeight)
         ctx.setFillColor(black.cgColor)
         ctx.fill(band)
 
@@ -94,15 +97,18 @@ final class WordOverlayView: NSView {
         let pivotRight = CTLineGetOffsetForStringIndex(ctLine, pivot + 1, nil)
         let originX = focalX - (pivotLeft + pivotRight) / 2
 
-        // Vertical: land the x-height midline on the screen centre, so the
+        // Vertical: land the x-height midline at the band centre, so the
         // horizontal guide crosses through the vertical centre of the lowercase
         // letter body — where the eye fixates in reading — rather than the
         // em-box centre (which sits high, skewed by ascender space). The pivot
         // is almost always a lowercase interior letter, so its centre is here.
-        let baselineY = bounds.midY - font.xHeight / 2
+        let baselineY = bandCenterY - font.xHeight / 2
 
         ctx.textMatrix = .identity
         ctx.textPosition = CGPoint(x: originX, y: baselineY)
         CTLineDraw(ctLine, ctx)
     }
+
+    /// The focal line is vertically centred within the bottom-aligned word band.
+    private var bandCenterY: CGFloat { bounds.minY + borderHeight + bandHeight / 2 }
 }

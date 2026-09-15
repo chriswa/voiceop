@@ -14,6 +14,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
     private let wordOverlay = NSMenuItem(title: "Word Overlay", action: #selector(toggleWordOverlay), keyEquivalent: "")
     private let muteSystemAudio = NSMenuItem(title: "Mute System Audio While Dictating", action: #selector(toggleMuteSystemAudio), keyEquivalent: "")
+    private let typeInsteadOfPaste = NSMenuItem(title: "Type Text Instead of Pasting", action: #selector(toggleTypeInsteadOfPaste), keyEquivalent: "")
     private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
     private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
@@ -41,6 +42,11 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onToggleTapToToggle: (() -> Bool)?
     var wordOverlayState: (() -> Bool)?
     var onToggleWordOverlay: (() -> Bool)?
+    /// Reads and flips whether a transcript is typed a character at a time rather
+    /// than pasted. Same shape as the other preference toggles: the flip closure
+    /// returns the state afterwards so the checkmark follows it.
+    var typeInsteadOfPasteState: (() -> Bool)?
+    var onToggleTypeInsteadOfPaste: (() -> Bool)?
     /// Reads and flips whether a dictation hardware-mutes the system output for
     /// its duration. Same shape as the other preference toggles: the flip closure
     /// returns the state afterwards so the checkmark follows it.
@@ -101,6 +107,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         tapToToggle.target = self; menu.addItem(tapToToggle)
         wordOverlay.target = self; menu.addItem(wordOverlay)
         muteSystemAudio.target = self; menu.addItem(muteSystemAudio)
+        typeInsteadOfPaste.target = self; menu.addItem(typeInsteadOfPaste)
         keepMicOpen.target = self; menu.addItem(keepMicOpen)
         // Indented under the checkbox it takes over, the way System Settings nests
         // a rule under the switch it drives.
@@ -172,6 +179,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         tapToToggle.state = (tapToToggleState?() ?? false) ? .on : .off
         wordOverlay.state = (wordOverlayState?() ?? true) ? .on : .off
         muteSystemAudio.state = (muteSystemAudioState?() ?? true) ? .on : .off
+        typeInsteadOfPaste.state = (typeInsteadOfPasteState?() ?? false) ? .on : .off
         keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
         keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
@@ -216,6 +224,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
     @objc private func toggleWordOverlay() { wordOverlay.state = (onToggleWordOverlay?() ?? true) ? .on : .off }
     @objc private func toggleMuteSystemAudio() { muteSystemAudio.state = (onToggleMuteSystemAudio?() ?? true) ? .on : .off }
+    @objc private func toggleTypeInsteadOfPaste() { typeInsteadOfPaste.state = (onToggleTypeInsteadOfPaste?() ?? false) ? .on : .off }
     @objc private func toggleKeepMicOpen() { keepMicOpen.state = (onToggleKeepMicOpen?() ?? false) ? .on : .off }
     @objc private func toggleKeepMicOpenForWireless() {
         keepMicOpenForWireless.state = (onToggleKeepMicOpenForWireless?() ?? false) ? .on : .off

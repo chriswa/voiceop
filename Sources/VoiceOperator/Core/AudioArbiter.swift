@@ -57,7 +57,12 @@ final class AudioArbiter {
 
     private(set) var sttHistory: [STTHistoryEntry] = []
     private(set) var commandHistory: [CommandHistoryEntry] = []
-    private var lastPastedText: String?
+    /// The most recent insertion: what ⌘⌃V replays and what ⌘⌃⇧V takes back.
+    /// `isLive` is what stops a second undo chewing through text the app never
+    /// inserted — the text stays around either way, so an undo can still be
+    /// followed by a re-paste.
+    private struct Insertion { let text: String; var isLive: Bool }
+    private var lastInsertion: Insertion?
     /// True from key-down until the transcript has been pasted and the closing
     /// cue has had its moment. This is what "safe to restart" means
     /// (see `RestartCoordinator`).
@@ -778,7 +783,23 @@ final class AudioArbiter {
         }
     }
 
-    func repasteLast() { if let lastPastedText { pasteAndRemember(lastPastedText) } }
+    /// ⌘⌃V: insert the last transcript again.
+    func repasteLast() { if let lastInsertion { pasteAndRemember(lastInsertion.text) } }
+
+    /// ⌘⌃⇧V: backspace over the last insertion, one press per character of it.
+    ///
+    /// The insertion is marked gone *before* the backspaces go out, not after, so
+    /// a second press is a no-op even if it lands while the first undo is still
+    /// typing. The text itself is kept, so ⌘⌃V can put it back.
+    func undoLastInsertion() {
+        guard let insertion = lastInsertion, insertion.isLive, !insertion.text.isEmpty else {
+            Log.log("undo insertion: nothing to undo")
+            return
+        }
+        lastInsertion?.isLive = false
+        Log.log("undo insertion: \(insertion.text.count) backspace(s)")
+        TextInserter.undo(insertion.text) { SoundEffect.insertionUndone.play() }
+    }
     func retrySTT(id: UUID) { guard let e = sttHistory.first(where: { $0.id == id }), let url = e.wavURL else { return }; retry(url, id: id, command: false) }
     func retryCommand(id: UUID) { guard let e = commandHistory.first(where: { $0.id == id }), let url = e.wavURL else { return }; retry(url, id: id, command: true) }
     func copySTT(id: UUID) { if let e = sttHistory.first(where: { $0.id == id }) { copy(e.transcript) } }
@@ -879,7 +900,14 @@ final class AudioArbiter {
         SoundEffect.transcriptionPending.stop()
     }
 
-    private func pasteAndRemember(_ text: String) { lastPastedText = text; TextInserter.paste(text); SoundEffect.pasted.play() }
+    /// The cue fires from the completion, not alongside the call: on the
+    /// keystroke path the transcript is still going out character by character
+    /// for the better part of a second, and a cue that plays at the start would
+    /// announce text that is not there yet.
+    private func pasteAndRemember(_ text: String) {
+        lastInsertion = Insertion(text: text, isLive: true)
+        TextInserter.insert(text) { SoundEffect.pasted.play() }
+    }
     private func copy(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     private func persist(_ wav: URL) -> URL? {
         let dst = sttDir.appendingPathComponent("\(UUID().uuidString).wav")

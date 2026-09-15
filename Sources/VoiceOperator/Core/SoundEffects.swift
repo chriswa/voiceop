@@ -21,6 +21,7 @@ enum SoundEffect: CaseIterable {
     case listeningFinishedSlow          // Fn capture ended, but the live stream is down: slow path
     case commandListeningFinishedSlow   // Ctrl+Fn capture ended, slow path
     case pasted
+    case insertionUndone            // ⌘⌃⇧V backspaced the last insertion away
     case silenceSkipped             // recording had no speech — transcription skipped
     case captureFailed              // the microphone delivered no audio at all
     case surfaceRaised              // a voice tool matched + ran
@@ -34,6 +35,7 @@ enum SoundEffect: CaseIterable {
     case narrationMuted             // narration muted — low descending slide
     case narrationUnmuted           // narration unmuted — low ascending slide
     case restarting                 // the app is about to relaunch itself
+    case launched                   // the app has come up — the restart cue, reversed
 
     /// Global playback-speed multiplier for every cue. This lives with the
     /// cue definitions, rather than on the main-actor SoundBank, because the
@@ -63,6 +65,9 @@ enum SoundEffect: CaseIterable {
         case .commandListeningFinishedSlow: return [(1319, 0.08), (988, 0.11), (0, 0.05), (494, 0.24)]
         // Cheerful rising major arpeggio (C5–E5–G5–C6) — text inserted.
         case .pasted: return [(523, 0.09), (659, 0.09), (784, 0.09), (1047, 0.14)]
+        // The same arpeggio falling (C6–G5–E5–C5) — that insertion has been taken
+        // back. Reads as the exact inverse of the cue it undoes.
+        case .insertionUndone: return [(1047, 0.09), (784, 0.09), (659, 0.09), (523, 0.14)]
         // Gentle low descending two-tone (G4→C4) — recording was silent, so
         // transcription was skipped. A soft "deflating" cue, distinct from
         // the command "unrecognized" and the harsher error tone.
@@ -107,6 +112,14 @@ enum SoundEffect: CaseIterable {
         // (see RestartCoordinator).
         case .restarting: return [(523, 0.16), (0, 0.05), (466, 0.16), (0, 0.05),
                                   (415, 0.16), (0, 0.05), (392, 0.42)]
+        // The trombone climbing instead of falling (G–A♭–B♭–C): the app is back.
+        // Only the pitches reverse — the rhythm stays put, so the held note lands
+        // at the end where a resolution belongs, not at the start. Derived from
+        // `.restarting` rather than transcribed, so the pair stays a mirror if
+        // that melody is ever retuned.
+        case .launched:
+            let falling = SoundEffect.restarting.segments
+            return zip(falling.reversed(), falling).map { (freq: $0.freq, dur: $1.dur) }
         }
     }
 
@@ -147,6 +160,7 @@ enum SoundEffect: CaseIterable {
         case .listeningFinishedSlow:        return "Listening finished (paste, slow path)"
         case .commandListeningFinishedSlow: return "Listening finished (command, slow path)"
         case .pasted:                   return "Pasted"
+        case .insertionUndone:          return "Insertion undone"
         case .silenceSkipped:           return "Silence skipped (no speech)"
         case .captureFailed:            return "Capture failed (no microphone audio)"
         case .surfaceRaised:            return "Surface raised (tool ran)"
@@ -160,6 +174,7 @@ enum SoundEffect: CaseIterable {
         case .narrationMuted:           return "Narration muted"
         case .narrationUnmuted:         return "Narration unmuted"
         case .restarting:               return "Restarting"
+        case .launched:                 return "Launched"
         }
     }
 }

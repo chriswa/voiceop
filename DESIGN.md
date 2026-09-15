@@ -269,6 +269,30 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   `AXValue` setting is unreliable across apps (routine `-25205` failures, e.g. Sublime).
 - Post-paste async **insertion verification** reads the textbox back; a trailing-boundary NBSP
   trick is applied by the paste policy.
+- Ours offers a second technique, switchable from the menu's **Type Text Instead of Pasting**
+  checkbox (`PastePreferences`, default off): `KeystrokeTyper` synthesizes one key event per
+  grapheme, off the main thread. It never touches the pasteboard, and a newline
+  goes out as ⇧↩ so a chat box or Claude Code does not read it as "send". It exists because some
+  apps mishandle a real paste — Claude Code drops the leading part of pasted text — and the
+  checkbox is there so a bad result is one click away from the clipboard path.
+- Characters go out on an **absolute schedule** (event *i* at `start + i × interval`), so the
+  0.5 ms `KeystrokeTyper.interval` is the real rate rather than a floor the cost of posting 600
+  events is added to — sleeping *between* events turned a nominal 0.5 ms into a measured 0.78 ms.
+  A post that misses its slot forfeits the lost time instead of firing the backlog gapless. Every
+  insertion logs `keystroke typer: N event(s) in X ms`, so the constant is checkable against what
+  the machine actually did.
+- The "inserted" cue plays from the insertion's **completion**, not alongside the call: on the
+  keystroke path the transcript is still going out for the better part of a second, and a cue at
+  the start would announce text that is not there yet.
+- **⌘⌃V re-pastes** the last insertion; **⌘⌃⇧V undoes** it — one backspace per character of
+  `AudioArbiter.lastInsertion`, through the same serial queue as typing (so an undo can never
+  interleave with an insertion still going out), then the falling mirror of the inserted cue. The
+  insertion is marked not-live *before* the backspaces go out, so a second undo is a no-op even if
+  it lands while the first is still typing; the text is kept, so ⌘⌃V can put it back. The chords
+  fire on key-down, so the undo first waits (up to 2 s) for the user to release the modifiers: our
+  events carry empty flags, but an app that reads the hardware modifier state instead would see
+  each Delete as ⌘⌫. `Chord` matches Shift rather than ignoring it, which is what lets ⌘⌃V and
+  ⌘⌃⇧V share a keycode — and stops a stray Shift aliasing any other chord onto its handler.
 
 ### Mute-during-dictation — CoreAudio device mute, gated on now-playing
 - On `RecordingStarted`: `shouldMuteAudio: 1` → Volume Manager checks now-playing; if media is

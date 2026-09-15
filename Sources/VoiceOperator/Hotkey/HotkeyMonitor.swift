@@ -99,6 +99,8 @@ final class HotkeyMonitor: @unchecked Sendable {
     var onStop: Action?
     /// Fired on ⌘⌃V — re-paste the last pasted text.
     var onRepaste: Action?
+    /// Fired on ⌘⌃⇧V — backspace over the last insertion.
+    var onUndoInsertion: Action?
     /// Fired on ⌘⌃B — toggle narration mute.
     var onToggleMute: Action?
     /// Fired on ⌘⌃S — speak the clipboard aloud (or stop if already speaking).
@@ -162,15 +164,37 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// switch case and a log string maintained separately are three places to
     /// forget, and a chord whose callback nobody assigned then fails
     /// indistinguishably from one the tap never saw.
-    ///
-    /// Raw values are the `kVK_ANSI_*` keycodes the chord is typed on.
-    private enum Chord: Int64, CaseIterable {
-        case repaste = 9, toggleMute = 11, speakClipboard = 1, summarizeClipboard = 0
-        case fasterSpeech = 47, slowerSpeech = 43, rewindSpeech = 123, forwardSpeech = 124
+    private enum Chord: CaseIterable {
+        case repaste, undoInsertion, toggleMute, speakClipboard, summarizeClipboard
+        case fasterSpeech, slowerSpeech, rewindSpeech, forwardSpeech
+
+        /// The `kVK_ANSI_*` keycode the chord is typed on, and whether Shift is
+        /// part of it. Shift is matched, not ignored, so two chords can share a
+        /// keycode (⌘⌃V and ⌘⌃⇧V) and so a stray Shift cannot silently alias one
+        /// chord onto another's handler.
+        var keys: (keycode: Int64, shift: Bool) {
+            switch self {
+            case .repaste:            return (9, false)
+            case .undoInsertion:      return (9, true)
+            case .toggleMute:         return (11, false)
+            case .speakClipboard:     return (1, false)
+            case .summarizeClipboard: return (0, false)
+            case .fasterSpeech:       return (47, false)
+            case .slowerSpeech:       return (43, false)
+            case .rewindSpeech:       return (123, false)
+            case .forwardSpeech:      return (124, false)
+            }
+        }
+
+        init?(keycode: Int64, shift: Bool) {
+            guard let match = Self.allCases.first(where: { $0.keys == (keycode, shift) }) else { return nil }
+            self = match
+        }
 
         var name: String {
             switch self {
             case .repaste:            return "⌘⌃V (re-paste)"
+            case .undoInsertion:      return "⌘⌃⇧V (undo insertion)"
             case .toggleMute:         return "⌘⌃B (toggle mute)"
             case .speakClipboard:     return "⌘⌃S (speak clipboard)"
             case .summarizeClipboard: return "⌘⌃A (summarize clipboard)"
@@ -185,6 +209,7 @@ final class HotkeyMonitor: @unchecked Sendable {
     private func action(for chord: Chord) -> Action? {
         switch chord {
         case .repaste:            return onRepaste
+        case .undoInsertion:      return onUndoInsertion
         case .toggleMute:         return onToggleMute
         case .speakClipboard:     return onSpeakClipboard
         case .summarizeClipboard: return onSummarizeClipboard
@@ -333,7 +358,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         stateLock.lock()
         let enabled = !suppressChords && (code == 123 ? rewindPlaybackEnabled : adjustPlaybackEnabled)
         stateLock.unlock()
-        guard enabled, let chord = Chord(rawValue: code), let action = action(for: chord) else { return false }
+        guard enabled, let chord = Chord(keycode: code, shift: false), let action = action(for: chord) else { return false }
         swallowedPlaybackKeys.insert(code)
         let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         if repeated && event.timestamp >= lastPlaybackRepeat && event.timestamp - lastPlaybackRepeat < 150_000_000 { return true }
@@ -380,7 +405,7 @@ final class HotkeyMonitor: @unchecked Sendable {
             shiftArmed = false
             let keycode = event.getIntegerValueField(.keyboardEventKeycode)
             guard event.flags.contains(.maskCommand), event.flags.contains(.maskControl) else { return }
-            guard let chord = Chord(rawValue: keycode) else { return }
+            guard let chord = Chord(keycode: keycode, shift: event.flags.contains(.maskShift)) else { return }
             // Reader controls have their own active-only consuming handler.
             if chord == .fasterSpeech || chord == .slowerSpeech || chord == .rewindSpeech || chord == .forwardSpeech { return }
             // Every recognised chord logs, whatever becomes of it: a shortcut that

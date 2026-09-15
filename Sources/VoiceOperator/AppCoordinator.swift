@@ -90,6 +90,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             Log.log("mute system audio while dictating: \(on ? "enabled" : "disabled")")
             return on
         }
+        menuBar.typeInsteadOfPasteState = { PastePreferences.technique == .keystrokes }
+        menuBar.onToggleTypeInsteadOfPaste = {
+            let typing = PastePreferences.technique != .keystrokes
+            PastePreferences.technique = typing ? .keystrokes : .clipboard
+            Log.log("paste technique: \(PastePreferences.technique.rawValue)")
+            return typing
+        }
         menuBar.keepMicOpenState = { [unowned self] in shouldKeepMicrophoneOpen }
         menuBar.onToggleKeepMicOpen = { [unowned self] in
             AudioPreferences.keepMicrophoneOpen.toggle()
@@ -123,6 +130,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation(context: Self.frontmostContext()) }
         hotkey.onCycleStyle = { [weak self] in self?.arbiter.cycleTranscriptStyle() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
+        hotkey.onUndoInsertion = { [weak self] in self?.arbiter.undoLastInsertion() }
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
@@ -152,6 +160,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         // first dictation of the session doesn't pay for any of it.
         arbiter.prewarm()
         menuBar.update(status: .idle)
+        // The mirror of the restart cue: after a cooperative restart the two play
+        // back to back, so the gap between "going down" and "back up" is audible
+        // rather than something you have to check the menu for.
+        SoundEffect.launched.play()
     }
 
     /// Whether the microphone should be held open right now: the AirPods rule's

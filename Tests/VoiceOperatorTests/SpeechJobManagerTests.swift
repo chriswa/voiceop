@@ -11,7 +11,7 @@ final class SpeechJobManagerTests: XCTestCase {
             play: { request, onStart, _ in
                 await requests.append(request)
                 return await gate.play(onStart: onStart)
-            }, prefetch: { _, _ in }, halt: {})
+            }, prefetch: { _, _ in }, halt: { nil })
         let first = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         let second = await manager.enqueue(text: "Another job.", voice: "af_heart")!
         await gate.waitForStarts(1)
@@ -41,7 +41,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { Task { await halts.increment() } })
+            halt: { await halts.increment(); return nil })
 
         let first = await manager.enqueue(text: "First sentence.", voice: "af_heart")!
         let second = await manager.enqueue(text: "Second sentence.", voice: "af_heart")!
@@ -68,7 +68,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: {})
+            halt: { nil })
 
         let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         XCTAssertEqual(accepted.state, .inProgress)
@@ -114,7 +114,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: {})
+            halt: { nil })
 
         let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         await gate.waitForStarts(1)
@@ -143,7 +143,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: {})
+            halt: { nil })
 
         let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         await gate.waitForStarts(1)
@@ -263,7 +263,7 @@ private func startWindowHarness(sentences: Int) async -> WindowHarness {
             await gate.play(onStart: onStart, onSynthesized: onSynthesized)
         },
         prefetch: { text, _ in await synth.synthesize(text) },
-        halt: {})
+        halt: { nil })
     let accepted = await manager.enqueue(
         text: words.prefix(sentences).joined(separator: " "), voice: "af_heart")!
     await gate.waitForStarts(1)
@@ -312,15 +312,153 @@ private actor PlaybackRequests {
     func append(_ request: SpeechJobManager.SentencePlayback) { values.append(request) }
 }
 
+/// `character_offset` at word resolution. A listener who cuts a long sentence
+/// off three words from its end heard nearly all of it, and a client told only
+/// "the last sentence did not finish" cannot tell that from hearing none of it.
+extension SpeechJobManagerTests {
+    private func interrupted(
+        text: String, stoppingAt stoppedAt: SpokenPosition?, afterSentences played: Int
+    ) async -> (offset: Int, boundary: Int) {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        await manager.configure(
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in },
+            halt: { stoppedAt })
+        let job = await manager.enqueue(text: text, voice: "af_heart")!
+        for _ in 0..<played {
+            await gate.waitForStarts(1)
+            await gate.startNext()
+            await gate.finishNext()
+        }
+        await gate.waitForStarts(played + 1)
+        await gate.startNext()
+        let boundary = await manager.result(id: job.id)!.characterOffset
+        _ = await manager.stopSpeaking()
+        let after = await manager.result(id: job.id)!
+        XCTAssertEqual(after.state, .interruptedByUser)
+        return (after.characterOffset, boundary)
+    }
+
+    func testInterruptionReportsTheWordTheVoiceReached() async {
+        let result = await interrupted(
+            text: "First sentence. Second sentence.",
+            stoppingAt: SpokenPosition(sentence: 1, characterOffset: 6),
+            afterSentences: 1)
+        XCTAssertEqual(result.offset, result.boundary + 6,
+                       "the word offset is measured from the interrupted sentence's start")
+    }
+
+    /// Nothing to report — timings that never arrived, or a build of the player
+    /// that does not track words — has to leave the old contract intact rather
+    /// than collapse the offset to zero.
+    func testFallsBackToSentenceResolutionWithoutAWordPosition() async {
+        let result = await interrupted(
+            text: "First sentence. Second sentence.",
+            stoppingAt: nil,
+            afterSentences: 1)
+        XCTAssertEqual(result.offset, result.boundary)
+    }
+
+    /// A rewind leaves the voice in a sentence the queue has already finished
+    /// with. The position says which sentence it was actually in, and that is
+    /// the one its offset is measured against — adding it to the *queue's*
+    /// sentence would report more heard than was ever spoken.
+    func testMeasuresFromTheSentenceTheVoiceWasIn() async {
+        let result = await interrupted(
+            text: "First sentence. Second sentence.",
+            stoppingAt: SpokenPosition(sentence: 0, characterOffset: 5),
+            afterSentences: 1)
+        XCTAssertEqual(result.offset, 5)
+        XCTAssertLessThan(result.offset, result.boundary)
+    }
+
+    /// A position pointing past the job's sentences is not something to pass on
+    /// to a client, whatever produced it.
+    func testIgnoresAPositionThatIsNotInTheJob() async {
+        let result = await interrupted(
+            text: "First sentence. Second sentence.",
+            stoppingAt: SpokenPosition(sentence: 9, characterOffset: 3),
+            afterSentences: 1)
+        XCTAssertEqual(result.offset, result.boundary)
+    }
+}
+
+/// Dictation stops the voice itself, ahead of telling the queue, so the player
+/// can report the interruption before — or instead of — the interrupt path. The
+/// job has to settle the same way either way; the alternative is what a
+/// listener actually hit, which was a job filed as a synthesis failure with no
+/// offset and an error put in front of every client watching it.
+extension SpeechJobManagerTests {
+    private func playerReported(
+        _ outcome: SpeechJobManager.SentenceOutcome
+    ) async -> SpeechJobManager.Result {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        await manager.configure(
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in },
+            halt: { nil })
+        let job = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        await gate.startNext()
+        await gate.finish(outcome)
+        try? await Task.sleep(for: .milliseconds(20))
+        return await manager.result(id: job.id)!
+    }
+
+    func testAPlayerReportedInterruptSettlesTheJobItself() async {
+        let result = await playerReported(.interrupted(SpokenPosition(sentence: 0, characterOffset: 5)))
+        XCTAssertEqual(result.state, .interruptedByUser)
+        XCTAssertEqual(result.characterOffset, 5,
+                       "the position the player carried has to survive to the client")
+    }
+
+    func testAPlayerReportedInterruptWithNoPositionStillReadsAsAnInterrupt() async {
+        let result = await playerReported(.interrupted(nil))
+        XCTAssertEqual(result.state, .interruptedByUser)
+        XCTAssertEqual(result.characterOffset, 0)
+    }
+
+    /// Still distinguishable from an interrupt, which is the whole point of
+    /// splitting them: a client that sees this one really should complain.
+    func testABrokenSentenceStillFailsTheJob() async {
+        let result = await playerReported(.failed)
+        XCTAssertEqual(result.state, .synthesisFailed)
+    }
+
+    /// The other order: the interrupt path gets there first. Its state and its
+    /// position win, and the player's later report must not overwrite either.
+    func testTheInterruptPathWinsWhenItGetsThereFirst() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        await manager.configure(
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in },
+            halt: { SpokenPosition(sentence: 0, characterOffset: 11) })
+        let job = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        await gate.startNext()
+
+        _ = await manager.stopSpeaking()
+        await gate.finish(.interrupted(SpokenPosition(sentence: 0, characterOffset: 5)))
+        try? await Task.sleep(for: .milliseconds(20))
+
+        let result = await manager.result(id: job.id)!
+        XCTAssertEqual(result.state, .interruptedByUser)
+        XCTAssertEqual(result.characterOffset, 11)
+    }
+}
+
 private actor PlaybackGate {
     private var starts = 0
     private var startWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-    private var completions: [CheckedContinuation<Bool, Never>] = []
+    private var completions: [CheckedContinuation<SpeechJobManager.SentenceOutcome, Never>] = []
     private var onStarts: [@Sendable () -> Void] = []
     private var onSyntheses: [@Sendable () -> Void] = []
 
     func play(onStart: @escaping @Sendable () -> Void,
-              onSynthesized: @escaping @Sendable () -> Void = {}) async -> Bool {
+              onSynthesized: @escaping @Sendable () -> Void = {}) async -> SpeechJobManager.SentenceOutcome {
         await withCheckedContinuation { continuation in
             completions.append(continuation)
             onStarts.append(onStart)
@@ -349,9 +487,14 @@ private actor PlaybackGate {
         await withCheckedContinuation { startWaiters.append((count, $0)) }
     }
 
+    func finish(_ outcome: SpeechJobManager.SentenceOutcome) {
+        precondition(!completions.isEmpty)
+        completions.removeFirst().resume(returning: outcome)
+    }
+
     func finishNext() {
         precondition(!completions.isEmpty)
-        completions.removeFirst().resume(returning: true)
+        completions.removeFirst().resume(returning: .finished)
     }
 }
 

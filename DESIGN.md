@@ -73,8 +73,16 @@ unaffected.
 
 Speech is FIFO. Input is split using Foundation sentence boundaries. The
 `character_offset` in every terminal response is a zero-based, end-exclusive
-Unicode-scalar offset into the original input and advances only after an entire
-sentence completed. The current sentence plus the next two are synthesized/
+UTF-16 offset into the original input. While a job runs it advances a whole
+sentence at a time, since that is the granularity at which the queue knows
+anything. A job a listener *interrupted* reports where the voice actually
+stopped, to the word: the reading overlay's timings (`SpokenNarration`) locate
+the word being spoken at the moment of the halt, and its end is added to the
+start of the sentence it was in. A word counts as heard once it has started, so
+the offset matches what the overlay had lit up. Without word timings — they
+resolve asynchronously, and a sentence can be interrupted before its own
+arrive — the offset falls back to the last completed sentence. The current
+sentence plus the next two are synthesized/
 cached ahead of playback to avoid sentence-boundary gaps. Dictation halts the
 current sentence and holds the queue until transcription finishes. Muting
 immediately halts/cancels every live or queued job; new queue attempts receive

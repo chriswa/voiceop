@@ -26,6 +26,9 @@ final class AudioArbiter {
     private let liveTranscriber: LiveTranscriber?
     private let tts = TTSEngine()
     private var speechSessionID: String?
+    /// Where the voice was when this session was last halted. Held so a second
+    /// halt for the same interruption still has an answer — see `haltSpeech`.
+    private var lastStoppedAt: SpokenPosition?
     private var playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
     private var speechExpiry: Task<Void, Never>?
     private var queueSpeechActive = false
@@ -926,13 +929,14 @@ final class AudioArbiter {
 
     func playSentence(_ request: SpeechJobManager.SentencePlayback,
                       onStart: @escaping @Sendable () -> Void = {},
-                      onSynthesized: @escaping @Sendable () -> Void = {}) async -> Bool {
-        guard !isDictating else { onSynthesized(); return false }
+                      onSynthesized: @escaping @Sendable () -> Void = {}) async -> SpeechJobManager.SentenceOutcome {
+        guard !isDictating else { onSynthesized(); return .interrupted(lastStoppedAt) }
         let id = request.jobID
         if speechSessionID != id {
             speechExpiry?.cancel()
             tts.beginSession(rate: PlaybackPreferences().rate)
             speechSessionID = id
+            lastStoppedAt = nil
             playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
             wordOverlay.beginSession(position: { [weak self] in self?.tts.position ?? 0 })
             tts.onDrain = { [weak self] in
@@ -956,7 +960,9 @@ final class AudioArbiter {
             self.onPlaybackControlsChanged?()
             onStart()
         }, onSynthesized: { onSynthesized() })
-        guard speechSessionID == id else { return false }
+        // The session is replaced by `haltSpeech`, so losing it means something
+        // stopped this on purpose — not that the audio broke.
+        guard speechSessionID == id else { return .interrupted(lastStoppedAt) }
         stopTTSWaitCue()
         if result && request.isLast {
             finishSpeechPlayback()
@@ -968,12 +974,28 @@ final class AudioArbiter {
                 refreshSpeechActivity()
             }
         } else if !result {
-            haltSpeech()
+            return .interrupted(haltSpeech())
         }
-        return result
+        return .finished
     }
 
-    func haltSpeech() {
+    /// Stop speaking, and report how far the voice actually got.
+    ///
+    /// The position is read first because stopping is what throws it away: the
+    /// player's clock is reset by `tts.stop()` and the word timings by
+    /// `wordOverlay.stop()`. Reading it anywhere else in this method would
+    /// report a narration that no longer exists.
+    ///
+    /// One interruption can reach this twice. Dictation halts the voice itself
+    /// for latency — the microphone must not be fighting the speakers — and the
+    /// speech queue's own halt follows an actor hop later, by which time there
+    /// is nothing left to measure. The second call answers with what the first
+    /// one found, so which of the two a caller happens to be does not decide
+    /// whether the interruption has a position.
+    @discardableResult
+    func haltSpeech() -> SpokenPosition? {
+        let stoppedAt = wordOverlay.narration.spokenPrefix(at: tts.position) ?? lastStoppedAt
+        lastStoppedAt = stoppedAt
         speechExpiry?.cancel(); speechExpiry = nil
         speechSessionID = nil
         playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
@@ -983,6 +1005,7 @@ final class AudioArbiter {
         wordOverlay.stop()
         refreshSpeechActivity()
         onPlaybackControlsChanged?()
+        return stoppedAt
     }
 
     func adjustSpeechRate(by delta: Float) {

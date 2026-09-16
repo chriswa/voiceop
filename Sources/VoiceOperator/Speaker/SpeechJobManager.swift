@@ -21,6 +21,27 @@ actor SpeechJobManager {
         /// terminal-only wait; see `wait(id:seconds:since:)`.
         let version: Int
     }
+    /// Why a sentence stopped playing.
+    ///
+    /// Three cases rather than a Bool: a listener cutting the voice off and
+    /// synthesis breaking are different events, and only one of them is an
+    /// error the client should hear about.
+    enum SentenceOutcome: Sendable {
+        /// Played to its last sample.
+        case finished
+        /// Stopped on purpose, carrying where the voice had got to if it is
+        /// known. The interrupt is *reported* here rather than merely allowed
+        /// for, because whoever stops the audio and whoever announces the stop
+        /// are two different paths racing each other, and only one of them can
+        /// win. Either landing first now settles the job the same way.
+        case interrupted(SpokenPosition?)
+        /// Neither: synthesis or playback broke.
+        case failed
+    }
+    /// One sentence of a job. `end` is its UTF-16 end offset in the job's text —
+    /// UTF-16 because that is what every consumer of `character_offset` indexes
+    /// strings by, and because a scalar count disagrees with all of them as soon
+    /// as a job contains an emoji or anything else outside the BMP.
     private struct Segment: Sendable { let text: String; let end: Int }
     struct SentencePlayback: Sendable {
         let jobID: String
@@ -28,7 +49,19 @@ actor SpeechJobManager {
         let voice: String
         let isLast: Bool
     }
-    private struct Job: Sendable { let id: String; let voice: String; let segments: [Segment]; var next = 0; var state: State = .inProgress; var playbackState: PlaybackState? = .queued; var local = false; var version = 0 }
+    private struct Job: Sendable {
+        let id: String; let voice: String; let segments: [Segment]
+        var next = 0
+        var state: State = .inProgress
+        var playbackState: PlaybackState? = .queued
+        var local = false
+        var version = 0
+        /// Where the voice actually stopped, recorded when a listener cut the
+        /// job off part-way through a sentence. Absent for every other way a
+        /// job ends, which is what keeps `character_offset` at sentence
+        /// resolution when that is all there is to report.
+        var stoppedAt: SpokenPosition?
+    }
 
     private var jobs: [String: Job] = [:]
     private var order: [String] = []
@@ -41,10 +74,15 @@ actor SpeechJobManager {
     /// `onStart` is the first audible sample, `onSynthesized` is the clip's
     /// audio being fully in hand. See `fillSynthesisWindow` for why the second
     /// one is a scheduling input rather than just a log line.
-    private var play: (@Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool)?
+    private var play: (@Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> SentenceOutcome)?
     /// Synthesize a clip without playing it, returning when it has settled.
     private var prefetch: (@Sendable (String, String) async -> Void)?
-    private var halt: (@Sendable () -> Void)?
+    /// Stop the audio, and say how far into the current sentence it had got.
+    ///
+    /// One closure rather than a reader and a separate stopper, because
+    /// stopping is what destroys the word timings: splitting them leaves two
+    /// calls whose order is load-bearing and nothing to enforce it.
+    private var halt: (@Sendable () async -> SpokenPosition?)?
     /// Fires `true` when speech becomes active (a sentence is handed to
     /// playback) and `false` when the queue goes idle (the whole job finished or
     /// was interrupted). Drives the word overlay's visibility so it appears at
@@ -88,9 +126,9 @@ actor SpeechJobManager {
     private struct Waiter { let since: Int?; let continuation: CheckedContinuation<Result, Never> }
     private var waiters: [String: [Waiter]] = [:]
 
-    func configure(play: @escaping @Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> Bool,
+    func configure(play: @escaping @Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> SentenceOutcome,
                    prefetch: @escaping @Sendable (String, String) async -> Void,
-                   halt: @escaping @Sendable () -> Void,
+                   halt: @escaping @Sendable () async -> SpokenPosition?,
                    onSpeechActivity: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.play = play; self.prefetch = prefetch; self.halt = halt
         self.onSpeechActivity = onSpeechActivity
@@ -145,13 +183,13 @@ actor SpeechJobManager {
 
     /// Halt the current utterance and cancel anything still queued. Returns
     /// `true` when there was something to stop.
-    func stopSpeaking() -> Bool {
+    func stopSpeaking() async -> Bool {
         let pending = order.contains { id in
             guard let job = jobs[id] else { return false }
             return !terminal(job.state)
         }
         guard current != nil || pending else { return false }
-        interruptCurrent(state: .interruptedByUser)
+        await interruptCurrent(state: .interruptedByUser)
         for id in order {
             guard let job = jobs[id], !terminal(job.state) else { continue }
             update(id) { $0.state = .interruptedByUser; $0.playbackState = nil }
@@ -201,19 +239,19 @@ actor SpeechJobManager {
         }
     }
 
-    func beginDictation() { dictating = true; interruptCurrent(state: .interruptedByUser) }
+    func beginDictation() async { dictating = true; await interruptCurrent(state: .interruptedByUser) }
     func endDictation() { dictating = false; pump() }
-    func cancel(id: String) -> Result? {
+    func cancel(id: String) async -> Result? {
         guard let job = jobs[id] else { return nil }
         guard !terminal(job.state) else { return result(job) }
-        if current == id { interruptCurrent(state: .cancelledByClient) }
+        if current == id { await interruptCurrent(state: .cancelledByClient) }
         else { update(id) { $0.state = .cancelledByClient; $0.playbackState = nil }; order.removeAll { $0 == id } }
         return jobs[id].map(result)
     }
-    func setMuted(_ on: Bool) {
+    func setMuted(_ on: Bool) async {
         muted = on
         guard on else { pump(); return }
-        interruptCurrent(state: .cancelledByClient)
+        await interruptCurrent(state: .cancelledByClient)
         for id in order where id != current {
             guard let job = jobs[id], !terminal(job.state) else { continue }
             update(id) { $0.state = .cancelledByClient; $0.playbackState = nil }
@@ -253,12 +291,12 @@ actor SpeechJobManager {
                 // in hand. See the `play` property for why they are unlabelled.
                 let request = SentencePlayback(jobID: id, text: segment.text, voice: job.voice,
                                                isLast: index == job.segments.count - 1)
-                let completed = await play(request, { [weak self] in
+                let outcome = await play(request, { [weak self] in
                     Task { await self?.startedSentence(id: id) }
                 }, { [weak self] in
                     Task { await self?.synthesisSettled(job: id, index: index) }
                 })
-                await self?.finishedSentence(id: id, completed: completed)
+                await self?.finishedSentence(id: id, outcome: outcome)
             }
             return
         }
@@ -338,11 +376,27 @@ actor SpeechJobManager {
         Log.log("speech job \(id): sentence \(job.next + 1)/\(job.segments.count) is audible")
         update(id) { $0.playbackState = .speaking }
     }
-    private func finishedSentence(id: String, completed: Bool) {
+    private func finishedSentence(id: String, outcome: SentenceOutcome) {
         defer { refreshActivity() }
         guard current == id, let job = jobs[id] else { return }
         current = nil
-        if !completed {
+        if case .interrupted(let stoppedAt) = outcome {
+            // Settle it here rather than wait for the interrupt path to say so.
+            // Dictation stops the voice itself, ahead of telling this queue, so
+            // whichever of the two arrives first has to be able to finish the
+            // job — see `SentenceOutcome`. The other finds it terminal and
+            // leaves it alone.
+            if !terminal(job.state) {
+                Log.log("speech job \(id): interrupted_by_user at sentence \(job.next + 1)/\(job.segments.count)")
+                if let stoppedAt {
+                    Log.log("speech job \(id): voice stopped \(stoppedAt.characterOffset) chars into sentence \(stoppedAt.sentence + 1)")
+                }
+                update(id) { $0.state = .interruptedByUser; $0.playbackState = nil; $0.stoppedAt = stoppedAt }
+                order.removeAll { $0 == id }
+            }
+            pump(); return
+        }
+        if case .failed = outcome {
             if !terminal(job.state) {
                 Log.log("speech queue: \(id) synthesis/playback failed at sentence \(job.next + 1)/\(job.segments.count)")
                 update(id) { $0.state = .synthesisFailed; $0.playbackState = nil }; order.removeAll { $0 == id }
@@ -360,19 +414,48 @@ actor SpeechJobManager {
             pump()
         }
     }
-    private func interruptCurrent(state: State) {
+    private func interruptCurrent(state: State) async {
         defer { refreshActivity() }
-        guard let id = current, let job = jobs[id] else { return }
+        guard let id = current, let job = jobs[id], !terminal(job.state) else { return }
         Log.log("speech job \(id): \(state.rawValue) at sentence \(job.next + 1)/\(job.segments.count)")
         // Halt the audio before announcing the state, so a client that reacts
         // to the terminal result is never racing sound that is still playing.
-        order.removeAll { $0 == id }; current = nil; halt?()
-        update(id) { $0.state = state; $0.playbackState = nil }
+        // Awaited now that halting also reports where it stopped: the offset has
+        // to be in hand before the terminal state that carries it is published.
+        order.removeAll { $0 == id }; current = nil
+        let stoppedAt = await halt?()
+        if let stoppedAt {
+            Log.log("speech job \(id): voice stopped \(stoppedAt.characterOffset) chars into sentence \(stoppedAt.sentence + 1)")
+        }
+        update(id) { $0.state = state; $0.playbackState = nil; $0.stoppedAt = stoppedAt }
     }
     private func result(_ job: Job) -> Result {
-        let offset = job.next == 0 ? 0 : job.segments[job.next - 1].end
-        return Result(id: job.id, state: job.state, playbackState: job.playbackState, characterOffset: offset,
+        return Result(id: job.id, state: job.state, playbackState: job.playbackState,
+                      characterOffset: Self.characterOffset(job),
                       error: job.state == .synthesisFailed ? "synthesis_failed" : nil, version: job.version)
+    }
+
+    /// How much of the job's text the listener has heard, in UTF-16 offsets.
+    ///
+    /// Sentence resolution by default: everything up to the end of the last
+    /// sentence that finished. A listener who cut the job off mid-sentence gets
+    /// word resolution instead, which is the difference between a client
+    /// believing they heard nothing of a long sentence and knowing they heard
+    /// all but its last three words.
+    ///
+    /// The interrupted position's own sentence index sets the base, not
+    /// `job.next`. Those two agree while playback runs forwards and part ways
+    /// the moment someone rewinds into an earlier sentence and stops it there.
+    private static func characterOffset(_ job: Job) -> Int {
+        guard let stopped = job.stoppedAt, job.segments.indices.contains(stopped.sentence) else {
+            return job.next == 0 ? 0 : job.segments[job.next - 1].end
+        }
+        let base = stopped.sentence == 0 ? 0 : job.segments[stopped.sentence - 1].end
+        // Clamped to the sentence it belongs to: the offset is measured against
+        // the sentence text the synthesizer was given, and nothing downstream
+        // should have to defend itself against a position past its end.
+        let within = min(max(0, stopped.characterOffset), (job.segments[stopped.sentence].text as NSString).length)
+        return base + within
     }
 
     /// The only way a job is written after it is enqueued.
@@ -409,7 +492,7 @@ actor SpeechJobManager {
     private func terminal(_ s: State) -> Bool { [.completed, .interruptedByUser, .cancelledByClient, .synthesisFailed].contains(s) }
 
     /// Sentence ranges are based on Foundation's linguistic sentence boundary
-    /// detector. Offsets count Unicode scalars in the original input.
+    /// detector. Offsets are UTF-16 positions in the original input.
     private static func segments(_ text: String) -> [Segment] {
         let ns = text as NSString
         var answer: [Segment] = []
@@ -418,10 +501,9 @@ actor SpeechJobManager {
         tagger.enumerateTags(in: NSRange(location: 0, length: ns.length), unit: .sentence, scheme: .tokenType, options: []) { _, range, _ in
             let part = ns.substring(with: range)
             guard !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            let before = ns.substring(to: NSMaxRange(range))
-            answer.append(Segment(text: part, end: before.unicodeScalars.count))
+            answer.append(Segment(text: part, end: NSMaxRange(range)))
         }
-        if answer.isEmpty, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { answer.append(Segment(text: text, end: text.unicodeScalars.count)) }
+        if answer.isEmpty, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { answer.append(Segment(text: text, end: ns.length)) }
         return answer
     }
 }

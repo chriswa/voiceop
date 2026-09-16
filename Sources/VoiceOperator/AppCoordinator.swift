@@ -40,10 +40,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             await SpeechJobManager.shared.configure(
                 play: { [weak self] request, onStart, onSynthesized in
                     await self?.arbiter.playSentence(request,
-                                                     onStart: onStart, onSynthesized: onSynthesized) ?? false
+                                                     onStart: onStart, onSynthesized: onSynthesized) ?? .failed
                 },
                 prefetch: { [weak self] text, voice in await self?.arbiter.prefetchSentence(text: text, voiceID: voice) },
-                halt: { [weak self] in Task { @MainActor in self?.arbiter.haltSpeech() } },
+                halt: { [weak self] in await MainActor.run { self?.arbiter.haltSpeech() } },
                 onSpeechActivity: { [weak self] active in
                     Task { @MainActor in
                         self?.arbiter.setSpeechActive(active)

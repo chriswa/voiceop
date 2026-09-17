@@ -108,6 +108,14 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         wordOverlay.target = self; menu.addItem(wordOverlay)
         muteSystemAudio.target = self; menu.addItem(muteSystemAudio)
         typeInsteadOfPaste.target = self; menu.addItem(typeInsteadOfPaste)
+        // Reminders only: disabled, with no action, so they show their shortcut but
+        // never fire. The tap handles both chords whatever the checkbox says.
+        for (title, modifiers) in [("Re-paste Last (Clipboard)", [.command, .control]),
+                                   ("Re-type Last (Keystrokes)", [.command, .control, .shift])] as [(String, NSEvent.ModifierFlags)] {
+            let hint = NSMenuItem(title: title, action: nil, keyEquivalent: "v")
+            hint.keyEquivalentModifierMask = modifiers
+            hint.isEnabled = false; hint.indentationLevel = 1; menu.addItem(hint)
+        }
         keepMicOpen.target = self; menu.addItem(keepMicOpen)
         // Indented under the checkbox it takes over, the way System Settings nests
         // a rule under the switch it drives.

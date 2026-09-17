@@ -129,8 +129,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onStart = { [weak self] mode, trace in self?.arbiter.beginDictation(mode: mode, trace: trace) }
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation(context: Self.frontmostContext()) }
         hotkey.onCycleStyle = { [weak self] in self?.arbiter.cycleTranscriptStyle() }
-        hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast() }
-        hotkey.onUndoInsertion = { [weak self] in self?.arbiter.undoLastInsertion() }
+        hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast(using: .clipboard) }
+        hotkey.onRetype = { [weak self] in self?.arbiter.repasteLast(using: .keystrokes) }
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }

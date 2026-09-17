@@ -31,27 +31,18 @@ enum TextInserter {
     /// after the *last* character on the keystroke path, which takes the better
     /// part of a second. Callers use it for the "inserted" cue, so the cue never
     /// claims the transcript has landed while characters are still going out.
+    ///
+    /// `afterModifiersClear` holds typed text back until the user lets go of every
+    /// modifier — for insertions fired from a ⌘⌃ chord (see `KeystrokeTyper`).
     static func insert(_ text: String,
                        using technique: PasteTechnique = PastePreferences.technique,
+                       afterModifiersClear: Bool = false,
                        completion: @escaping @Sendable @MainActor () -> Void = {}) {
         guard !text.isEmpty else { return }
         switch technique {
         case .clipboard: pasteViaClipboard(text); completion()
-        case .keystrokes: KeystrokeTyper.type(text, completion: completion)
+        case .keystrokes: KeystrokeTyper.type(text, afterModifiersClear: afterModifiersClear, completion: completion)
         }
-    }
-
-    /// Removes `text` from the frontmost app by sending one backspace per
-    /// character of it. Always keystrokes — there is no clipboard equivalent —
-    /// and it goes through the same serial queue as typing, so an undo can never
-    /// interleave with an insertion that is still going out.
-    ///
-    /// It deletes by *count*, not by content: whatever now sits to the left of
-    /// the caret is what goes. That is exact when the insertion is the last thing
-    /// that happened, which is the case this exists for.
-    static func undo(_ text: String, completion: @escaping @Sendable @MainActor () -> Void = {}) {
-        guard !text.isEmpty else { return }
-        KeystrokeTyper.backspace(text.count, afterModifiersClear: true, completion: completion)
     }
 
     // MARK: - Clipboard + ⌘V
@@ -107,8 +98,7 @@ enum KeystrokeTyper {
     static let interval: TimeInterval = 0.0005
     /// Typing runs off the main thread: a 300-character transcript takes ~450 ms,
     /// and the menu bar, the overlay and the restart coordinator all live on the
-    /// main actor. Serial, so two transcripts — or a transcript and the undo of
-    /// the one before it — can never interleave their characters.
+    /// main actor. Serial, so two transcripts can never interleave their characters.
     private static let queue = DispatchQueue(label: "com.voiceoperator.text-inserter.typing")
 
     /// One synthesized key press. `unicode`, when set, is the grapheme the event
@@ -123,24 +113,16 @@ enum KeystrokeTyper {
         /// path exists for — Claude Code, chat boxes — read a bare Return as
         /// "send", which would split one dictation across two messages.
         static let newline = Keystroke(key: CGKeyCode(kVK_Return), flags: .maskShift)
-        static let delete = Keystroke(key: CGKeyCode(kVK_Delete))
         static func character(_ character: Character) -> Keystroke {
             Keystroke(key: 0, unicode: Array(character.utf16))
         }
     }
 
     /// Types `text`, one grapheme per key event.
-    static func type(_ text: String, completion: @escaping @Sendable @MainActor () -> Void = {}) {
-        send(text.map { $0.isNewline ? .newline : .character($0) }, completion: completion)
-    }
-
-    /// Sends `count` backspaces. One per grapheme is what the caller wants,
-    /// because that is what a text view deletes per press and what `type` emits
-    /// per press.
-    static func backspace(_ count: Int,
-                          afterModifiersClear: Bool = false,
-                          completion: @escaping @Sendable @MainActor () -> Void = {}) {
-        send(Array(repeating: .delete, count: max(0, count)),
+    static func type(_ text: String,
+                     afterModifiersClear: Bool = false,
+                     completion: @escaping @Sendable @MainActor () -> Void = {}) {
+        send(text.map { $0.isNewline ? .newline : .character($0) },
              afterModifiersClear: afterModifiersClear,
              completion: completion)
     }
@@ -183,14 +165,13 @@ enum KeystrokeTyper {
     /// Waits (on `queue`, never the main thread) for the user to let go of every
     /// modifier before the first event goes out.
     ///
-    /// The chords fire on key-down, so ⌘ and ⌃ are still physically held when an
-    /// undo starts, and it takes ~1.5 ms per character to finish. Our events carry
-    /// their own empty flags, but an app that consults the *hardware* modifier
-    /// state instead reads each Delete as ⌘⌫ — delete-to-line-start in a text
-    /// field, "move to Trash" in Finder. Waiting removes the overlap entirely.
+    /// The chords fire on key-down, so ⌘⌃⇧ are still physically held when a typed
+    /// re-paste starts. Our events carry their own empty flags, but an app that
+    /// consults the *hardware* modifier state instead reads each character as a
+    /// ⌘⌃ shortcut. Waiting removes the overlap entirely.
     ///
     /// The timeout is the escape hatch for a modifier the system thinks is stuck:
-    /// late backspaces beat none at all.
+    /// late text beats none at all.
     private static func waitForModifiersToClear(timeout: TimeInterval = 2) {
         let held: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
         let deadline = Date().addingTimeInterval(timeout)

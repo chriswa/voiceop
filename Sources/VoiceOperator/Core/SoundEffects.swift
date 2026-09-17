@@ -21,7 +21,6 @@ enum SoundEffect: CaseIterable {
     case listeningFinishedSlow          // Fn capture ended, but the live stream is down: slow path
     case commandListeningFinishedSlow   // Ctrl+Fn capture ended, slow path
     case pasted
-    case insertionUndone            // ⌘⌃⇧V backspaced the last insertion away
     case silenceSkipped             // recording had no speech — transcription skipped
     case captureFailed              // the microphone delivered no audio at all
     case surfaceRaised              // a voice tool matched + ran
@@ -65,9 +64,6 @@ enum SoundEffect: CaseIterable {
         case .commandListeningFinishedSlow: return [(1319, 0.08), (988, 0.11), (0, 0.05), (494, 0.24)]
         // Cheerful rising major arpeggio (C5–E5–G5–C6) — text inserted.
         case .pasted: return [(523, 0.09), (659, 0.09), (784, 0.09), (1047, 0.14)]
-        // The same arpeggio falling (C6–G5–E5–C5) — that insertion has been taken
-        // back. Reads as the exact inverse of the cue it undoes.
-        case .insertionUndone: return [(1047, 0.09), (784, 0.09), (659, 0.09), (523, 0.14)]
         // Gentle low descending two-tone (G4→C4) — recording was silent, so
         // transcription was skipped. A soft "deflating" cue, distinct from
         // the command "unrecognized" and the harsher error tone.
@@ -160,7 +156,6 @@ enum SoundEffect: CaseIterable {
         case .listeningFinishedSlow:        return "Listening finished (paste, slow path)"
         case .commandListeningFinishedSlow: return "Listening finished (command, slow path)"
         case .pasted:                   return "Pasted"
-        case .insertionUndone:          return "Insertion undone"
         case .silenceSkipped:           return "Silence skipped (no speech)"
         case .captureFailed:            return "Capture failed (no microphone audio)"
         case .surfaceRaised:            return "Surface raised (tool ran)"

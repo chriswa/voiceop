@@ -292,15 +292,13 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
 - The "inserted" cue plays from the insertion's **completion**, not alongside the call: on the
   keystroke path the transcript is still going out for the better part of a second, and a cue at
   the start would announce text that is not there yet.
-- **⌘⌃V re-pastes** the last insertion; **⌘⌃⇧V undoes** it — one backspace per character of
-  `AudioArbiter.lastInsertion`, through the same serial queue as typing (so an undo can never
-  interleave with an insertion still going out), then the falling mirror of the inserted cue. The
-  insertion is marked not-live *before* the backspaces go out, so a second undo is a no-op even if
-  it lands while the first is still typing; the text is kept, so ⌘⌃V can put it back. The chords
-  fire on key-down, so the undo first waits (up to 2 s) for the user to release the modifiers: our
-  events carry empty flags, but an app that reads the hardware modifier state instead would see
-  each Delete as ⌘⌫. `Chord` matches Shift rather than ignoring it, which is what lets ⌘⌃V and
-  ⌘⌃⇧V share a keycode — and stops a stray Shift aliasing any other chord onto its handler.
+- **⌘⌃V re-pastes** the last insertion via the clipboard and **⌘⌃⇧V re-types** it via
+  `KeystrokeTyper`, both regardless of the checkbox — so either technique is a chord away without
+  touching the menu. The chords fire on key-down, so the re-type first waits (up to 2 s) for the
+  user to release the modifiers: our events carry empty flags, but an app that reads the hardware
+  modifier state instead would see each character as a ⌘⌃ shortcut. `Chord` matches Shift rather
+  than ignoring it, which is what lets ⌘⌃V and ⌘⌃⇧V share a keycode — and stops a stray Shift
+  aliasing any other chord onto its handler.
 
 ### Mute-during-dictation — CoreAudio device mute, gated on now-playing
 - On `RecordingStarted`: `shouldMuteAudio: 1` → Volume Manager checks now-playing; if media is

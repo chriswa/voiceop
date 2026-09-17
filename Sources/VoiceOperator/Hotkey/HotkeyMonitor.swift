@@ -97,10 +97,10 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// later phase is measured against the instant the user actually pressed.
     var onStart: (@MainActor @Sendable (DictationModeDecision, DictationTrace) -> Void)?
     var onStop: Action?
-    /// Fired on ⌘⌃V — re-paste the last pasted text.
+    /// Fired on ⌘⌃V — re-paste the last pasted text via the clipboard.
     var onRepaste: Action?
-    /// Fired on ⌘⌃⇧V — backspace over the last insertion.
-    var onUndoInsertion: Action?
+    /// Fired on ⌘⌃⇧V — re-insert the last pasted text by typing it.
+    var onRetype: Action?
     /// Fired on ⌘⌃B — toggle narration mute.
     var onToggleMute: Action?
     /// Fired on ⌘⌃S — speak the clipboard aloud (or stop if already speaking).
@@ -165,7 +165,7 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// forget, and a chord whose callback nobody assigned then fails
     /// indistinguishably from one the tap never saw.
     private enum Chord: CaseIterable {
-        case repaste, undoInsertion, toggleMute, speakClipboard, summarizeClipboard
+        case repaste, retype, toggleMute, speakClipboard, summarizeClipboard
         case fasterSpeech, slowerSpeech, rewindSpeech, forwardSpeech
 
         /// The `kVK_ANSI_*` keycode the chord is typed on, and whether Shift is
@@ -175,7 +175,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         var keys: (keycode: Int64, shift: Bool) {
             switch self {
             case .repaste:            return (9, false)
-            case .undoInsertion:      return (9, true)
+            case .retype:             return (9, true)
             case .toggleMute:         return (11, false)
             case .speakClipboard:     return (1, false)
             case .summarizeClipboard: return (0, false)
@@ -194,7 +194,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         var name: String {
             switch self {
             case .repaste:            return "⌘⌃V (re-paste)"
-            case .undoInsertion:      return "⌘⌃⇧V (undo insertion)"
+            case .retype:             return "⌘⌃⇧V (re-type)"
             case .toggleMute:         return "⌘⌃B (toggle mute)"
             case .speakClipboard:     return "⌘⌃S (speak clipboard)"
             case .summarizeClipboard: return "⌘⌃A (summarize clipboard)"
@@ -209,7 +209,7 @@ final class HotkeyMonitor: @unchecked Sendable {
     private func action(for chord: Chord) -> Action? {
         switch chord {
         case .repaste:            return onRepaste
-        case .undoInsertion:      return onUndoInsertion
+        case .retype:             return onRetype
         case .toggleMute:         return onToggleMute
         case .speakClipboard:     return onSpeakClipboard
         case .summarizeClipboard: return onSummarizeClipboard

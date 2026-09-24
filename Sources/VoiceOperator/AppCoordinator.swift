@@ -72,14 +72,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onRestart = { [unowned self] in restart.request(source: .menu) }
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
-        arbiter.wordOverlay.isEnabled = OverlayPreferences.wordOverlayEnabled
-        menuBar.wordOverlayState = { OverlayPreferences.wordOverlayEnabled }
-        menuBar.onToggleWordOverlay = { [weak self] in
-            OverlayPreferences.wordOverlayEnabled.toggle()
-            let on = OverlayPreferences.wordOverlayEnabled
-            self?.arbiter.wordOverlay.isEnabled = on
-            Log.log("word overlay: \(on ? "enabled" : "disabled")")
-            return on
+        arbiter.wordOverlay.placement = OverlayPreferences.placement
+        menuBar.wordOverlayPlacement = { OverlayPreferences.placement }
+        menuBar.onCycleWordOverlay = { [weak self] in
+            let placement = OverlayPreferences.placement.next
+            OverlayPreferences.placement = placement
+            self?.arbiter.wordOverlay.placement = placement
+            self?.arbiter.wordOverlay.previewPlacement()
+            Log.log("word overlay: \(placement.rawValue)")
+            return placement
         }
         arbiter.muter.isEnabled = AudioPreferences.muteSystemAudioWhileDictating
         menuBar.muteSystemAudioState = { AudioPreferences.muteSystemAudioWhileDictating }
@@ -134,6 +135,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
+        hotkey.onCycleOverlayPlacement = { [weak self] in self?.menuBar.cycleWordOverlay() }
         hotkey.onFasterSpeech = { [weak self] in self?.arbiter.adjustSpeechRate(by: 0.2) }
         hotkey.onSlowerSpeech = { [weak self] in self?.arbiter.adjustSpeechRate(by: -0.2) }
         hotkey.onRewindSpeech = { [weak self] in self?.arbiter.rewindSpeech(seconds: 3) }

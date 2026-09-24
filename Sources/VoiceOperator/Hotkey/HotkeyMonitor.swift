@@ -107,6 +107,8 @@ final class HotkeyMonitor: @unchecked Sendable {
     var onSpeakClipboard: Action?
     /// Fired on ⌘⌃A — summarize the clipboard via Haiku.
     var onSummarizeClipboard: Action?
+    /// Fired on ⌘⌃/ — move the word overlay to its next placement.
+    var onCycleOverlayPlacement: Action?
     var onFasterSpeech: Action?
     var onSlowerSpeech: Action?
     var onRewindSpeech: Action?
@@ -165,7 +167,7 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// forget, and a chord whose callback nobody assigned then fails
     /// indistinguishably from one the tap never saw.
     private enum Chord: CaseIterable {
-        case repaste, retype, toggleMute, speakClipboard, summarizeClipboard
+        case repaste, retype, toggleMute, speakClipboard, summarizeClipboard, cycleOverlayPlacement
         case fasterSpeech, slowerSpeech, rewindSpeech, forwardSpeech
 
         /// The `kVK_ANSI_*` keycode the chord is typed on, and whether Shift is
@@ -179,6 +181,7 @@ final class HotkeyMonitor: @unchecked Sendable {
             case .toggleMute:         return (11, false)
             case .speakClipboard:     return (1, false)
             case .summarizeClipboard: return (0, false)
+            case .cycleOverlayPlacement: return (44, false)
             case .fasterSpeech:       return (47, false)
             case .slowerSpeech:       return (43, false)
             case .rewindSpeech:       return (123, false)
@@ -198,6 +201,7 @@ final class HotkeyMonitor: @unchecked Sendable {
             case .toggleMute:         return "⌘⌃B (toggle mute)"
             case .speakClipboard:     return "⌘⌃S (speak clipboard)"
             case .summarizeClipboard: return "⌘⌃A (summarize clipboard)"
+            case .cycleOverlayPlacement: return "⌘⌃/ (cycle overlay placement)"
             case .fasterSpeech:       return "⌘⌃. (faster speech)"
             case .slowerSpeech:       return "⌘⌃, (slower speech)"
             case .rewindSpeech:       return "⌘⌃← (rewind speech)"
@@ -213,6 +217,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         case .toggleMute:         return onToggleMute
         case .speakClipboard:     return onSpeakClipboard
         case .summarizeClipboard: return onSummarizeClipboard
+        case .cycleOverlayPlacement: return onCycleOverlayPlacement
         case .fasterSpeech:       return onFasterSpeech
         case .slowerSpeech:       return onSlowerSpeech
         case .rewindSpeech:       return onRewindSpeech

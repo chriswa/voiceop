@@ -14,7 +14,8 @@ struct OverlayLine: Equatable {
     let highlightRange: NSRange
 }
 
-/// Draws the reading overlay: a full-width black band along the screen bottom with
+/// Draws the reading overlay: a full-width black band (at the screen's bottom,
+/// middle or top — see `placement`) with
 /// a dim vertical guide inside it, and a line of the sentence's text with the
 /// current word's ORP pivot letter (see `ORP`) pinned to that guide, so the
 /// reader's eye stays parked on one spot as words flip past. The line runs off
@@ -26,6 +27,11 @@ final class WordOverlayView: NSView {
     /// The line currently shown. `nil` paints the band and crosshair with no text.
     var line: OverlayLine? { didSet { if line != oldValue { needsDisplay = true } } }
     var playbackRate: Float = 1 { didSet { if playbackRate != oldValue { needsDisplay = true } } }
+    /// Which edge (or the centre) the band is drawn against. `.hidden` never
+    /// reaches here — the controller keeps the panel off screen instead.
+    var placement: OverlayPlacement = .bottom { didSet { if placement != oldValue { needsDisplay = true } } }
+    /// Height of the menu bar strip at the top of `bounds`, which `.top` sits under.
+    var topInset: CGFloat = 0 { didSet { if topInset != oldValue { needsDisplay = true } } }
 
     /// The word's font. Large by design — this is a glanceable overlay.
     private let font = NSFont.systemFont(ofSize: 64, weight: .semibold)
@@ -55,11 +61,10 @@ final class WordOverlayView: NSView {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let focalX = bounds.midX
 
-        // The word band: a full-width black rectangle flush with the bottom of
-        // the screen. Leave room for the lower border strip so the complete
-        // black-and-white band, rather than just its black interior, is aligned
-        // to the screen edge.
-        let band = NSRect(x: bounds.minX, y: bounds.minY + borderHeight, width: bounds.width, height: bandHeight)
+        // The word band: a full-width black rectangle. Leave room for the lower
+        // border strip so the complete black-and-white band, rather than just its
+        // black interior, is what gets aligned to the screen edge or centre.
+        let band = NSRect(x: bounds.minX, y: blockMinY + borderHeight, width: bounds.width, height: bandHeight)
         ctx.setFillColor(black.cgColor)
         ctx.fill(band)
 
@@ -135,6 +140,16 @@ final class WordOverlayView: NSView {
         CTLineDraw(ctLine, ctx)
     }
 
-    /// The focal line is vertically centred within the bottom-aligned word band.
-    private var bandCenterY: CGFloat { bounds.minY + borderHeight + bandHeight / 2 }
+    /// The focal line is vertically centred within the word band.
+    private var bandCenterY: CGFloat { blockMinY + borderHeight + bandHeight / 2 }
+
+    /// Bottom edge of the whole block — the band plus both border strips.
+    private var blockMinY: CGFloat {
+        let blockHeight = bandHeight + 2 * borderHeight
+        switch placement {
+        case .bottom, .hidden: return bounds.minY
+        case .middle:          return bounds.midY - blockHeight / 2
+        case .top:             return bounds.maxY - topInset - blockHeight
+        }
+    }
 }

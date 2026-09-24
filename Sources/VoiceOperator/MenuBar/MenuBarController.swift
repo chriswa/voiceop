@@ -12,7 +12,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let streamWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
-    private let wordOverlay = NSMenuItem(title: "Word Overlay", action: #selector(toggleWordOverlay), keyEquivalent: "")
+    private let wordOverlay = NSMenuItem(title: "Word Overlay: Bottom", action: #selector(cycleWordOverlayItem), keyEquivalent: "/")
     private let muteSystemAudio = NSMenuItem(title: "Mute System Audio While Dictating", action: #selector(toggleMuteSystemAudio), keyEquivalent: "")
     private let typeInsteadOfPaste = NSMenuItem(title: "Type Text Instead of Pasting", action: #selector(toggleTypeInsteadOfPaste), keyEquivalent: "")
     private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
@@ -40,8 +40,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// returns the state afterwards so the checkmark can follow it.
     var tapToToggleState: (() -> Bool)?
     var onToggleTapToToggle: (() -> Bool)?
-    var wordOverlayState: (() -> Bool)?
-    var onToggleWordOverlay: (() -> Bool)?
+    /// Reads and advances the word overlay's placement (⌘⌃/). The advance
+    /// closure returns the new placement so the title can follow it.
+    var wordOverlayPlacement: (() -> OverlayPlacement)?
+    var onCycleWordOverlay: (() -> OverlayPlacement)?
     /// Reads and flips whether a transcript is typed a character at a time rather
     /// than pasted. Same shape as the other preference toggles: the flip closure
     /// returns the state afterwards so the checkmark follows it.
@@ -105,6 +107,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         }
         menu.addItem(.separator())
         tapToToggle.target = self; menu.addItem(tapToToggle)
+        wordOverlay.keyEquivalentModifierMask = [.command, .control]
         wordOverlay.target = self; menu.addItem(wordOverlay)
         muteSystemAudio.target = self; menu.addItem(muteSystemAudio)
         typeInsteadOfPaste.target = self; menu.addItem(typeInsteadOfPaste)
@@ -185,7 +188,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         guard menu === self.menu else { return }
         onMenuOpenChanged?(true)
         tapToToggle.state = (tapToToggleState?() ?? false) ? .on : .off
-        wordOverlay.state = (wordOverlayState?() ?? true) ? .on : .off
+        wordOverlay.title = "Word Overlay: \((wordOverlayPlacement?() ?? .bottom).title)"
         muteSystemAudio.state = (muteSystemAudioState?() ?? true) ? .on : .off
         typeInsteadOfPaste.state = (typeInsteadOfPasteState?() ?? false) ? .on : .off
         keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
@@ -230,7 +233,13 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func restart() { onRestart?() }
     @objc private func toggleLogin() { _ = onToggleLaunchAtLogin?() }
     @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
-    @objc private func toggleWordOverlay() { wordOverlay.state = (onToggleWordOverlay?() ?? true) ? .on : .off }
+    @objc private func cycleWordOverlayItem() { cycleWordOverlay() }
+    /// Advance the overlay placement from the menu item or the global ⌘⌃/ chord,
+    /// keeping the item's title in step either way.
+    func cycleWordOverlay() {
+        guard let placement = onCycleWordOverlay?() else { return }
+        wordOverlay.title = "Word Overlay: \(placement.title)"
+    }
     @objc private func toggleMuteSystemAudio() { muteSystemAudio.state = (onToggleMuteSystemAudio?() ?? true) ? .on : .off }
     @objc private func toggleTypeInsteadOfPaste() { typeInsteadOfPaste.state = (onToggleTypeInsteadOfPaste?() ?? false) ? .on : .off }
     @objc private func toggleKeepMicOpen() { keepMicOpen.state = (onToggleKeepMicOpen?() ?? false) ? .on : .off }

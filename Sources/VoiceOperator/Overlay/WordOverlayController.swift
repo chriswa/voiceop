@@ -11,15 +11,20 @@ import CoreGraphics
 @MainActor
 final class WordOverlayController {
     var playbackRate: Float = 1 { didSet { view?.playbackRate = playbackRate } }
-    var isEnabled = true {
+    /// Where the bar sits. Takes effect immediately, mid-narration included, so
+    /// ⌘⌃/ moves the bar the user is looking at rather than the next one.
+    var placement: OverlayPlacement = .bottom {
         didSet {
-            if !isEnabled { panel?.orderOut(nil) }
+            view?.placement = placement
+            if !isVisible { panel?.orderOut(nil) }
             else if active { show(); refresh() }
         }
     }
+    private var isVisible: Bool { placement != .hidden }
     private var panel: NSPanel?
     private var view: WordOverlayView?
     private var timer: Timer?
+    private var previewTimer: Timer?
     private var active = false
     /// What is being said. Owned here because the overlay's lifetime matches a
     /// narration's, and read by the speech queue through this property.
@@ -42,10 +47,31 @@ final class WordOverlayController {
         }
     }
 
+    /// ⌘⌃/ with nothing being read: flash the empty bar at its new placement
+    /// for a moment, so it can be moved without starting a narration to see
+    /// where it went. A press mid-narration needs none of this (the live bar
+    /// moves), and `.hidden` has nothing to show.
+    func previewPlacement() {
+        guard !active, isVisible else { return }
+        previewTimer?.invalidate()
+        show()
+        view?.line = nil
+        let timer = Timer(timeInterval: 0.2, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.active else { return }
+                self.panel?.orderOut(nil)
+            }
+        }
+        // `.common`, so the flash still ends while the menu is tracking.
+        RunLoop.main.add(timer, forMode: .common)
+        previewTimer = timer
+    }
+
     func activate() {
         guard !active else { return }
         active = true
-        if isEnabled { show() }
+        previewTimer?.invalidate(); previewTimer = nil
+        if isVisible { show() }
         view?.line = Self.warmLine
         let timer = Timer(timeInterval: 1 / 60.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -70,7 +96,7 @@ final class WordOverlayController {
     }
 
     func refresh() {
-        guard active, isEnabled, let position else { return }
+        guard active, isVisible, let position else { return }
         view?.line = line(at: position())
     }
 
@@ -103,6 +129,7 @@ final class WordOverlayController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         let view = WordOverlayView(frame: .zero)
         view.playbackRate = playbackRate
+        view.placement = placement
         panel.contentView = view
         self.panel = panel
         self.view = view
@@ -112,9 +139,13 @@ final class WordOverlayController {
     /// Cover the primary display. The view paints only the crosshair, the word
     /// band and the word; the rest stays transparent and click-through.
     /// Re-run on every `activate` so it follows a display reconnection.
+    ///
+    /// The panel spans the whole screen, menu bar included, so the view is told
+    /// how tall the menu bar is: `.top` sits just under it rather than over it.
     private func layout(_ panel: NSPanel) {
         guard let screen = Self.primaryScreen else { return }
         panel.setFrame(screen.frame, display: true)
+        view?.topInset = screen.frame.maxY - screen.visibleFrame.maxY
         view?.frame = panel.contentView?.bounds ?? .zero
         view?.needsDisplay = true
     }

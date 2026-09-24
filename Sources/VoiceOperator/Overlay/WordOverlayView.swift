@@ -146,10 +146,15 @@ final class WordOverlayView: NSView {
     /// Bottom edge of the whole block — the band plus both border strips.
     private var blockMinY: CGFloat {
         let blockHeight = bandHeight + 2 * borderHeight
+        let bottom = bounds.minY
+        let middle = bounds.midY - blockHeight / 2
+        let top = bounds.maxY - topInset - blockHeight
         switch placement {
-        case .bottom, .hidden: return bounds.minY
-        case .middle:          return bounds.midY - blockHeight / 2
-        case .top:             return bounds.maxY - topInset - blockHeight
+        case .bottom, .hidden: return bottom
+        case .lowerMiddle:     return (bottom + middle) / 2
+        case .middle:          return middle
+        case .upperMiddle:     return (middle + top) / 2
+        case .top:             return top
         }
     }
 }

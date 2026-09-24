@@ -3,7 +3,7 @@ import Foundation
 /// Where the word-highlight bar sits during TTS playback. ⌘⌃/ steps through the
 /// cases in declaration order and wraps, so the order here *is* the cycle.
 enum OverlayPlacement: String, CaseIterable {
-    case bottom, middle, top, hidden
+    case bottom, lowerMiddle, middle, upperMiddle, top, hidden
 
     var next: OverlayPlacement {
         let all = Self.allCases
@@ -12,10 +12,12 @@ enum OverlayPlacement: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .bottom: return "Bottom"
-        case .middle: return "Middle"
-        case .top:    return "Top"
-        case .hidden: return "Hidden"
+        case .bottom:      return "Bottom"
+        case .lowerMiddle: return "Lower Middle"
+        case .middle:      return "Middle"
+        case .upperMiddle: return "Upper Middle"
+        case .top:         return "Top"
+        case .hidden:      return "Hidden"
         }
     }
 }

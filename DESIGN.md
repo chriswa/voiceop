@@ -593,7 +593,8 @@ full-screen and transparent, painting only the guides, the band and the word; gl
 The bar samples the player's source-audio position at 60 Hz against the fetched timings.
 Each sentence's timings are offset by its actual PCM start in the job timeline. Speed changes,
 network gaps and cross-sentence rewind therefore move the reader with the audio; there is no
-wall-clock sentence anchor. Placement: bottom, middle, top (under the menu bar) or hidden,
+wall-clock sentence anchor. Placement: bottom, lower middle, middle, upper middle, top (under the menu bar) or hidden
+(the two in-betweens sit halfway between their neighbours),
 cycled by ⌘⌃/ or chosen in the menu's **Word Overlay** submenu (`OverlayPreferences.placement`, default bottom;
 an old `wordOverlayEnabled = false` reads as hidden).
 

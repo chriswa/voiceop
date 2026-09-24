@@ -74,13 +74,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
         arbiter.wordOverlay.placement = OverlayPreferences.placement
         menuBar.wordOverlayPlacement = { OverlayPreferences.placement }
-        menuBar.onCycleWordOverlay = { [weak self] in
-            let placement = OverlayPreferences.placement.next
+        menuBar.onSetWordOverlay = { [weak self] placement in
             OverlayPreferences.placement = placement
             self?.arbiter.wordOverlay.placement = placement
             self?.arbiter.wordOverlay.previewPlacement()
             Log.log("word overlay: \(placement.rawValue)")
-            return placement
         }
         arbiter.muter.isEnabled = AudioPreferences.muteSystemAudioWhileDictating
         menuBar.muteSystemAudioState = { AudioPreferences.muteSystemAudioWhileDictating }

@@ -186,7 +186,7 @@ Fire from any app (they run off the CGEvent tap, so no window focus needed):
 - **⌘⌃A** — replace the clipboard with a one- or two-sentence Haiku summary of it.
 - **⌘⌃B** — mute or unmute narration (same as the menu-bar **Mute Speech** item).
 - **⌘⌃/** — move the word overlay: bottom → middle → top → hidden → bottom. Saved between
-  restarts; the menu's **Word Overlay** item shows (and cycles) the current placement.
+  restarts; the menu's **Word Overlay** submenu shows the current one and picks any directly.
   With nothing being read, the empty bar flashes at its new spot for 200 ms.
 - **⌘⌃,** / **⌘⌃.** — slow down / speed up active speech by **0.2×**, from **0.5× to 5.0×**.
   Speed is saved between reads and app restarts; the default is 1.0×.

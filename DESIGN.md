@@ -594,7 +594,7 @@ The bar samples the player's source-audio position at 60 Hz against the fetched 
 Each sentence's timings are offset by its actual PCM start in the job timeline. Speed changes,
 network gaps and cross-sentence rewind therefore move the reader with the audio; there is no
 wall-clock sentence anchor. Placement: bottom, middle, top (under the menu bar) or hidden,
-cycled by ⌘⌃/ or the menu **Word Overlay** item (`OverlayPreferences.placement`, default bottom;
+cycled by ⌘⌃/ or chosen in the menu's **Word Overlay** submenu (`OverlayPreferences.placement`, default bottom;
 an old `wordOverlayEnabled = false` reads as hidden).
 
 ### Live TTS playback controls

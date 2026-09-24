@@ -12,7 +12,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let streamWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
-    private let wordOverlay = NSMenuItem(title: "Word Overlay: Bottom", action: #selector(cycleWordOverlayItem), keyEquivalent: "/")
+    private let wordOverlay = NSMenuItem(title: "Word Overlay", action: nil, keyEquivalent: "")
     private let muteSystemAudio = NSMenuItem(title: "Mute System Audio While Dictating", action: #selector(toggleMuteSystemAudio), keyEquivalent: "")
     private let typeInsteadOfPaste = NSMenuItem(title: "Type Text Instead of Pasting", action: #selector(toggleTypeInsteadOfPaste), keyEquivalent: "")
     private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
@@ -40,10 +40,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// returns the state afterwards so the checkmark can follow it.
     var tapToToggleState: (() -> Bool)?
     var onToggleTapToToggle: (() -> Bool)?
-    /// Reads and advances the word overlay's placement (⌘⌃/). The advance
-    /// closure returns the new placement so the title can follow it.
+    /// Reads and sets the word overlay's placement — from its submenu, or the
+    /// next one in the cycle on ⌘⌃/.
     var wordOverlayPlacement: (() -> OverlayPlacement)?
-    var onCycleWordOverlay: (() -> OverlayPlacement)?
+    var onSetWordOverlay: ((OverlayPlacement) -> Void)?
     /// Reads and flips whether a transcript is typed a character at a time rather
     /// than pasted. Same shape as the other preference toggles: the flip closure
     /// returns the state afterwards so the checkmark follows it.
@@ -107,8 +107,17 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         }
         menu.addItem(.separator())
         tapToToggle.target = self; menu.addItem(tapToToggle)
-        wordOverlay.keyEquivalentModifierMask = [.command, .control]
-        wordOverlay.target = self; menu.addItem(wordOverlay)
+        // One radio item per placement, then the cycle with its chord shown.
+        let placements = NSMenu()
+        for placement in OverlayPlacement.allCases {
+            let item = NSMenuItem(title: placement.title, action: #selector(chooseWordOverlay(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = placement.rawValue; placements.addItem(item)
+        }
+        placements.addItem(.separator())
+        let cycle = NSMenuItem(title: "Next Placement", action: #selector(cycleWordOverlayItem), keyEquivalent: "/")
+        cycle.keyEquivalentModifierMask = [.command, .control]
+        cycle.target = self; placements.addItem(cycle)
+        wordOverlay.submenu = placements; menu.addItem(wordOverlay)
         muteSystemAudio.target = self; menu.addItem(muteSystemAudio)
         typeInsteadOfPaste.target = self; menu.addItem(typeInsteadOfPaste)
         // Reminders only: disabled, with no action, so they show their shortcut but
@@ -188,7 +197,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         guard menu === self.menu else { return }
         onMenuOpenChanged?(true)
         tapToToggle.state = (tapToToggleState?() ?? false) ? .on : .off
-        wordOverlay.title = "Word Overlay: \((wordOverlayPlacement?() ?? .bottom).title)"
+        let current = (wordOverlayPlacement?() ?? .bottom).rawValue
+        for item in wordOverlay.submenu!.items where item.representedObject != nil {
+            item.state = item.representedObject as? String == current ? .on : .off
+        }
         muteSystemAudio.state = (muteSystemAudioState?() ?? true) ? .on : .off
         typeInsteadOfPaste.state = (typeInsteadOfPasteState?() ?? false) ? .on : .off
         keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
@@ -234,11 +246,14 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func toggleLogin() { _ = onToggleLaunchAtLogin?() }
     @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
     @objc private func cycleWordOverlayItem() { cycleWordOverlay() }
-    /// Advance the overlay placement from the menu item or the global ⌘⌃/ chord,
-    /// keeping the item's title in step either way.
+    /// Advance the overlay placement, from the submenu's "Next Placement" or the
+    /// global ⌘⌃/ chord. The checkmarks are re-read when the menu next opens.
     func cycleWordOverlay() {
-        guard let placement = onCycleWordOverlay?() else { return }
-        wordOverlay.title = "Word Overlay: \(placement.title)"
+        onSetWordOverlay?((wordOverlayPlacement?() ?? .bottom).next)
+    }
+    @objc private func chooseWordOverlay(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let placement = OverlayPlacement(rawValue: raw) else { return }
+        onSetWordOverlay?(placement)
     }
     @objc private func toggleMuteSystemAudio() { muteSystemAudio.state = (onToggleMuteSystemAudio?() ?? true) ? .on : .off }
     @objc private func toggleTypeInsteadOfPaste() { typeInsteadOfPaste.state = (onToggleTypeInsteadOfPaste?() ?? false) ? .on : .off }

@@ -19,7 +19,8 @@ There is no bearer token: this is a same-user, loopback service. Clients read
 the discovery file (and re-read it after a connection failure). The file is
 removed when the app quits, so a present file whose `pid` is alive means a
 reachable instance. `version` is the API generation: 2 added `/v1/status` and
-`/v1/restart`.
+`/v1/restart`; 5 added `/v1/transcriptions` (status reports
+`"remote_transcription": true` for feature detection).
 
 | Method | Path | Meaning |
 | --- | --- | --- |
@@ -29,6 +30,23 @@ reachable instance. `version` is the API generation: 2 added `/v1/status` and
 | `GET` | `/v1/voices` | Return the currently available external Kokoro voices. |
 | `GET` | `/v1/status` | `{version, build, commit, pid, status, dictating, restart}` — which build is running and what it is doing. `status` is the menu-bar state (`idle`, `listening`, `transcribing`, `speaking`, …); `restart` is `none`, `pending`, or `restarting`. |
 | `POST` | `/v1/restart` | Ask the app to relaunch itself. `200 {"restart":"restarting"}` when idle; `202 {"restart":"pending","reason":"dictating"}` when a dictation is in flight — it fires once that dictation has been pasted. Idempotent. |
+| `POST` | `/v1/transcriptions` | Open a remote dictation. Optional body `{"sample_rate": N}` (default 16000; any rate 8000–192000 is resampled to 16 kHz). Opens the Flow stream immediately, as key-down does. `201 {"id"}`; `400` bad body; `422` unsupported rate. |
+| `POST` | `/v1/transcriptions/{id}/audio` | Raw s16le mono PCM at the session's rate (`application/octet-stream`, chunks may split samples). Encoded to opus and streamed up as it arrives. `204`; `404` unknown id; `409` already finished. |
+| `POST` | `/v1/transcriptions/{id}/finish` | Commit and wait for the formatted transcript: `200 {"text"}` (`""` for no audio). `502`/`503` `{"error":"transcription_failed","detail"}` on upstream failure (503 = signed out); `404`/`409` as above. |
+| `DELETE` | `/v1/transcriptions/{id}` | Discard a session in any state. `204`; `404` unknown id. |
+
+Remote transcription (`RemoteTranscriptionManager`) exists for the Spaceterm
+phone client, relayed by the Spaceterm server: browsers cannot speak Wispr's
+gRPC, and Supabase's rotating refresh tokens mean only one process may own the
+Wispr session. Each session takes the same path as a local dictation — a
+`FlowSession` on the shared `FlowChannel` with the user's dictionary, falling
+back to raw `/llm/asr` on the whole clip when there is no Baseten key or the
+stream fails — but touches none of the local dictation machinery (no paste,
+cues, overlay or muting), so it can run alongside one. Each logs one
+`trace remote#N` line. Sessions idle over 120 s are cancelled, finished ones are
+forgotten after the same interval, and open or finishing sessions defer a
+cooperative restart (`/v1/status` `remote_transcriptions`; restart reason
+`remote_transcription`).
 
 ### Cooperative restart
 

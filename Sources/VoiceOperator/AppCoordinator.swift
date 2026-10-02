@@ -10,7 +10,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     /// Watches the default output device, for the "only when using AirPods" rule.
     private let outputWatcher = OutputDeviceWatcher()
     private lazy var restart = RestartCoordinator(
-        isBusy: { [unowned self] in self.arbiter.isDictating || self.arbiter.isSpeaking })
+        isBusy: { [unowned self] in
+            self.arbiter.isDictating || self.arbiter.isSpeaking
+                || RemoteTranscriptionManager.shared.activity.active > 0
+        })
     private var currentStatus: OperatorStatus = .idle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -31,7 +34,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         speechService.snapshot = { [unowned self] in
             .init(status: currentStatus, dictating: arbiter.isDictating,
                   speaking: arbiter.isSpeaking, restart: restart.state,
-                  stream: arbiter.streamHealth)
+                  stream: arbiter.streamHealth,
+                  remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active)
+        }
+        // The last remote transcription finishing is a third way to become idle.
+        RemoteTranscriptionManager.shared.activity.onIdle = { [weak self] in
+            Task { @MainActor in self?.restart.attempt() }
         }
         speechService.requestRestart = { [unowned self] in restart.request(source: .http) }
         arbiter.onCommand = { [weak self] text, context in self?.routeCommand(text, context: context) }

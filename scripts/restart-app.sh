@@ -183,6 +183,7 @@ case "$HTTP_CODE" in
         # rather than telling the user they are dictating when they are listening.
         case "$(printf '%s' "$HTTP_BODY" | json_field reason -)" in
             speaking) echo "waiting: the user is listening to speech — the restart will follow it (up to ${TIMEOUT}s)…" ;;
+            remote_transcription) echo "waiting: a remote (phone) dictation is in flight — the restart will follow it (up to ${TIMEOUT}s)…" ;;
             *)        echo "waiting: the user is dictating — the restart will follow the paste (up to ${TIMEOUT}s)…" ;;
         esac
         start=$SECONDS

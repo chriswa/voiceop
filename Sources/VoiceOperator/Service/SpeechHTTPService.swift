@@ -9,8 +9,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// Bumped when the API grows, so a client reading the discovery file can tell
     /// what it is talking to. 2 added `/v1/status` and `/v1/restart`; 3 added the
     /// `stream` / `stream_reason` fields to `/v1/status`; 4 added `speaking`,
-    /// which now defers a restart just as `dictating` does.
-    static let discoveryVersion = 4
+    /// which now defers a restart just as `dictating` does; 5 added remote
+    /// transcription (`/v1/transcriptions`, `remote_transcription` in status).
+    static let discoveryVersion = 5
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -25,6 +26,9 @@ final class SpeechHTTPService: @unchecked Sendable {
         /// after every restart so a slow-path Mac is caught at build time, not
         /// after a week of mysteriously slow dictation (see `StreamHealth`).
         var stream: StreamHealth
+        /// Remote transcriptions in flight. Like `dictating`, these hold off a
+        /// restart — a phone mid-sentence would otherwise lose what it said.
+        var remoteTranscriptions: Int
 
         var object: [String: Any] {
             var o: [String: Any] =
@@ -32,7 +36,8 @@ final class SpeechHTTPService: @unchecked Sendable {
                  "pid": Int(ProcessInfo.processInfo.processIdentifier),
                  "status": status.rawValue, "dictating": dictating, "speaking": speaking,
                  "restart": restart.wireName,
-                 "stream": stream.wireName]
+                 "stream": stream.wireName,
+                 "remote_transcription": true, "remote_transcriptions": remoteTranscriptions]
             if let reason = stream.reason { o["stream_reason"] = reason }
             return o
         }
@@ -81,7 +86,8 @@ final class SpeechHTTPService: @unchecked Sendable {
     }
 
     private struct Request { let method: String; let path: String; let query: [String: String]; let body: Data }
-    private struct Response { let status: Int; let object: [String: Any] }
+    /// `object` nil means no body (204).
+    private struct Response { let status: Int; let object: [String: Any]? }
     private static func parse(_ data: Data) -> Request? {
         guard let headEnd = data.range(of: Data("\r\n\r\n".utf8)),
               let head = String(data: data[..<headEnd.lowerBound], encoding: .utf8) else { return nil }
@@ -111,12 +117,17 @@ final class SpeechHTTPService: @unchecked Sendable {
             case .pending:
                 // Name which of the two it is, so the script can say so rather
                 // than telling the user they are dictating when they are listening.
-                let dictating = await snapshot?().dictating ?? true
-                return .init(status: 202,
-                             object: ["restart": "pending", "reason": dictating ? "dictating" : "speaking"])
+                let state = await snapshot?()
+                let reason = state.map { s in
+                    s.dictating ? "dictating" : !s.speaking && s.remoteTranscriptions > 0 ? "remote_transcription" : "speaking"
+                } ?? "dictating"
+                return .init(status: 202, object: ["restart": "pending", "reason": reason])
             case .restarting: return .init(status: 200, object: ["restart": "restarting"])
             case .none: return .init(status: 500, object: ["error": "restart_not_recorded"])
             }
+        }
+        if let route = TranscriptionRoute(method: r.method, path: r.path) {
+            return await handle(route, body: r.body)
         }
         if r.method == "GET", r.path == "/v1/voices" {
             do { return .init(status: 200, object: ["provider": "kokoro", "default_voice": "af_heart", "voices": try await KokoroSynthesizer.availableVoiceIDs().map { ["id": $0] }]) }
@@ -148,6 +159,39 @@ final class SpeechHTTPService: @unchecked Sendable {
         }
         return .init(status: 405, object: ["error": "method_not_allowed"])
     }
+    /// Remote dictation — see `RemoteTranscriptionManager`.
+    private func handle(_ route: TranscriptionRoute, body: Data) async -> Response {
+        let manager = RemoteTranscriptionManager.shared
+        do {
+            switch route {
+            case .create:
+                guard let rate = TranscriptionRoute.sampleRate(fromCreateBody: body) else {
+                    return .init(status: 400, object: ["error": "invalid_body"])
+                }
+                return .init(status: 201, object: ["id": try await manager.create(sampleRate: rate)])
+            case .audio(let id):
+                try await manager.append(id: id, pcm: body)
+                return .init(status: 204, object: nil)
+            case .finish(let id):
+                return .init(status: 200, object: ["text": try await manager.finish(id: id)])
+            case .cancel(let id):
+                try await manager.cancel(id: id)
+                return .init(status: 204, object: nil)
+            case .methodNotAllowed:
+                return .init(status: 405, object: ["error": "method_not_allowed"])
+            }
+        } catch let failure as RemoteTranscriptionManager.Failure {
+            switch failure {
+            case .unknownSession: return .init(status: 404, object: ["error": "unknown_transcription"])
+            case .alreadyFinished: return .init(status: 409, object: ["error": "transcription_finished"])
+            case .unsupportedSampleRate: return .init(status: 422, object: ["error": "unsupported_sample_rate"])
+            case .upstream(let message, let unavailable):
+                return .init(status: unavailable ? 503 : 502, object: ["error": "transcription_failed", "detail": message])
+            }
+        } catch {
+            return .init(status: 500, object: ["error": "internal_error", "detail": "\(error)"])
+        }
+    }
     private func object(_ r: SpeechJobManager.Result) -> [String: Any] {
         ["id": r.id, "state": r.state.rawValue, "playback_state": r.playbackState?.rawValue as Any,
          "character_offset": r.characterOffset, "error": r.error as Any, "version": r.version]
@@ -156,12 +200,52 @@ final class SpeechHTTPService: @unchecked Sendable {
         switch r.state { case .completed: return 200; case .interruptedByUser: return 409; case .cancelledByClient: return 410; case .synthesisFailed: return 500; default: return 202 }
     }
     private func respond(_ r: Response, on c: NWConnection) {
-        var body = (try? JSONSerialization.data(withJSONObject: r.object)) ?? Data("{}".utf8)
+        let body = r.object.map { (try? JSONSerialization.data(withJSONObject: $0)) ?? Data("{}".utf8) } ?? Data()
         let reason = HTTPURLResponse.localizedString(forStatusCode: r.status)
-        var head = "HTTP/1.1 \(r.status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n"
+        var head = "HTTP/1.1 \(r.status) \(reason)\r\n"
+        if r.object != nil { head += "Content-Type: application/json\r\n" }
+        head += "Content-Length: \(body.count)\r\nConnection: close\r\n"
         if r.status == 202 { head += "Retry-After: 1\r\n" }
         head += "\r\n"
         var out = Data(head.utf8); out.append(body)
         c.send(content: out, completion: .contentProcessed { _ in c.cancel() })
+    }
+}
+
+/// The `/v1/transcriptions` routes, split out of the handler so routing and body
+/// parsing are testable without a socket.
+enum TranscriptionRoute: Equatable {
+    case create
+    case audio(String)
+    case finish(String)
+    case cancel(String)
+    /// A transcription path with the wrong method.
+    case methodNotAllowed
+
+    /// nil for any path outside `/v1/transcriptions`.
+    init?(method: String, path: String) {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false).dropFirst().map(String.init)
+        guard parts.count >= 2, parts[0] == "v1", parts[1] == "transcriptions" else { return nil }
+        switch (method, parts.count) {
+        case ("POST", 2): self = .create
+        case (_, 2): self = .methodNotAllowed
+        case ("DELETE", 3) where !parts[2].isEmpty: self = .cancel(parts[2])
+        case (_, 3) where !parts[2].isEmpty: self = .methodNotAllowed
+        case ("POST", 4) where !parts[2].isEmpty && parts[3] == "audio": self = .audio(parts[2])
+        case ("POST", 4) where !parts[2].isEmpty && parts[3] == "finish": self = .finish(parts[2])
+        case (_, 4) where !parts[2].isEmpty && (parts[3] == "audio" || parts[3] == "finish"): self = .methodNotAllowed
+        default: return nil
+        }
+    }
+
+    /// The create body is optional JSON `{"sample_rate": N}`; empty means 16 kHz.
+    /// nil for a body that is present but not that shape.
+    static func sampleRate(fromCreateBody body: Data) -> Int? {
+        if body.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x0D || $0 == 0x09 }) { return PCM16Resampler.outputRate }
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
+        guard let value = object["sample_rate"] else { return PCM16Resampler.outputRate }
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let rate = Int(exactly: number.doubleValue) else { return nil }
+        return rate
     }
 }

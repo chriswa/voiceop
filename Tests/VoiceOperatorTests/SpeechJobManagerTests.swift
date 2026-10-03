@@ -319,15 +319,21 @@ extension SpeechJobManagerTests {
     private func interrupted(
         text: String, stoppingAt stoppedAt: SpokenPosition?, afterSentences played: Int
     ) async -> (offset: Int, boundary: Int) {
+        await interrupted(parts: [.init(text: text, voice: "af_heart")], stoppingAt: stoppedAt, afterSentences: played)
+    }
+
+    private func interrupted(
+        parts: [SpeechJobManager.Part], stoppingAt stoppedAt: SpokenPosition?, afterSentences played: Int
+    ) async -> (offset: Int, boundary: Int) {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
             halt: { stoppedAt })
-        let job = await manager.enqueue(text: text, voice: "af_heart")!
-        for _ in 0..<played {
-            await gate.waitForStarts(1)
+        let job = await manager.enqueue(parts: parts)!
+        for n in 0..<played {
+            await gate.waitForStarts(n + 1)
             await gate.startNext()
             await gate.finishNext()
         }
@@ -381,6 +387,158 @@ extension SpeechJobManagerTests {
             stoppingAt: SpokenPosition(sentence: 9, characterOffset: 3),
             afterSentences: 1)
         XCTAssertEqual(result.offset, result.boundary)
+    }
+}
+
+/// A multi-voice reply is one job: a narrator and the agents it quotes, each in
+/// their own voice. Every voice change has to be invisible to the queue's
+/// mechanics — lookahead, offsets, interruption — or it would be cheaper to send
+/// separate jobs, which is exactly what this exists to avoid.
+extension SpeechJobManagerTests {
+    /// Narration, then Kevin. The emoji keeps the UTF-16 arithmetic honest: it
+    /// is two code units, one scalar, one Character.
+    private static let reply: [SpeechJobManager.Part] = [
+        .init(text: "Kevin says 👋.", voice: "af_heart"),
+        .init(text: "Kevin here. I finished the pressure solver.", voice: "am_michael"),
+    ]
+    private static var joined: NSString { SpeechJobManager.Part.joined(reply) as NSString }
+
+    func testEachSentenceIsSpokenAndPrefetchedInItsOwnVoice() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let requests = PlaybackRequests()
+        let prefetched = Prefetches()
+        await manager.configure(
+            play: { request, onStart, onSynthesized in
+                await requests.append(request)
+                return await gate.play(onStart: onStart, onSynthesized: onSynthesized)
+            },
+            prefetch: { text, voice in await prefetched.append(text, voice) },
+            halt: { nil })
+        let job = await manager.enqueue(parts: Self.reply)!
+        await gate.waitForStarts(1)
+
+        // The lookahead crosses the change of speaker while the narrator's
+        // sentence is still being synthesized: no gap at the switch.
+        await prefetched.waitFor(1)
+        await gate.synthesizeNext()
+        await prefetched.waitFor(2)
+        let ahead = await prefetched.values
+        XCTAssertEqual(ahead.map(\.voice), ["am_michael", "am_michael"])
+        XCTAssertEqual(ahead.map { $0.text.trimmingCharacters(in: .whitespaces) },
+                       ["Kevin here.", "I finished the pressure solver."])
+
+        for n in 1...3 {
+            await gate.waitForStarts(n)
+            await gate.startNext()
+            await gate.finishNext()
+        }
+        try? await Task.sleep(for: .milliseconds(20))
+        let played = await requests.values
+        XCTAssertEqual(played.map(\.voice), ["af_heart", "am_michael", "am_michael"])
+        XCTAssertEqual(played.map(\.isLast), [false, false, true])
+        XCTAssertEqual(played.map(\.jobID), [job.id, job.id, job.id])
+        let done = await manager.result(id: job.id)!
+        XCTAssertEqual(done.state, .completed)
+        XCTAssertEqual(done.characterOffset, Self.joined.length)
+    }
+
+    /// No sentence spans two voices, even where the parts' punctuation would
+    /// let the detector run them together.
+    func testSentencesNeverCrossAVoiceBoundary() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let requests = PlaybackRequests()
+        await manager.configure(
+            play: { request, onStart, _ in
+                await requests.append(request)
+                return await gate.play(onStart: onStart)
+            }, prefetch: { _, _ in }, halt: { nil })
+        _ = await manager.enqueue(parts: [.init(text: "Kevin says", voice: "af_heart"),
+                                          .init(text: "done", voice: "am_michael")])!
+        for n in 1...2 {
+            await gate.waitForStarts(n)
+            await gate.finishNext()
+        }
+        let played = await requests.values
+        XCTAssertEqual(played.map(\.text), ["Kevin says", "done"])
+        XCTAssertEqual(played.map(\.voice), ["af_heart", "am_michael"])
+    }
+
+    func testSentenceResolutionOffsetsAreIntoTheJoinedText() async {
+        // Interrupted with no word position once the narrator has finished:
+        // everything up to the end of part one, not counting the separator.
+        let result = await interrupted(parts: Self.reply, stoppingAt: nil, afterSentences: 1)
+        XCTAssertEqual(result.offset, ("Kevin says 👋." as NSString).length)
+        XCTAssertEqual(result.offset, Self.joined.range(of: " Kevin here.").location)
+    }
+
+    /// The first sentence of a later part starts after the separator, so its
+    /// word offset cannot be added to the previous sentence's end.
+    func testAMidSentenceInterruptionInALaterPartLandsOnTheRightWord() async {
+        let first = await interrupted(
+            parts: Self.reply, stoppingAt: SpokenPosition(sentence: 1, characterOffset: 5), afterSentences: 1)
+        XCTAssertEqual(Self.joined.substring(to: first.offset), "Kevin says 👋. Kevin")
+
+        let second = await interrupted(
+            parts: Self.reply, stoppingAt: SpokenPosition(sentence: 2, characterOffset: 10), afterSentences: 2)
+        XCTAssertEqual(Self.joined.substring(to: second.offset), "Kevin says 👋. Kevin here. I finished")
+    }
+}
+
+/// `POST /v1/speech` body validation.
+extension SpeechJobManagerTests {
+    private func parse(_ json: String) -> Swift.Result<[SpeechJobManager.Part], SpeechRequestBody.Rejection> {
+        SpeechRequestBody.parts(from: Data(json.utf8))
+    }
+
+    func testTheSingleVoiceShapeIsUnchanged() {
+        XCTAssertEqual(try parse(#"{"text":"Hello.","voice":"am_adam"}"#).get(), [.init(text: "Hello.", voice: "am_adam")])
+        XCTAssertEqual(try parse(#"{"text":"Hello."}"#).get(), [.init(text: "Hello.", voice: "af_heart")])
+        XCTAssertEqual(parse(#"{"text":"  "}"#), .failure(.init(status: 400, error: "text_required")))
+        XCTAssertEqual(parse(#"{}"#), .failure(.init(status: 400, error: "text_required")))
+        XCTAssertEqual(parse("not json"), .failure(.init(status: 400, error: "text_required")))
+    }
+
+    func testPartsShapeWithADefaultVoice() {
+        let parts = try? parse(#"{"parts":[{"text":"Kevin says.","voice":"af_bella"},{"text":"Done."}]}"#).get()
+        XCTAssertEqual(parts, [.init(text: "Kevin says.", voice: "af_bella"), .init(text: "Done.", voice: "af_heart")])
+    }
+
+    func testRejectsMalformedParts() {
+        XCTAssertEqual(parse(#"{"text":"Hi.","parts":[{"text":"Hi."}]}"#),
+                       .failure(.init(status: 400, error: "text_and_parts_exclusive")))
+        XCTAssertEqual(parse(#"{"parts":[]}"#), .failure(.init(status: 400, error: "parts_empty")))
+        XCTAssertEqual(parse(#"{"parts":"Hi."}"#), .failure(.init(status: 400, error: "parts_invalid")))
+        XCTAssertEqual(parse(#"{"parts":[{"text":"Hi."},{"text":" "}]}"#),
+                       .failure(.init(status: 400, error: "part_text_required", index: 1)))
+        XCTAssertEqual(parse(#"{"parts":[{"voice":"am_adam"}]}"#),
+                       .failure(.init(status: 400, error: "part_text_required", index: 0)))
+    }
+
+    /// The limit is on what would be spoken, so it counts the joined text —
+    /// separators included — not any one part.
+    func testLengthLimitAppliesToTheJoinedText() {
+        let half = String(repeating: "a", count: SpeechRequestBody.maxScalars / 2)
+        let fits = #"{"parts":[{"text":"\#(half)"},{"text":"\#(half.dropLast())"}]}"#
+        XCTAssertNoThrow(try parse(fits).get())
+        let over = #"{"parts":[{"text":"\#(half)"},{"text":"\#(half)"}]}"#
+        XCTAssertEqual(parse(over), .failure(.init(status: 422, error: "text_too_long")))
+    }
+}
+
+private actor Prefetches {
+    private(set) var values: [(text: String, voice: String)] = []
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    func append(_ text: String, _ voice: String) {
+        values.append((text, voice))
+        let ready = waiters.filter { $0.0 <= values.count }
+        waiters.removeAll { $0.0 <= values.count }
+        ready.forEach { $0.1.resume() }
+    }
+    func waitFor(_ count: Int) async {
+        guard values.count < count else { return }
+        await withCheckedContinuation { waiters.append((count, $0)) }
     }
 }
 

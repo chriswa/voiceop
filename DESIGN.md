@@ -20,11 +20,12 @@ the discovery file (and re-read it after a connection failure). The file is
 removed when the app quits, so a present file whose `pid` is alive means a
 reachable instance. `version` is the API generation: 2 added `/v1/status` and
 `/v1/restart`; 5 added `/v1/transcriptions` (status reports
-`"remote_transcription": true` for feature detection).
+`"remote_transcription": true` for feature detection); 7 added `parts` on
+`POST /v1/speech`.
 
 | Method | Path | Meaning |
 | --- | --- | --- |
-| `POST` | `/v1/speech` | Queue `{text, voice?}` and return `202` + job id. |
+| `POST` | `/v1/speech` | Queue `{text, voice?}` — or `{parts: [{text, voice?}, …]}` for one job in several voices — and return `202` + job id. `400` for a body with both or neither of `text`/`parts`, an empty `parts` (`parts_empty`), or a part with blank text (`part_text_required` + `index`); `422 text_too_long` past 50 000 scalars of the joined text; `503 speech_muted`. |
 | `GET` | `/v1/speech/{id}?wait=0..30[&since=N]` | Inspect or long-poll a job. Pending is `202`; complete is `200`; a dictation barge-in is `409`; cancellation/mute flush is `410`; synthesis failure is `500`. |
 | `DELETE` | `/v1/speech/{id}` | Halt immediately if audible, otherwise retract it. |
 | `GET` | `/v1/voices` | Return the currently available external Kokoro voices. |
@@ -91,7 +92,19 @@ unaffected.
 
 Speech is FIFO. Input is split using Foundation sentence boundaries. The
 `character_offset` in every terminal response is a zero-based, end-exclusive
-UTF-16 offset into the original input. While a job runs it advances a whole
+UTF-16 offset into the original input.
+
+A job can mix voices: `{"parts": [{"text": "Kevin here.", "voice": "am_michael"},
+…]}` (a part without `voice` uses `af_heart`). Its text is the parts' texts
+joined with a single space, and `character_offset` is an offset into that joined
+text, so a client that only reads the offset needs nothing new. Sentences are
+split per part, so none spans two voices, and each sentence carries its own
+voice to playback and to the lookahead. It is one job rather than one per voice
+on purpose: separate jobs leave ~0.5 s of silence at each switch (lookahead
+does not cross jobs), a dictation barge-in stops only the current job so the
+rest would play after the listener finished talking, and each job would report
+its own offset. Interruption, `DELETE`, `?since=` and muting treat it exactly
+like a single-voice job. While a job runs it advances a whole
 sentence at a time, since that is the granularity at which the queue knows
 anything. A job a listener *interrupted* reports where the voice actually
 stopped, to the word: the reading overlay's timings (`SpokenNarration`) locate

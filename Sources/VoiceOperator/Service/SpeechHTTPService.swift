@@ -11,8 +11,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// `stream` / `stream_reason` fields to `/v1/status`; 4 added `speaking`,
     /// which now defers a restart just as `dictating` does; 5 added remote
     /// transcription (`/v1/transcriptions`, `remote_transcription` in status);
-    /// 6 added remote synthesis (`/v1/synthesize`).
-    static let discoveryVersion = 6
+    /// 6 added remote synthesis (`/v1/synthesize`); 7 added multi-voice
+    /// `parts` on `POST /v1/speech`.
+    static let discoveryVersion = 7
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -157,11 +158,12 @@ final class SpeechHTTPService: @unchecked Sendable {
             }
         }
         if r.method == "POST", r.path == "/v1/speech" {
-            guard let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any],
-                  let text = o["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(status: 400, object: ["error": "text_required"]) }
-            guard text.unicodeScalars.count <= 50_000 else { return .init(status: 422, object: ["error": "text_too_long"]) }
-            let voice = o["voice"] as? String ?? "af_heart"
-            guard let result = await SpeechJobManager.shared.enqueue(text: text, voice: voice) else { return .init(status: 503, object: ["error": "speech_unavailable"]) }
+            let parts: [SpeechJobManager.Part]
+            switch SpeechRequestBody.parts(from: r.body) {
+            case .success(let parsed): parts = parsed
+            case .failure(let rejection): return .init(status: rejection.status, object: rejection.object)
+            }
+            guard let result = await SpeechJobManager.shared.enqueue(parts: parts) else { return .init(status: 503, object: ["error": "speech_unavailable"]) }
             if result.error == "speech_muted" { return .init(status: 503, object: ["error": "speech_muted"]) }
             return .init(status: 202, object: object(result))
         }
@@ -272,4 +274,61 @@ enum TranscriptionRoute: Equatable {
               let rate = Int(exactly: number.doubleValue) else { return nil }
         return rate
     }
+}
+
+/// The `POST /v1/speech` body, split out of the handler so validation is
+/// testable without a socket. Two shapes, exactly one of which a body uses:
+///
+///     {"text": "...", "voice": "af_heart"}                    // one voice
+///     {"parts": [{"text": "...", "voice": "am_adam"}, ...]}  // several, one job
+///
+/// A missing voice falls back to `defaultVoice` in either shape.
+enum SpeechRequestBody {
+    static let defaultVoice = "af_heart"
+    /// Applies to the job's whole text — for `parts`, the joined text.
+    static let maxScalars = 50_000
+
+    struct Rejection: Error, Equatable {
+        let status: Int
+        let error: String
+        /// The offending part, for errors about one part.
+        var index: Int? = nil
+        var object: [String: Any] {
+            var o: [String: Any] = ["error": error]
+            if let index { o["index"] = index }
+            return o
+        }
+    }
+
+    static func parts(from body: Data) -> Swift.Result<[SpeechJobManager.Part], Rejection> {
+        guard let o = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return .failure(Rejection(status: 400, error: "text_required"))
+        }
+        let parts: [SpeechJobManager.Part]
+        switch (o["text"], o["parts"]) {
+        case (.some, .some):
+            return .failure(Rejection(status: 400, error: "text_and_parts_exclusive"))
+        case (_, .some(let raw)):
+            guard let list = raw as? [Any] else { return .failure(Rejection(status: 400, error: "parts_invalid")) }
+            guard !list.isEmpty else { return .failure(Rejection(status: 400, error: "parts_empty")) }
+            var parsed: [SpeechJobManager.Part] = []
+            for (index, item) in list.enumerated() {
+                guard let part = item as? [String: Any],
+                      let text = part["text"] as? String, !isBlank(text) else {
+                    return .failure(Rejection(status: 400, error: "part_text_required", index: index))
+                }
+                parsed.append(.init(text: text, voice: part["voice"] as? String ?? defaultVoice))
+            }
+            parts = parsed
+        case (let raw, nil):
+            guard let text = raw as? String, !isBlank(text) else { return .failure(Rejection(status: 400, error: "text_required")) }
+            parts = [.init(text: text, voice: o["voice"] as? String ?? defaultVoice)]
+        }
+        guard SpeechJobManager.Part.joined(parts).unicodeScalars.count <= maxScalars else {
+            return .failure(Rejection(status: 422, error: "text_too_long"))
+        }
+        return .success(parts)
+    }
+
+    private static func isBlank(_ text: String) -> Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }

@@ -38,19 +38,35 @@ actor SpeechJobManager {
         /// Neither: synthesis or playback broke.
         case failed
     }
-    /// One sentence of a job. `end` is its UTF-16 end offset in the job's text —
-    /// UTF-16 because that is what every consumer of `character_offset` indexes
-    /// strings by, and because a scalar count disagrees with all of them as soon
-    /// as a job contains an emoji or anything else outside the BMP.
-    private struct Segment: Sendable { let text: String; let end: Int }
+    /// One voice's stretch of a job. A job is one or more of these, spoken in
+    /// order as a single utterance: the job's text is their texts joined with
+    /// a single space, and every offset the job reports is into that joined
+    /// text. One job rather than one per voice so that synthesis lookahead,
+    /// barge-in and `character_offset` all span the voice changes.
+    struct Part: Sendable, Equatable {
+        let text: String
+        let voice: String
+        /// What sits between two parts in the job's text.
+        static let separator = " "
+        static func joined(_ parts: [Part]) -> String { parts.map(\.text).joined(separator: separator) }
+    }
+    /// One sentence of a job, and the voice that speaks it. `start` and `end`
+    /// are its UTF-16 offsets in the job's (joined) text — UTF-16 because that
+    /// is what every consumer of `character_offset` indexes strings by, and
+    /// because a scalar count disagrees with all of them as soon as a job
+    /// contains an emoji or anything else outside the BMP. `start` is not
+    /// always the previous sentence's `end`: the separator between two parts
+    /// belongs to neither of them.
+    private struct Segment: Sendable { let text: String; let voice: String; let start: Int; let end: Int }
     struct SentencePlayback: Sendable {
         let jobID: String
         let text: String
+        /// This sentence's voice, which can differ from its neighbours'.
         let voice: String
         let isLast: Bool
     }
     private struct Job: Sendable {
-        let id: String; let voice: String; let segments: [Segment]
+        let id: String; let segments: [Segment]
         var next = 0
         var state: State = .inProgress
         var playbackState: PlaybackState? = .queued
@@ -147,12 +163,18 @@ actor SpeechJobManager {
     }
 
     func enqueue(text: String, voice: String, local: Bool = false) -> Result? {
+        enqueue(parts: [Part(text: text, voice: voice)], local: local)
+    }
+
+    func enqueue(parts: [Part], local: Bool = false) -> Result? {
         guard !muted else { return Result(id: "", state: .cancelledByClient, playbackState: nil, characterOffset: 0, error: "speech_muted", version: 0) }
-        let segments = Self.segments(text)
+        let segments = Self.segments(parts)
         guard !segments.isEmpty else { return Result(id: "", state: .synthesisFailed, playbackState: nil, characterOffset: 0, error: "empty_text", version: 0) }
         let id = "sp_" + UUID().uuidString.lowercased()
-        jobs[id] = Job(id: id, voice: voice, segments: segments, local: local)
-        Log.log("speech job \(id): accepted \(text.count) chars as \(segments.count) sentence(s), voice=\(voice)")
+        jobs[id] = Job(id: id, segments: segments, local: local)
+        let chars = parts.reduce(0) { $0 + $1.text.count } + Part.separator.count * max(0, parts.count - 1)
+        let voices = parts.map(\.voice).joined(separator: ",")
+        Log.log("speech job \(id): accepted \(chars) chars in \(parts.count) part(s) as \(segments.count) sentence(s), voice=\(voices)")
         order.append(id); pump()
         return jobs[id].map(result)
     }
@@ -284,12 +306,12 @@ actor SpeechJobManager {
             // Paired with `startedSentence`'s line below: a "handed to playback"
             // with no "audible" after it localises a stall to synthesis, and is
             // the difference between a silent shortcut and a diagnosable one.
-            Log.log("speech job \(id): handing sentence \(job.next + 1)/\(job.segments.count) to playback — \(Log.clip(segment.text))")
+            Log.log("speech job \(id): handing sentence \(job.next + 1)/\(job.segments.count) to playback, voice=\(segment.voice) — \(Log.clip(segment.text))")
             openSynthesisWindow(for: job)
             Task { [weak self] in
                 // Positional callbacks: first audible sample, then audio fully
                 // in hand. See the `play` property for why they are unlabelled.
-                let request = SentencePlayback(jobID: id, text: segment.text, voice: job.voice,
+                let request = SentencePlayback(jobID: id, text: segment.text, voice: segment.voice,
                                                isLast: index == job.segments.count - 1)
                 let outcome = await play(request, { [weak self] in
                     Task { await self?.startedSentence(id: id) }
@@ -349,8 +371,10 @@ actor SpeechJobManager {
             let index = synthesisFrontier
             synthesisFrontier += 1
             synthesizing.insert(index)
+            // The segment's own voice: the window runs straight across a
+            // change of speaker, which is why a multi-voice reply is one job.
             let text = job.segments[index].text
-            let voice = job.voice
+            let voice = job.segments[index].voice
             Task { [weak self] in
                 await prefetch(text, voice)
                 await self?.synthesisSettled(job: id, index: index)
@@ -446,11 +470,15 @@ actor SpeechJobManager {
     /// The interrupted position's own sentence index sets the base, not
     /// `job.next`. Those two agree while playback runs forwards and part ways
     /// the moment someone rewinds into an earlier sentence and stops it there.
+    ///
+    /// The base is that sentence's own `start`, not its predecessor's `end`:
+    /// the first sentence of a later part begins after the separator, and the
+    /// word offset is measured from the sentence text the synthesizer was given.
     private static func characterOffset(_ job: Job) -> Int {
         guard let stopped = job.stoppedAt, job.segments.indices.contains(stopped.sentence) else {
             return job.next == 0 ? 0 : job.segments[job.next - 1].end
         }
-        let base = stopped.sentence == 0 ? 0 : job.segments[stopped.sentence - 1].end
+        let base = job.segments[stopped.sentence].start
         // Clamped to the sentence it belongs to: the offset is measured against
         // the sentence text the synthesizer was given, and nothing downstream
         // should have to defend itself against a position past its end.
@@ -492,8 +520,19 @@ actor SpeechJobManager {
     private func terminal(_ s: State) -> Bool { [.completed, .interruptedByUser, .cancelledByClient, .synthesisFailed].contains(s) }
 
     /// Sentence ranges are based on Foundation's linguistic sentence boundary
-    /// detector. Offsets are UTF-16 positions in the original input.
-    private static func segments(_ text: String) -> [Segment] {
+    /// detector, run over each part on its own so that no sentence spans two
+    /// voices. Offsets are UTF-16 positions in the parts' joined text.
+    private static func segments(_ parts: [Part]) -> [Segment] {
+        var answer: [Segment] = []
+        var partStart = 0
+        for (i, part) in parts.enumerated() {
+            if i > 0 { partStart += (Part.separator as NSString).length }
+            answer += segments(part.text, voice: part.voice, at: partStart)
+            partStart += (part.text as NSString).length
+        }
+        return answer
+    }
+    private static func segments(_ text: String, voice: String, at base: Int) -> [Segment] {
         let ns = text as NSString
         var answer: [Segment] = []
         let tagger = NSLinguisticTagger(tagSchemes: [.tokenType], options: 0)
@@ -501,9 +540,11 @@ actor SpeechJobManager {
         tagger.enumerateTags(in: NSRange(location: 0, length: ns.length), unit: .sentence, scheme: .tokenType, options: []) { _, range, _ in
             let part = ns.substring(with: range)
             guard !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            answer.append(Segment(text: part, end: NSMaxRange(range)))
+            answer.append(Segment(text: part, voice: voice, start: base + range.location, end: base + NSMaxRange(range)))
         }
-        if answer.isEmpty, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { answer.append(Segment(text: text, end: ns.length)) }
+        if answer.isEmpty, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            answer.append(Segment(text: text, voice: voice, start: base, end: base + ns.length))
+        }
         return answer
     }
 }

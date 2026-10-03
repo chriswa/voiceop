@@ -10,8 +10,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// what it is talking to. 2 added `/v1/status` and `/v1/restart`; 3 added the
     /// `stream` / `stream_reason` fields to `/v1/status`; 4 added `speaking`,
     /// which now defers a restart just as `dictating` does; 5 added remote
-    /// transcription (`/v1/transcriptions`, `remote_transcription` in status).
-    static let discoveryVersion = 5
+    /// transcription (`/v1/transcriptions`, `remote_transcription` in status);
+    /// 6 added remote synthesis (`/v1/synthesize`).
+    static let discoveryVersion = 6
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -87,7 +88,10 @@ final class SpeechHTTPService: @unchecked Sendable {
 
     private struct Request { let method: String; let path: String; let query: [String: String]; let body: Data }
     /// `object` nil means no body (204).
-    private struct Response { let status: Int; let object: [String: Any]? }
+    /// `raw`, when set, is the body as-is with its content type — audio — in place of `object`.
+    private struct Response {
+        let status: Int; let object: [String: Any]?; var raw: (data: Data, contentType: String)? = nil
+    }
     private static func parse(_ data: Data) -> Request? {
         guard let headEnd = data.range(of: Data("\r\n\r\n".utf8)),
               let head = String(data: data[..<headEnd.lowerBound], encoding: .utf8) else { return nil }
@@ -132,6 +136,25 @@ final class SpeechHTTPService: @unchecked Sendable {
         if r.method == "GET", r.path == "/v1/voices" {
             do { return .init(status: 200, object: ["provider": "kokoro", "default_voice": "af_heart", "voices": try await KokoroSynthesizer.availableVoiceIDs().map { ["id": $0] }]) }
             catch { return .init(status: 503, object: ["error": "tts_unavailable"]) }
+        }
+        // Remote synthesis: the audio for one piece of text, handed back rather
+        // than played — for a client that plays it elsewhere (the phone, via
+        // spaceterm). No queue, no playback, no ducking: the caller owns all of
+        // that. The mirror of `/v1/transcriptions`, and like it the reason is
+        // that this process holds the synthesizer's address and credentials.
+        if r.method == "POST", r.path == "/v1/synthesize" {
+            guard let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any],
+                  let text = o["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(status: 400, object: ["error": "text_required"]) }
+            guard text.unicodeScalars.count <= 5_000 else { return .init(status: 422, object: ["error": "text_too_long"]) }
+            let voice = o["voice"] as? String ?? "af_heart"
+            do {
+                let wav = try await KokoroSynthesizer().synthesizeWAV(text: text, voiceID: voice)
+                Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice)")
+                return .init(status: 200, object: nil, raw: (wav, "audio/wav"))
+            } catch {
+                Log.log("remote synthesis failed: \(error)")
+                return .init(status: 502, object: ["error": "synthesis_failed", "detail": "\(error)"])
+            }
         }
         if r.method == "POST", r.path == "/v1/speech" {
             guard let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any],
@@ -200,10 +223,11 @@ final class SpeechHTTPService: @unchecked Sendable {
         switch r.state { case .completed: return 200; case .interruptedByUser: return 409; case .cancelledByClient: return 410; case .synthesisFailed: return 500; default: return 202 }
     }
     private func respond(_ r: Response, on c: NWConnection) {
-        let body = r.object.map { (try? JSONSerialization.data(withJSONObject: $0)) ?? Data("{}".utf8) } ?? Data()
+        let body = r.raw?.data ?? r.object.map { (try? JSONSerialization.data(withJSONObject: $0)) ?? Data("{}".utf8) } ?? Data()
         let reason = HTTPURLResponse.localizedString(forStatusCode: r.status)
         var head = "HTTP/1.1 \(r.status) \(reason)\r\n"
-        if r.object != nil { head += "Content-Type: application/json\r\n" }
+        if let raw = r.raw { head += "Content-Type: \(raw.contentType)\r\n" }
+        else if r.object != nil { head += "Content-Type: application/json\r\n" }
         head += "Content-Length: \(body.count)\r\nConnection: close\r\n"
         if r.status == 202 { head += "Retry-After: 1\r\n" }
         head += "\r\n"

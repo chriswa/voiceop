@@ -52,6 +52,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 },
                 prefetch: { [weak self] text, voice in await self?.arbiter.prefetchSentence(text: text, voiceID: voice) },
                 halt: { [weak self] in await MainActor.run { self?.arbiter.haltSpeech() } },
+                spokenPosition: { [weak self] in await MainActor.run { self?.arbiter.spokenPosition() } },
                 onSpeechActivity: { [weak self] active in
                     Task { @MainActor in
                         self?.arbiter.setSpeechActive(active)

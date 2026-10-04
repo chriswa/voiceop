@@ -200,7 +200,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             // `since` is opt-in: without it a long poll keeps its original
             // terminal-only meaning, so existing callers are unaffected.
             let since = r.query["since"].flatMap { Int($0) }
-            guard let result = wait > 0 ? await SpeechJobManager.shared.wait(id: id, seconds: wait, since: since) : await SpeechJobManager.shared.result(id: id) else { return .init(status: 404, object: ["error": "unknown_job"]) }
+            guard let result = wait > 0 ? await SpeechJobManager.shared.wait(id: id, seconds: wait, since: since) : await SpeechJobManager.shared.liveResult(id: id) else { return .init(status: 404, object: ["error": "unknown_job"]) }
             return .init(status: status(result), object: object(result))
         }
         return .init(status: 405, object: ["error": "method_not_allowed"])

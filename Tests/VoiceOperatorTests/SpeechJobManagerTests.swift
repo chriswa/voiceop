@@ -27,6 +27,30 @@ final class SpeechJobManagerTests: XCTestCase {
         await gate.finishNext()
     }
 
+    func testLiveResultReportsTheWordBeingSpokenMidSentence() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        await manager.configure(
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in }, halt: { nil },
+            // Five characters into the second sentence: "Then " heard.
+            spokenPosition: { SpokenPosition(sentence: 1, characterOffset: 5) })
+        let job = await manager.enqueue(text: "First one. Then the second.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
+        // First sentence playing: the live read is clamped below by sentence level, here 0.
+        await gate.finishNext()
+        await gate.waitForStarts(2)
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
+        let plain = await manager.result(id: job.id)
+        let live = await manager.liveResult(id: job.id)
+        XCTAssertEqual(plain?.characterOffset, 11)
+        XCTAssertEqual(live?.characterOffset, 11 + 5)
+        await gate.finishNext()
+    }
+
     func testQueueRejectsMutedRequests() async {
         let manager = SpeechJobManager()
         await manager.setMuted(true)

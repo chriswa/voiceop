@@ -94,4 +94,36 @@ final class SpokenNarrationTests: XCTestCase {
         XCTAssertNil(n.spokenPrefix(at: 0.3))
         XCTAssertTrue(n.isEmpty)
     }
+
+    /// A timed `/v1/synthesize` reports where each word ends in the text as
+    /// sent, so the phone can say which word a listener cut in on.
+    func testRemoteSynthesisReportsEachWordsEndInTheTextAsSent() {
+        let words = SpeechHTTPService.wordObjects(prepared: TTSPreprocess.prepare("Want me to send it to Tessa, or not?"), timings: [
+            .init(word: "Want", start: 0, end: 0.2), .init(word: "me", start: 0.2, end: 0.3),
+            .init(word: "to", start: 0.3, end: 0.4), .init(word: "send", start: 0.4, end: 0.6),
+            .init(word: "it", start: 0.6, end: 0.7), .init(word: "to", start: 0.7, end: 0.8),
+            .init(word: "Tessa", start: 0.8, end: 1.2), .init(word: "or", start: 1.3, end: 1.4),
+            .init(word: "not", start: 1.4, end: 1.6),
+        ])
+        XCTAssertEqual(words?.map { $0["character_end"] as? Int }, [4, 7, 10, 15, 18, 21, 27, 31, 35])
+        XCTAssertEqual(words?[6]["start"] as? Double, 0.8)
+    }
+
+    /// The phone hears the same cleaned-up text as the Mac, and a spoken
+    /// "slash" still ends where the `/` does in the text as sent.
+    func testRemoteSynthesisMapsCleanedUpWordsBackToTheTextAsSent() {
+        let prepared = TTSPreprocess.prepare("Open src/main now.")
+        XCTAssertTrue(prepared.ttsText.contains("slash"))
+        let words = SpeechHTTPService.wordObjects(prepared: prepared, timings: [
+            .init(word: "Open", start: 0, end: 0.2), .init(word: "src", start: 0.2, end: 0.4),
+            .init(word: "slash", start: 0.4, end: 0.6), .init(word: "main", start: 0.6, end: 0.8),
+            .init(word: "now", start: 0.8, end: 1),
+        ])
+        XCTAssertEqual(words?.map { $0["character_end"] as? Int }, [4, 8, 9, 13, 17])
+    }
+
+    /// Tokens that cannot be found in the text give no words, not wrong ones.
+    func testRemoteSynthesisGivesNoWordsWhenTheyCannotBeAligned() {
+        XCTAssertNil(SpeechHTTPService.wordObjects(prepared: TTSPreprocess.prepare("Hello world."), timings: [.init(word: "goodbye", start: 0, end: 1)]))
+    }
 }

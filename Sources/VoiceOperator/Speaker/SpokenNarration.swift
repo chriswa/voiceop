@@ -128,6 +128,18 @@ final class SpokenNarration {
         return (index, context, seconds - sentences[index].start)
     }
 
+    /// Each timed word with its UTF-16 range in the text as written, for a
+    /// client that plays the audio itself and so has to work out for itself
+    /// where a listener's interruption landed (`/v1/synthesize`).
+    ///
+    /// Nil when the tokens cannot be aligned against the text. There is no
+    /// space-join fallback here: ranges into a text the client never saw would
+    /// point at the wrong words, and no ranges is the honest answer.
+    nonisolated static func wordRanges(prepared: TTSPrepared, words: [WordTiming]) -> [(timing: WordTiming, range: NSRange)]? {
+        guard let context = alignedContext(prepared: prepared, words: words) else { return nil }
+        return zip(words, context.spans).map { ($0, $1.range) }
+    }
+
     /// Build the spans for a sentence. Preferred path: align the timing
     /// tokens against the text that was actually synthesized (`prepared.ttsText`)
     /// and map each match back onto the ORIGINAL through `origPositions`, so the
@@ -146,7 +158,7 @@ final class SpokenNarration {
     /// Greedy forward substring scan of the timing tokens through `ttsText`, each
     /// match mapped back to an original range via `origPositions`. Returns nil if
     /// any token isn't a substring at/after the cursor, signalling the fallback.
-    private static func alignedContext(prepared: TTSPrepared, words: [WordTiming]) -> Context? {
+    nonisolated private static func alignedContext(prepared: TTSPrepared, words: [WordTiming]) -> Context? {
         guard !words.isEmpty else { return nil }
         let display = prepared.original as NSString
         let tts = prepared.ttsText as NSString
@@ -174,7 +186,7 @@ final class SpokenNarration {
 
     /// The pivot to pin on the focal point for a highlighted range: the single
     /// character for a separator (`/`, `.`), else the word's ORP pivot.
-    private static func pivotOffset(in display: NSString, range: NSRange) -> Int {
+    nonisolated private static func pivotOffset(in display: NSString, range: NSRange) -> Int {
         if range.length <= 1 { return range.location }
         return range.location + pivotUTF16Offset(in: display.substring(with: range))
     }
@@ -195,7 +207,7 @@ final class SpokenNarration {
     }
 
     /// UTF-16 offset, within `word`, of its ORP pivot letter.
-    private static func pivotUTF16Offset(in word: String) -> Int {
+    nonisolated private static func pivotUTF16Offset(in word: String) -> Int {
         let pivot = ORP.pivotIndex(forLength: word.count)
         let charIndex = word.index(word.startIndex, offsetBy: pivot)
         return word.utf16.distance(from: word.utf16.startIndex,

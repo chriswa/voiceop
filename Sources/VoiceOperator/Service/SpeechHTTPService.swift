@@ -143,15 +143,36 @@ final class SpeechHTTPService: @unchecked Sendable {
         // spaceterm). No queue, no playback, no ducking: the caller owns all of
         // that. The mirror of `/v1/transcriptions`, and like it the reason is
         // that this process holds the synthesizer's address and credentials.
+        //
+        // The text goes through `TTSPreprocess` first, as speech played here
+        // does, so a path or a camelCase name sounds the same on the phone.
+        //
+        // With `"word_timings": true` the answer is JSON instead: the WAV as
+        // base64 `audio`, and `words`, each word's `start`/`end` in seconds and
+        // `character_end`, the UTF-16 offset in `text` just past it. That is
+        // what lets the client say which word a listener cut in on, exactly as
+        // `character_offset` does for speech played here. `words` is absent
+        // when the timings could not be had or aligned; the audio still is.
         if r.method == "POST", r.path == "/v1/synthesize" {
             guard let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any],
                   let text = o["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(status: 400, object: ["error": "text_required"]) }
             guard text.unicodeScalars.count <= 5_000 else { return .init(status: 422, object: ["error": "text_too_long"]) }
             let voice = o["voice"] as? String ?? "af_heart"
+            let synthesizer = KokoroSynthesizer()
+            let prepared = TTSPreprocess.prepare(text)
             do {
-                let wav = try await KokoroSynthesizer().synthesizeWAV(text: text, voiceID: voice)
-                Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice)")
-                return .init(status: 200, object: nil, raw: (wav, "audio/wav"))
+                guard o["word_timings"] as? Bool == true else {
+                    let wav = try await synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice)
+                    Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice)")
+                    return .init(status: 200, object: nil, raw: (wav, "audio/wav"))
+                }
+                async let timings = try? synthesizer.wordTimings(text: prepared.ttsText, voiceID: voice)
+                let wav = try await synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice)
+                let words = await timings.flatMap { Self.wordObjects(prepared: prepared, timings: $0) }
+                Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice), \(words.map { "\($0.count) timed words" } ?? "untimed")")
+                var answer: [String: Any] = ["audio": wav.base64EncodedString()]
+                if let words { answer["words"] = words }
+                return .init(status: 200, object: answer)
             } catch {
                 Log.log("remote synthesis failed: \(error)")
                 return .init(status: 502, object: ["error": "synthesis_failed", "detail": "\(error)"])
@@ -184,6 +205,15 @@ final class SpeechHTTPService: @unchecked Sendable {
         }
         return .init(status: 405, object: ["error": "method_not_allowed"])
     }
+    /// `words` for a timed `/v1/synthesize`: Kokoro times the prepared text, and
+    /// each word is mapped back to where it ends in the text as sent — a spoken
+    /// "slash" ends just past the `/` it stands for.
+    static func wordObjects(prepared: TTSPrepared, timings: [WordTiming]) -> [[String: Any]]? {
+        return SpokenNarration.wordRanges(prepared: prepared, words: timings)?.map {
+            ["start": $0.timing.start, "end": $0.timing.end, "character_end": NSMaxRange($0.range)]
+        }
+    }
+
     /// Remote dictation — see `RemoteTranscriptionManager`.
     private func handle(_ route: TranscriptionRoute, body: Data) async -> Response {
         let manager = RemoteTranscriptionManager.shared

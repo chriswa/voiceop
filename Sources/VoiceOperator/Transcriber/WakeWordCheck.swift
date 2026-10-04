@@ -1,0 +1,115 @@
+import AVFoundation
+import Foundation
+import Speech
+
+/// Is this short clip the wake word, said on its own?
+///
+/// Spaceterm's hands-free mode listens on whichever device is always-listening
+/// (the phone today) for a short burst of speech with silence either side. That
+/// device cuts the burst out and asks here, through spaceterm, whether it was
+/// "Control" — and only then plays its cue and opens a Wispr dictation.
+///
+/// Apple's on-device `SpeechTranscriber` (macOS 26), never Wispr: the clips are
+/// whatever was said in the room, and nothing of that may leave the Mac. The
+/// clip is held in memory for the length of the call and dropped; neither it
+/// nor what it said is logged unless it matched.
+enum WakeWordCheck {
+    struct Result: Sendable {
+        /// What the transcriber heard, for a clip that matched — empty otherwise.
+        let heard: String
+        let match: Bool
+        let elapsedMs: Int
+    }
+
+    enum Failure: Error {
+        /// This macOS has no `SpeechTranscriber`.
+        case unavailable
+        case audio(String)
+    }
+
+    /// Whether `heard` is `word` alone: case, punctuation and surrounding space
+    /// ignored, nothing else said. "Control?" counts; "under control" does not.
+    static func isOnly(_ word: String, in heard: String) -> Bool {
+        let letters = { (s: String) in
+            s.lowercased().unicodeScalars.filter { CharacterSet.letters.contains($0) || $0 == " " }
+                .map(String.init).joined().split(separator: " ").joined(separator: " ")
+        }
+        let target = letters(word)
+        return !target.isEmpty && letters(heard) == target
+    }
+
+    /// Check 16-bit little-endian mono PCM at `sampleRate`.
+    static func check(pcm: Data, sampleRate: Int, word: String) async throws -> Result {
+        guard #available(macOS 26.0, *) else { throw Failure.unavailable }
+        let started = Date()
+        let heard = try await transcribe(pcm: pcm, sampleRate: sampleRate)
+        let match = isOnly(word, in: heard)
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+        // Only a match is worth a log line with words in it.
+        Log.log(match
+            ? "wake word: \"\(heard)\" matched \"\(word)\" in \(elapsed) ms (\(pcm.count / 2) samples)"
+            : "wake word: no match in \(elapsed) ms (\(pcm.count / 2) samples)")
+        return Result(heard: match ? heard : "", match: match, elapsedMs: elapsed)
+    }
+
+    @available(macOS 26.0, *)
+    private static func transcribe(pcm: Data, sampleRate: Int) async throws -> String {
+        let transcriber = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .transcription)
+        try await ensureAssets(for: transcriber)
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw Failure.audio("no audio format for the transcriber")
+        }
+        let input = try convert(pcm: pcm, sampleRate: sampleRate, to: format)
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        let collect = Task { () -> String in
+            var text = ""
+            for try await result in transcriber.results where result.isFinal {
+                text += String(result.text.characters)
+            }
+            return text
+        }
+        try await analyzer.start(inputSequence: stream)
+        continuation.yield(AnalyzerInput(buffer: input))
+        continuation.finish()
+        try await analyzer.finalizeAndFinishThroughEndOfInput()
+        return try await collect.value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The model is downloaded once, by the system; after that this is a no-op.
+    @available(macOS 26.0, *)
+    private static func ensureAssets(for transcriber: SpeechTranscriber) async throws {
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            Log.log("wake word: installing the on-device speech model")
+            try await request.downloadAndInstall()
+        }
+    }
+
+    private static func convert(pcm: Data, sampleRate: Int, to format: AVAudioFormat) throws -> AVAudioPCMBuffer {
+        let frames = pcm.count / 2
+        guard frames > 0, sampleRate > 0,
+              let source = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(sampleRate), channels: 1, interleaved: true),
+              let buffer = AVAudioPCMBuffer(pcmFormat: source, frameCapacity: AVAudioFrameCount(frames)),
+              let samples = buffer.int16ChannelData?[0] else { throw Failure.audio("empty or unreadable clip") }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        pcm.withUnsafeBytes { raw in
+            for i in 0..<frames { samples[i] = raw.loadUnaligned(fromByteOffset: i * 2, as: Int16.self) }
+        }
+        if source == format { return buffer }
+        guard let converter = AVAudioConverter(from: source, to: format),
+              let out = AVAudioPCMBuffer(pcmFormat: format,
+                                         frameCapacity: AVAudioFrameCount(Double(frames) * format.sampleRate / Double(sampleRate)) + 64)
+        else { throw Failure.audio("cannot convert \(sampleRate) Hz for the transcriber") }
+        nonisolated(unsafe) let input = buffer
+        nonisolated(unsafe) var fed = false
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            if fed { status.pointee = .endOfStream; return nil }
+            fed = true
+            status.pointee = .haveData
+            return input
+        }
+        if let error { throw Failure.audio("conversion failed: \(error.localizedDescription)") }
+        return out
+    }
+}

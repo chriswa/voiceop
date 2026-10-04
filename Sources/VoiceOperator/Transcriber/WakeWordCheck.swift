@@ -2,18 +2,25 @@ import AVFoundation
 import Foundation
 import Speech
 
-/// Is this short clip the wake word, said on its own?
+/// Does this short clip start with the wake word — or is it the word alone?
 ///
 /// Spaceterm's hands-free mode listens on whichever device is always-listening
-/// (the phone today) for a short burst of speech with silence either side. That
-/// device cuts the burst out and asks here, through spaceterm, whether it was
-/// "Control" — and only then plays its cue and opens a Wispr dictation.
+/// (the phone today) for speech that begins after a quiet spell. That device
+/// cuts out its first second or so and asks here, through spaceterm, whether
+/// it starts with "Control" — and only then opens a Wispr dictation, fed from
+/// the start of what was said.
 ///
 /// Apple's on-device `SpeechTranscriber` (macOS 26), never Wispr: the clips are
 /// whatever was said in the room, and nothing of that may leave the Mac. The
 /// clip is held in memory for the length of the call and dropped; neither it
 /// nor what it said is logged unless it matched.
 enum WakeWordCheck {
+    /// `start`: the clip's first word is the wake word ("Control, what's…").
+    /// `only`: the wake word and nothing else ("Control.").
+    enum Match: String, Sendable {
+        case start, only
+    }
+
     struct Result: Sendable {
         /// What the transcriber heard, for a clip that matched — empty otherwise.
         let heard: String
@@ -27,23 +34,35 @@ enum WakeWordCheck {
         case audio(String)
     }
 
-    /// Whether `heard` is `word` alone: case, punctuation and surrounding space
-    /// ignored, nothing else said. "Control?" counts; "under control" does not.
+    /// Lowercased words, punctuation dropped: what matching compares.
+    static func words(_ text: String) -> [String] {
+        text.lowercased().unicodeScalars
+            .map { CharacterSet.letters.contains($0) || $0 == "'" ? Character($0) : " " }
+            .reduce(into: "") { $0.append($1) }
+            .split(separator: " ").map(String.init)
+    }
+
+    /// Whether `heard` is `word` alone: case and punctuation ignored, nothing
+    /// else said. "Control?" counts; "under control" does not.
     static func isOnly(_ word: String, in heard: String) -> Bool {
-        let letters = { (s: String) in
-            s.lowercased().unicodeScalars.filter { CharacterSet.letters.contains($0) || $0 == " " }
-                .map(String.init).joined().split(separator: " ").joined(separator: " ")
-        }
-        let target = letters(word)
-        return !target.isEmpty && letters(heard) == target
+        let target = words(word)
+        return !target.isEmpty && words(heard) == target
+    }
+
+    /// Whether `heard` begins with `word`, punctuation ignored. "Control, what's
+    /// Kevin doing" and "Control the lights" count; "under control" and
+    /// "controller" do not.
+    static func startsWith(_ word: String, in heard: String) -> Bool {
+        let target = words(word)
+        return !target.isEmpty && words(heard).starts(with: target)
     }
 
     /// Check 16-bit little-endian mono PCM at `sampleRate`.
-    static func check(pcm: Data, sampleRate: Int, word: String) async throws -> Result {
+    static func check(pcm: Data, sampleRate: Int, word: String, match mode: Match = .only) async throws -> Result {
         guard #available(macOS 26.0, *) else { throw Failure.unavailable }
         let started = Date()
         let heard = try await transcribe(pcm: pcm, sampleRate: sampleRate)
-        let match = isOnly(word, in: heard)
+        let match = mode == .start ? startsWith(word, in: heard) : isOnly(word, in: heard)
         let elapsed = Int(Date().timeIntervalSince(started) * 1000)
         // Only a match is worth a log line with words in it.
         Log.log(match
@@ -59,7 +78,7 @@ enum WakeWordCheck {
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw Failure.audio("no audio format for the transcriber")
         }
-        let input = try convert(pcm: pcm, sampleRate: sampleRate, to: format)
+        let input = try buffer(pcm: pcm, sampleRate: sampleRate, format: format)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         let collect = Task { () -> String in
@@ -85,7 +104,8 @@ enum WakeWordCheck {
         }
     }
 
-    private static func convert(pcm: Data, sampleRate: Int, to format: AVAudioFormat) throws -> AVAudioPCMBuffer {
+    /// s16le mono PCM as a buffer in `format`, converted if it needs to be.
+    static func buffer(pcm: Data, sampleRate: Int, format: AVAudioFormat) throws -> AVAudioPCMBuffer {
         let frames = pcm.count / 2
         guard frames > 0, sampleRate > 0,
               let source = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(sampleRate), channels: 1, interleaved: true),

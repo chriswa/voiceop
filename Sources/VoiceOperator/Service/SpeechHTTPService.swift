@@ -12,8 +12,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// which now defers a restart just as `dictating` does; 5 added remote
     /// transcription (`/v1/transcriptions`, `remote_transcription` in status);
     /// 6 added remote synthesis (`/v1/synthesize`); 7 added multi-voice
-    /// `parts` on `POST /v1/speech`; 8 added `/v1/wake-word`.
-    static let discoveryVersion = 8
+    /// `parts` on `POST /v1/speech`; 8 added `/v1/wake-word`; 9 added its
+    /// `match=start`, and `watch` on `POST /v1/transcriptions`.
+    static let discoveryVersion = 9
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -134,16 +135,20 @@ final class SpeechHTTPService: @unchecked Sendable {
         if let route = TranscriptionRoute(method: r.method, path: r.path) {
             return await handle(route, body: r.body)
         }
-        // Hands-free: is this short clip the wake word, alone? Raw s16le mono
+        // Hands-free: does this short clip start with the wake word (`match=start`)
+        // or is it the word alone (`match=only`, the default)? Raw s16le mono
         // PCM in, `?word=control&sample_rate=16000`. On-device only — see
         // WakeWordCheck for why this never touches Wispr.
         if r.path == "/v1/wake-word" {
             guard r.method == "POST" else { return .init(status: 405, object: ["error": "method_not_allowed"]) }
             let word = r.query["word"] ?? "control"
             let rate = Int(r.query["sample_rate"] ?? "") ?? PCM16Resampler.outputRate
+            guard let mode = WakeWordCheck.Match(rawValue: r.query["match"] ?? "only") else {
+                return .init(status: 400, object: ["error": "invalid_match", "detail": "match is start or only"])
+            }
             guard !r.body.isEmpty, r.body.count % 2 == 0 else { return .init(status: 400, object: ["error": "pcm_required"]) }
             do {
-                let result = try await WakeWordCheck.check(pcm: r.body, sampleRate: rate, word: word)
+                let result = try await WakeWordCheck.check(pcm: r.body, sampleRate: rate, word: word, match: mode)
                 return .init(status: 200, object: ["match": result.match, "heard": result.heard, "elapsed_ms": result.elapsedMs])
             } catch WakeWordCheck.Failure.unavailable {
                 return .init(status: 501, object: ["error": "wake_word_unavailable", "detail": "needs macOS 26 (SpeechTranscriber)"])
@@ -241,10 +246,12 @@ final class SpeechHTTPService: @unchecked Sendable {
                 guard let rate = TranscriptionRoute.sampleRate(fromCreateBody: body) else {
                     return .init(status: 400, object: ["error": "invalid_body"])
                 }
-                return .init(status: 201, object: ["id": try await manager.create(sampleRate: rate)])
+                let watch = TranscriptionRoute.watchPhrase(fromCreateBody: body)
+                return .init(status: 201, object: ["id": try await manager.create(sampleRate: rate, watch: watch)])
             case .audio(let id):
-                try await manager.append(id: id, pcm: body)
-                return .init(status: 204, object: nil)
+                // 204 as ever, unless a watched-for phrase has been heard: then 200 and `heard`.
+                let heard = try await manager.append(id: id, pcm: body)
+                return heard ? .init(status: 200, object: ["heard": true]) : .init(status: 204, object: nil)
             case .finish(let id):
                 return .init(status: 200, object: ["text": try await manager.finish(id: id)])
             case .cancel(let id):
@@ -314,6 +321,14 @@ enum TranscriptionRoute: Equatable {
 
     /// The create body is optional JSON `{"sample_rate": N}`; empty means 16 kHz.
     /// nil for a body that is present but not that shape.
+    /// The create body's optional `watch`: a phrase that ends the dictation.
+    static func watchPhrase(fromCreateBody body: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let phrase = object["watch"] as? String,
+              !WakeWordCheck.words(phrase).isEmpty else { return nil }
+        return phrase
+    }
+
     static func sampleRate(fromCreateBody body: Data) -> Int? {
         if body.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x0D || $0 == 0x09 }) { return PCM16Resampler.outputRate }
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }

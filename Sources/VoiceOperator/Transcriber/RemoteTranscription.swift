@@ -97,13 +97,19 @@ actor RemoteTranscriptionManager {
 
     // MARK: - Session lifecycle
 
-    func create(sampleRate: Int = PCM16Resampler.outputRate, now: Date = Date()) throws -> String {
+    /// `watch`: a phrase to listen for alongside Wispr, on-device; `append`
+    /// reports once it has been heard. See `PhraseWatcher`.
+    func create(sampleRate: Int = PCM16Resampler.outputRate, watch: String? = nil, now: Date = Date()) throws -> String {
         guard let resampler = PCM16Resampler(inputRate: sampleRate) else { throw Failure.unsupportedSampleRate }
         let id = UUID().uuidString.lowercased()
         let trace = DictationTrace("remote")
         trace.note("\(sampleRate) Hz in")
         let session = Session(id: id, resampler: resampler, encoder: try? OpusEncoder(), trace: trace, now: now)
         if session.encoder == nil { session.broken = true; trace.note("opus encoder unavailable") }
+        if let watch {
+            session.watcher = PhraseWatcher(phrase: watch)
+            trace.note(session.watcher == nil ? "cannot watch for the end phrase here" : "watching for the end phrase")
+        }
         sessions[id] = session
         updateActivity()
         startReaperIfNeeded()
@@ -121,14 +127,18 @@ actor RemoteTranscriptionManager {
         return id
     }
 
-    func append(id: String, pcm: Data, now: Date = Date()) throws {
+    /// Returns whether the session's watched-for phrase has been heard yet.
+    @discardableResult
+    func append(id: String, pcm: Data, now: Date = Date()) throws -> Bool {
         let session = try openSession(id)
         session.lastActivity = now
         let converted = session.resampler.convert(pcm)
-        guard !converted.isEmpty else { return }
+        guard !converted.isEmpty else { return session.watcher?.heard ?? false }
         if session.pcm.isEmpty { session.trace.mark("first-audio") }
         session.pcm.append(converted)
+        session.watcher?.feed(converted)
         encodeWholeFrames(session)
+        return session.watcher?.heard ?? false
     }
 
     /// Commit the session and wait for its transcript. Falls back to transcribing
@@ -290,6 +300,8 @@ actor RemoteTranscriptionManager {
     }
 
     private func release(_ session: Session) async {
+        session.watcher?.stop()
+        session.watcher = nil
         await session.detach()?.cancel()
     }
 
@@ -345,6 +357,8 @@ actor RemoteTranscriptionManager {
         var sendChain: Task<Void, Never>?
         /// The stream is unusable; `finish` goes straight to the fallback.
         var broken = false
+        /// Listening for the phrase that ends the dictation, if one was asked for.
+        var watcher: PhraseWatcher?
 
         init(id: String, resampler: PCM16Resampler, encoder: OpusEncoder?, trace: DictationTrace, now: Date) {
             self.id = id

@@ -66,7 +66,7 @@ VIRTUAL_ENV=venv_kokoro uv pip install \
 Then create a machine-local `.env` (see next section) and run
 `./venv_kokoro/bin/python kokoro_server.py`.
 
-Known-good versions on this Mac: torch 2.13.0, kokoro 0.9.4, misaki 0.9.4,
+Known-good versions on this Mac: torch 2.14.1, kokoro 0.9.4, misaki 0.9.4,
 transformers 5.13.0, spacy 3.8.14, en_core_web_sm 3.8.0, numpy 2.5.1,
 fastapi 0.139.0, uvicorn 0.51.0, soundfile 0.14.0.
 

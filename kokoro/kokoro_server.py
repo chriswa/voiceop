@@ -204,6 +204,29 @@ def _vram_mb():
         return torch.cuda.memory_allocated() / 1024**2
     return 0.0
 
+def _advance(gen):
+    """Run one model step of a KPipeline generator. The only place model work
+    executes, so both concerns about MPS live here:
+
+    - Concurrency: hold _inference_lock across the step only, so other requests
+      can stream/pace concurrently while MPS is never entered from two threads.
+    - Memory: PyTorch caches a compiled MPSGraph per distinct tensor shape, and
+      the vocoder's shapes follow the audio length, so every new utterance
+      length adds ~40 MB that is never evicted (pytorch/pytorch #181213). As of
+      torch 2.14, empty_cache() reclaims it; it costs nothing measurable per
+      request (recompiling is cheaper than the leak's own slowdown). Done under
+      the lock so no other step's graphs are in flight.
+
+    Returns (result or None when exhausted, ms spent waiting for the lock)."""
+    wait_started = time.monotonic()
+    with _inference_lock:
+        waited_ms = (time.monotonic() - wait_started) * 1000
+        result = next(gen, None)
+        if _model is not None and _model.device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+    return result, waited_ms
+
 def _get_model():
     global _model
     if _model is None:
@@ -435,21 +458,11 @@ async def synthesize(request: Request):
     gen = pipeline(text, voice=voice, speed=speed)
     gen_exhausted = False
 
-    def _next_result():
-        # Holding this lock only during one generator advance permits other
-        # requests to stream/pacing-sleep concurrently while preventing MPS
-        # shader-cache races during model execution.
-        wait_started = time.monotonic()
-        with _inference_lock:
-            waited_ms = (time.monotonic() - wait_started) * 1000
-            result = next(gen, None)
-        return result, waited_ms
-
     async def _pull_more(buf: bytearray) -> bool:
         """Advance the pipeline by one chunk (one blocking model call, run
         off the event loop). Returns False once the pipeline is exhausted."""
         nonlocal gen_exhausted
-        (result, waited_ms) = await run_in_threadpool(_next_result)
+        (result, waited_ms) = await run_in_threadpool(_advance, gen)
         if waited_ms >= 10:
             print(f"[tts {request_id}] inference lock wait={waited_ms:.0f}ms", flush=True)
         if result is None:
@@ -578,14 +591,12 @@ def _collect_timings(result, offset: float, words: list):
 
 def _run_timings(pipeline, model, text: str, voice: str, speed: float):
     """Drive `pipeline` with `model` and collect (words, duration_seconds).
-    Per-chunk locking matches /synthesize: hold the inference lock only across
-    one model advance so a timing pass can't starve audio synthesis (MPS is not
-    safe to enter concurrently — see _inference_lock)."""
+    Steps through _advance like /synthesize, so a timing pass can't starve
+    audio synthesis."""
     gen = pipeline(text, voice=voice, speed=speed, model=model)
     words, offset = [], 0.0  # offset = cumulative seconds of prior chunks
     while True:
-        with _inference_lock:
-            result = next(gen, None)
+        result, _ = _advance(gen)
         if result is None:
             break
         offset += _collect_timings(result, offset, words)

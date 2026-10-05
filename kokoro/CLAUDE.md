@@ -123,11 +123,13 @@ adjust the `gui/<uid>` targets and the plist's `gui/501/...` line if different):
 **Why the daily restart:** on MPS, PyTorch leaks memory via a shape-keyed
 MPSGraph cache with no eviction (pytorch/pytorch #181213, #164299). A long-lived
 server synthesizing variable-length text grows unbounded — observed **~19 GB
-after 4 days**. `torch.mps.empty_cache()` does *not* reclaim it. The server code
-itself is clean (one shared `KModel`, one `KPipeline` per language, cached
-voicepacks), so recycling the process daily is the reliable mitigation; it resets
-to the ~1.8 GB baseline. CPU has no such leak but is ~3.7× slower (RTF 0.15 vs
-0.042 measured here), so we stay on MPS and just restart.
+after 4 days**, ~40 MB per new utterance length (the vocoder's shapes follow the
+audio length). **Fixed in code since torch 2.14:** `_advance()` calls
+`torch.mps.synchronize(); torch.mps.empty_cache()` after every model step, which
+now does reclaim it — 120 varied requests stay flat at ~1.8 GB with no latency
+cost. (On torch 2.13 `empty_cache()` did *not* reclaim it; don't downgrade.)
+The daily restart predates the fix and is now only a safety net. CPU has no such
+leak but is ~3.7× slower (RTF 0.15 vs 0.042 measured here), so we stay on MPS.
 
 **Set it up (fresh Mac, or after wiping `~/Library/LaunchAgents`):**
 ```bash

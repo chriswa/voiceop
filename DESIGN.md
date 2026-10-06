@@ -348,6 +348,16 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   Voice Processing I/O graph configured for medium other-audio ducking. The
   normal TTS players remain their own output path: Voice I/O startup failure
   therefore cannot make a sentence silent.
+- Starting the graph takes about as long as synthesizing the first sentence, and
+  it reconfigures the output device. On a USB headset dongle (EPOS BTD 800) that
+  is an audible cut-out, which used to land on the first words of speech. On
+  outputs that are neither built-in nor Bluetooth, the first audio of a job is
+  therefore held (`StreamingSpeechPlayer.hold`, synthesis continuing) until the
+  ducker is up (`NarrationDucker.ready`), capped at 3 s. The music still cuts
+  out briefly as ducking engages; the speech no longer does. Each narration
+  logs `tts: first audio held …`. Holding the microphone
+  open does not help these devices: a plain input stream alongside Voice
+  Processing I/O distorts all output on the EPOS.
 - The graph is released when the queue goes idle, a dictation barges in, or the
   app terminates. If a device cannot initialize it, narration continues without
   ducking and the reason is logged.

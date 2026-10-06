@@ -16,6 +16,8 @@ final class StreamingSpeechPlayer {
     private var streamEnded = false
     private var halted = false
     private var running = false
+    /// While set, scheduled audio queues up but the node does not start — see `hold()`.
+    private var held = false
     private var completed = false
     private var continuation: CheckedContinuation<Bool, Never>?
     private var firstBuffer: (() -> Void)?
@@ -70,6 +72,18 @@ final class StreamingSpeechPlayer {
         try engine.start()
     }
 
+    /// Queue audio without starting playback until `release()`. Synthesis keeps
+    /// scheduling into the timeline meanwhile, so the wait costs no synthesis
+    /// time. `onStart` still fires on the first buffer: that is when the sentence
+    /// is ready, which is what the job queue tracks.
+    func hold() { held = true }
+
+    func release() {
+        guard held else { return }
+        held = false
+        if !halted, !running, timeline.nodeEnd > 0 { node.play(); running = true }
+    }
+
     func beginSentence(onStart: @escaping () -> Void) {
         guard !halted else { return }
         streamEnded = false
@@ -111,7 +125,7 @@ final class StreamingSpeechPlayer {
                 self.checkDone()
             }
         }
-        if !running { node.play(); running = true }
+        if !running && !held { node.play(); running = true }
     }
 
     func endOfStream() { streamEnded = true; checkDone() }

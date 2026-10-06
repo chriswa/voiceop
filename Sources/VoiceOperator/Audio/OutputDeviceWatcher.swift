@@ -25,6 +25,12 @@ enum OutputDevice {
         }
     }
 
+    /// Whether the default output is the Mac's own (speakers, headphone jack).
+    static var isBuiltIn: Bool {
+        guard let device = defaultOutput() else { return false }
+        return transport(device) == kAudioDeviceTransportTypeBuiltIn
+    }
+
     /// `name (transport)` for the log — the one line that explains why the
     /// microphone just opened or closed on its own.
     static var summary: String {

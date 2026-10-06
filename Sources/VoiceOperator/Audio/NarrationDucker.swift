@@ -25,6 +25,22 @@ final class NarrationDucker: @unchecked Sendable {
         AudioGraphQueue.shared.async { [self] in startOnQueue() }
     }
 
+    /// Returns once every `start()`/`stop()` enqueued before this call has run,
+    /// so ducking is either up or has failed (or been released).
+    ///
+    /// Starting Voice Processing I/O reconfigures the output device, and on some
+    /// devices (a USB headset dongle such as the EPOS BTD 800) that is an audible
+    /// cut-out. Speech that waits here plays after it rather than through it.
+    /// Bounded by `timeout` so a wedged `AudioGraphQueue` delays speech rather
+    /// than silencing it.
+    func ready(timeout: Duration) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let once = ResumeOnce(continuation)
+            AudioGraphQueue.shared.async { once.resume() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout / .seconds(1)) { once.resume() }
+        }
+    }
+
     /// Release the lease. Ordering, not completion, is what callers rely on: work
     /// enqueued after this — a dictation's tap install, above all — runs after the
     /// teardown has finished.
@@ -77,6 +93,18 @@ final class NarrationDucker: @unchecked Sendable {
         self.silence = nil
         self.engine = nil
         Log.log("tts ducking: released")
+    }
+
+    /// Resumes a continuation exactly once, whichever of the queue block and the
+    /// timeout gets there first.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, Never>?
+        init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+        func resume() {
+            lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+            c?.resume()
+        }
     }
 
     /// Core Audio calls a source node on its real-time I/O thread. This must be

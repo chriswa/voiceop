@@ -42,7 +42,11 @@ final class TTSEngine {
         player?.skipAhead(seconds: seconds) ?? false
     }
 
+    /// `startGate`, when given, holds the first audio of a new session's player
+    /// until it returns; synthesis carries on meanwhile. Sentences that join a
+    /// running player are not held.
     func play(_ u: Utterance,
+              startGate: (@MainActor () async -> Void)? = nil,
               onStart: @escaping @Sendable @MainActor () -> Void = {},
               onSynthesized: @escaping @Sendable @MainActor () -> Void = {}) async -> Bool {
         let mark = haltCount
@@ -61,6 +65,10 @@ final class TTSEngine {
             player.setRate(playbackRate)
             player.onDrain = { [weak self] in self?.onDrain?() }
             self.player = player
+            if let startGate {
+                player.hold()
+                Task { @MainActor in await startGate(); player.release() }
+            }
         }
         player.beginSentence(onStart: onStart)
 

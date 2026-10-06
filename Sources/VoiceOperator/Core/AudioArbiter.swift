@@ -939,7 +939,7 @@ final class AudioArbiter {
         let utterance = Utterance(text: prepared.ttsText, voiceID: request.voice)
         let timingsTask = Task { await self.tts.wordTimings(for: utterance) }
         wordOverlay.appendSentence(start: tts.duration, prepared: prepared, timings: { await timingsTask.value })
-        let result = await tts.play(utterance, onStart: { [weak self] in
+        let result = await tts.play(utterance, startGate: duckingStartGate(), onStart: { [weak self] in
             guard let self, self.speechSessionID == id, !self.isDictating else { return }
             self.stopTTSWaitCue()
             self.onStatus?(.speaking)
@@ -1067,6 +1067,24 @@ final class AudioArbiter {
         if wasSpeaking && !active { onSpeechIdle?() }
         onPlaybackControlsChanged?()
     }
+    /// Starting the ducker's Voice Processing I/O graph reconfigures the output
+    /// device. On the built-in output and Bluetooth headsets that is inaudible;
+    /// on a USB headset dongle (EPOS BTD 800) it is a cut-out that, unheld, lands
+    /// on the first second or two of speech, because the graph takes about as
+    /// long to start as the first sentence takes to synthesize. There, the first
+    /// audio waits for ducking to be up. Elsewhere speech starts as soon as it
+    /// can.
+    private func duckingStartGate() -> (@MainActor () async -> Void)? {
+        guard !OutputDevice.isBuiltIn, !OutputDevice.isWireless else { return nil }
+        let ducker = narrationDucker
+        return {
+            let began = ContinuousClock.now
+            await ducker.ready(timeout: .seconds(3))
+            Log.log("tts: first audio held \(began.duration(to: .now).formatted(.units(allowed: [.milliseconds]))) "
+                    + "for ducking to start — \(OutputDevice.summary)")
+        }
+    }
+
     func prefetchSentence(text: String, voiceID: String) async {
         // Must transform identically to `playSentence`, so the cache keys match
         // and the prefetched audio/timings are the ones playback finds.

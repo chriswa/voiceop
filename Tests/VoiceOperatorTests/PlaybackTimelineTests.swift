@@ -138,6 +138,36 @@ final class PlaybackTimelineTests: XCTestCase {
         XCTAssertEqual(player.position, 2, accuracy: 0.01)
     }
 
+    /// A held player queues audio silently; release plays all of it from the top.
+    @MainActor
+    func testHeldPlayerStaysSilentUntilReleasedThenPlaysFromTheStart() async throws {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000,
+                                   channels: 1, interleaved: false)!
+        let player = StreamingSpeechPlayer()
+        try player.start(format: format, manualRendering: true)
+        defer { player.halt() }
+        let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512)!
+        let chunk = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 24_000)!
+        chunk.frameLength = 24_000
+        for i in 0..<24_000 { chunk.floatChannelData![0][i] = 0.1 * sin(Float(i) * 0.1) }
+        var started = false
+        player.hold()
+        player.beginSentence(onStart: { started = true })
+        player.schedule(chunk)
+        player.endOfStream()
+        XCTAssertTrue(started, "the sentence is ready even while its audio is held")
+        try await render(player, into: output, count: 20)
+        let peak = (0..<Int(output.frameLength)).map { abs(output.floatChannelData![0][$0]) }.max() ?? 0
+        XCTAssertEqual(peak, 0, "held audio must not reach the output")
+        XCTAssertEqual(player.position, 0, accuracy: 0.001)
+        XCTAssertFalse(player.atEnd)
+        player.release()
+        try await render(player, into: output, count: 60)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertTrue(player.atEnd, "released audio plays through in full")
+        XCTAssertEqual(player.position, 1, accuracy: 0.01)
+    }
+
     @MainActor
     private func render(_ player: StreamingSpeechPlayer, into output: AVAudioPCMBuffer, count: Int) async throws {
         var rendered = 0

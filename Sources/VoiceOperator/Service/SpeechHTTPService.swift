@@ -14,8 +14,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// 6 added remote synthesis (`/v1/synthesize`); 7 added multi-voice
     /// `parts` on `POST /v1/speech`; 8 added `/v1/wake-word`; 9 added its
     /// `match=start`, and `watch` on `POST /v1/transcriptions`; 10 removed
-    /// `watch` again (Spaceterm's "over and out" is gone).
-    static let discoveryVersion = 10
+    /// `watch` again (Spaceterm's "over and out" is gone); 11 added
+    /// `match=speech` on `/v1/wake-word`.
+    static let discoveryVersion = 11
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -145,7 +146,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             let word = r.query["word"] ?? "control"
             let rate = Int(r.query["sample_rate"] ?? "") ?? PCM16Resampler.outputRate
             guard let mode = WakeWordCheck.Match(rawValue: r.query["match"] ?? "only") else {
-                return .init(status: 400, object: ["error": "invalid_match", "detail": "match is start or only"])
+                return .init(status: 400, object: ["error": "invalid_match", "detail": "match is start, only or speech"])
             }
             guard !r.body.isEmpty, r.body.count % 2 == 0 else { return .init(status: 400, object: ["error": "pcm_required"]) }
             do {

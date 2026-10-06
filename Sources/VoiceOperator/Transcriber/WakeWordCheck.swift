@@ -17,12 +17,16 @@ import Speech
 enum WakeWordCheck {
     /// `start`: the clip's first word is the wake word ("Control, what's…").
     /// `only`: the wake word and nothing else ("Control.").
+    /// `speech`: any words at all — Spaceterm's conversation window, where
+    /// anything said is for Control and the question is only whether it was
+    /// words or a cough. Its words come back for the caller to weigh (filler
+    /// like "hmm" is its call); this side neither keeps nor logs them.
     enum Match: String, Sendable {
-        case start, only
+        case start, only, speech
     }
 
     struct Result: Sendable {
-        /// What the transcriber heard, for a clip that matched — empty otherwise.
+        /// What the transcriber heard, for a clip that matched — empty otherwise; always, for `speech`.
         let heard: String
         let match: Bool
         let elapsedMs: Int
@@ -62,13 +66,18 @@ enum WakeWordCheck {
         guard #available(macOS 26.0, *) else { throw Failure.unavailable }
         let started = Date()
         let heard = try await transcribe(pcm: pcm, sampleRate: sampleRate)
+        let elapsed = { Int(Date().timeIntervalSince(started) * 1000) }
+        if mode == .speech {
+            let count = words(heard).count
+            Log.log("speech check: \(count) words in \(elapsed()) ms (\(pcm.count / 2) samples)")
+            return Result(heard: heard, match: count > 0, elapsedMs: elapsed())
+        }
         let match = mode == .start ? startsWith(word, in: heard) : isOnly(word, in: heard)
-        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
         // Only a match is worth a log line with words in it.
         Log.log(match
-            ? "wake word: \"\(heard)\" matched \"\(word)\" in \(elapsed) ms (\(pcm.count / 2) samples)"
-            : "wake word: no match in \(elapsed) ms (\(pcm.count / 2) samples)")
-        return Result(heard: match ? heard : "", match: match, elapsedMs: elapsed)
+            ? "wake word: \"\(heard)\" matched \"\(word)\" in \(elapsed()) ms (\(pcm.count / 2) samples)"
+            : "wake word: no match in \(elapsed()) ms (\(pcm.count / 2) samples)")
+        return Result(heard: match ? heard : "", match: match, elapsedMs: elapsed())
     }
 
     @available(macOS 26.0, *)

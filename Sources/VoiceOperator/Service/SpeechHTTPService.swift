@@ -13,8 +13,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// transcription (`/v1/transcriptions`, `remote_transcription` in status);
     /// 6 added remote synthesis (`/v1/synthesize`); 7 added multi-voice
     /// `parts` on `POST /v1/speech`; 8 added `/v1/wake-word`; 9 added its
-    /// `match=start`, and `watch` on `POST /v1/transcriptions`.
-    static let discoveryVersion = 9
+    /// `match=start`, and `watch` on `POST /v1/transcriptions`; 10 removed
+    /// `watch` again (Spaceterm's "over and out" is gone).
+    static let discoveryVersion = 10
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -246,12 +247,10 @@ final class SpeechHTTPService: @unchecked Sendable {
                 guard let rate = TranscriptionRoute.sampleRate(fromCreateBody: body) else {
                     return .init(status: 400, object: ["error": "invalid_body"])
                 }
-                let watch = TranscriptionRoute.watchPhrase(fromCreateBody: body)
-                return .init(status: 201, object: ["id": try await manager.create(sampleRate: rate, watch: watch)])
+                return .init(status: 201, object: ["id": try await manager.create(sampleRate: rate)])
             case .audio(let id):
-                // 204 as ever, unless a watched-for phrase has been heard: then 200 and `heard`.
-                let heard = try await manager.append(id: id, pcm: body)
-                return heard ? .init(status: 200, object: ["heard": true]) : .init(status: 204, object: nil)
+                try await manager.append(id: id, pcm: body)
+                return .init(status: 204, object: nil)
             case .finish(let id):
                 return .init(status: 200, object: ["text": try await manager.finish(id: id)])
             case .cancel(let id):
@@ -321,14 +320,6 @@ enum TranscriptionRoute: Equatable {
 
     /// The create body is optional JSON `{"sample_rate": N}`; empty means 16 kHz.
     /// nil for a body that is present but not that shape.
-    /// The create body's optional `watch`: a phrase that ends the dictation.
-    static func watchPhrase(fromCreateBody body: Data) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let phrase = object["watch"] as? String,
-              !WakeWordCheck.words(phrase).isEmpty else { return nil }
-        return phrase
-    }
-
     static func sampleRate(fromCreateBody body: Data) -> Int? {
         if body.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x0D || $0 == 0x09 }) { return PCM16Resampler.outputRate }
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }

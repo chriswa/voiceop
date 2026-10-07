@@ -30,6 +30,30 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onForwardSpeech: (() -> Void)?
     private var canAdjustSpeech = false
     private var canRewindSpeech = false
+    /// The Text to Speech submenu: which server speech goes to, and the local
+    /// Kokoro service's install/restart/uninstall (see `KokoroService`).
+    private let textToSpeech = NSMenuItem(title: "Text to Speech", action: nil, keyEquivalent: "")
+    private let ttsStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ttsMemory = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ttsLocal = NSMenuItem(title: "Kokoro (This Mac)", action: #selector(selectLocalTTS), keyEquivalent: "")
+    private let ttsCustom = NSMenuItem(title: "Custom Server…", action: #selector(chooseCustomTTS), keyEquivalent: "")
+    private let ttsInstall = NSMenuItem(title: "Install Kokoro…", action: #selector(installKokoro), keyEquivalent: "")
+    private let ttsUpdate = NSMenuItem(title: "Update Kokoro", action: #selector(updateKokoro), keyEquivalent: "")
+    private let ttsRestart = NSMenuItem(title: "Restart Kokoro", action: #selector(restartKokoro), keyEquivalent: "")
+    private let ttsUninstall = NSMenuItem(title: "Uninstall Kokoro…", action: #selector(uninstallKokoro), keyEquivalent: "")
+    private let ttsLog = NSMenuItem(title: "Show Kokoro Log", action: #selector(showKokoroLog), keyEquivalent: "")
+    var ttsMenuState: (() -> TTSMenuState)?
+    /// The menu opened: time to ask the local server how it is.
+    var onTTSMenuOpened: (() -> Void)?
+    var onSelectLocalTTS: (() -> Void)?
+    var onChooseCustomTTS: (() -> Void)?
+    var onInstallKokoro: (() -> Void)?
+    var onCancelKokoroInstall: (() -> Void)?
+    var onUpdateKokoro: (() -> Void)?
+    var onRestartKokoro: (() -> Void)?
+    var onUninstallKokoro: (() -> Void)?
+    var onShowKokoroLog: (() -> Void)?
+    private var ttsActionsEnabled = true
     var onMuteSpeech: ((Bool) -> Void)?
     var onSpeakClipboard: (() -> Void)?
     var onSummarizeClipboard: (() -> Void)?
@@ -105,6 +129,14 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             item.keyEquivalentModifierMask = [.command, .control]
             menu.addItem(item)
         }
+        menu.addItem(.separator())
+        let tts = NSMenu()
+        ttsStatus.isEnabled = false; ttsMemory.isEnabled = false
+        tts.addItem(ttsStatus); tts.addItem(ttsMemory); tts.addItem(.separator())
+        for item in [ttsLocal, ttsCustom] { item.target = self; tts.addItem(item) }
+        tts.addItem(.separator())
+        for item in [ttsInstall, ttsUpdate, ttsRestart, ttsUninstall, ttsLog] { item.target = self; tts.addItem(item) }
+        textToSpeech.submenu = tts; menu.addItem(textToSpeech)
         menu.addItem(.separator())
         tapToToggle.target = self; menu.addItem(tapToToggle)
         // One radio item per placement, then the cycle with its chord shown.
@@ -207,6 +239,26 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand)
+        refreshTTSMenu()
+        onTTSMenuOpened?()
+    }
+    /// Re-render the Text to Speech submenu. Safe while the menu is open: the
+    /// health probe started on open lands here and fills in the memory line.
+    func refreshTTSMenu() {
+        guard let state = ttsMenuState?() else { return }
+        textToSpeech.title = state.isWarning ? "⚠︎ Text to Speech" : "Text to Speech"
+        ttsStatus.title = state.status
+        ttsMemory.title = state.memory ?? ""
+        ttsMemory.isHidden = state.memory == nil
+        ttsLocal.state = state.localSelected ? .on : .off
+        ttsCustom.state = state.localSelected ? .off : .on
+        ttsCustom.title = state.customTitle
+        ttsInstall.isHidden = state.install == .hidden
+        ttsInstall.title = state.install == .cancel ? "Cancel Install" : "Install Kokoro…"
+        ttsUpdate.isHidden = !state.showUpdate
+        ttsRestart.isHidden = !state.showRestart
+        ttsUninstall.isHidden = !state.showUninstall
+        ttsActionsEnabled = state.actionsEnabled
     }
     func menuDidClose(_ menu: NSMenu) {
         guard menu === self.menu else { return }
@@ -243,6 +295,15 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func forward() { onForwardSpeech?() }
     @objc private func summarizeClipboard() { onSummarizeClipboard?() }
     @objc private func restart() { onRestart?() }
+    @objc private func selectLocalTTS() { onSelectLocalTTS?() }
+    @objc private func chooseCustomTTS() { onChooseCustomTTS?() }
+    @objc private func installKokoro() {
+        if ttsInstall.title == "Cancel Install" { onCancelKokoroInstall?() } else { onInstallKokoro?() }
+    }
+    @objc private func updateKokoro() { onUpdateKokoro?() }
+    @objc private func restartKokoro() { onRestartKokoro?() }
+    @objc private func uninstallKokoro() { onUninstallKokoro?() }
+    @objc private func showKokoroLog() { onShowKokoroLog?() }
     @objc private func toggleLogin() { _ = onToggleLaunchAtLogin?() }
     @objc private func toggleTapToToggle() { tapToToggle.state = (onToggleTapToToggle?() ?? false) ? .on : .off }
     @objc private func cycleWordOverlayItem() { cycleWordOverlay() }
@@ -273,6 +334,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         if item === fasterSpeech || item === slowerSpeech { return canAdjustSpeech && item.isEnabled }
         if item === rewindSpeech { return canRewindSpeech }
         if item === forwardSpeech { return canAdjustSpeech }
+        // One Kokoro action at a time; Cancel Install stays live while one runs.
+        if item === ttsUpdate || item === ttsRestart || item === ttsUninstall { return ttsActionsEnabled }
+        if item === ttsInstall { return ttsActionsEnabled || item.title == "Cancel Install" }
         guard item === keepMicOpen else { return true }
         return !(keepMicOpenForWirelessState?() ?? false)
     }

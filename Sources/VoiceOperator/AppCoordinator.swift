@@ -14,6 +14,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             self.arbiter.isDictating || self.arbiter.isSpeaking
                 || RemoteTranscriptionManager.shared.activity.active > 0
         })
+    /// The local Kokoro server's launchd agent. Like a restart, anything that
+    /// stops the server waits until nothing is being dictated or spoken.
+    private lazy var kokoro = KokoroService(
+        isBusy: { [unowned self] in self.arbiter.isDictating || self.arbiter.isSpeaking })
     private var currentStatus: OperatorStatus = .idle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -84,6 +88,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         arbiter.onSpeechIdle = { [weak self] in self?.restart.attempt() }
         menuBar.onRestart = { [unowned self] in restart.request(source: .menu) }
+        wireTextToSpeechMenu()
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
         arbiter.wordOverlay.placement = OverlayPreferences.placement
@@ -178,6 +183,54 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         // back to back, so the gap between "going down" and "back up" is audible
         // rather than something you have to check the menu for.
         SoundEffect.launched.play()
+    }
+
+    /// The Text to Speech submenu: provider choice plus the Kokoro service.
+    private func wireTextToSpeechMenu() {
+        kokoro.onChange = { [weak self] in self?.menuBar.refreshTTSMenu() }
+        menuBar.ttsMenuState = { [unowned self] in
+            TTSMenuState.make(provider: Config.ttsProvider, phase: kokoro.phase,
+                              installed: kokoro.isInstalled, legacyInstalled: kokoro.legacyInstalled,
+                              updateAvailable: kokoro.updateAvailable, canCancel: kokoro.canCancel,
+                              health: kokoro.health)
+        }
+        menuBar.onTTSMenuOpened = { [unowned self] in
+            Task { await kokoro.refreshHealth(); menuBar.refreshTTSMenu() }
+        }
+        menuBar.onSelectLocalTTS = { [unowned self] in setTTSProvider(.kokoroLocal) }
+        menuBar.onChooseCustomTTS = { [unowned self] in
+            let current: String? = if case .custom(let url) = Config.ttsProvider { url } else { Config.load().tts?.url }
+            guard let url = TTSDialogs.customServerURL(current: current) else { return }
+            setTTSProvider(.custom(url: url))
+        }
+        menuBar.onInstallKokoro = { [unowned self] in
+            guard KokoroService.findUV() != nil else { TTSDialogs.showUVMissing(); return }
+            guard TTSDialogs.confirmInstall(replacingLegacy: kokoro.legacyInstalled) else { return }
+            kokoro.install()
+        }
+        menuBar.onCancelKokoroInstall = { [unowned self] in kokoro.cancel() }
+        menuBar.onUpdateKokoro = { [unowned self] in kokoro.update() }
+        menuBar.onRestartKokoro = { [unowned self] in kokoro.restart() }
+        menuBar.onUninstallKokoro = { [unowned self] in
+            guard TTSDialogs.confirmUninstall() else { return }
+            kokoro.uninstall()
+        }
+        menuBar.onShowKokoroLog = { [unowned self] in
+            let log = kokoro.paths.log
+            guard FileManager.default.fileExists(atPath: log.path) else {
+                TTSDialogs.showError("No Kokoro log yet", detail: "\(log.path) appears once Kokoro is installed.")
+                return
+            }
+            NSWorkspace.shared.open(log)
+        }
+    }
+
+    private func setTTSProvider(_ provider: TTSProvider) {
+        do { try Config.setTTSProvider(provider) } catch {
+            Log.log("tts: could not save the provider choice: \(error)")
+            TTSDialogs.showError("Couldn't save the Text to Speech choice", detail: "\(Config.fileURL.path): \(error.localizedDescription)")
+        }
+        menuBar.refreshTTSMenu()
     }
 
     /// Whether the microphone should be held open right now: the AirPods rule's

@@ -24,6 +24,7 @@ cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
+copy_kokoro_resources "$APP"
 stamp_build_identity "$APP" "$VERSION" "$BUILD_NUMBER"
 
 # Sign with a real codesigning identity if one exists (stable designated

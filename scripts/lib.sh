@@ -95,6 +95,18 @@ _set_plist_string() {
     mv "$file.tmp" "$file"
 }
 
+# Ship the local Kokoro server inside the bundle. The Text to Speech menu's
+# Install/Update copies these out to Application Support (see KokoroService), so
+# a release and a dev build install exactly what was built. Plain text files
+# only — the venv is built on the user's Mac, never shipped.
+copy_kokoro_resources() {
+    local app="$1" file
+    mkdir -p "$app/Contents/Resources/kokoro"
+    for file in kokoro_server.py requirements.txt blocked_voices.json; do
+        cp "kokoro/$file" "$app/Contents/Resources/kokoro/$file"
+    done
+}
+
 # Restart the running instance so the build that was just made goes live, and
 # confirm the new instance reports that build's version.
 #

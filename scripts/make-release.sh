@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build a distributable, notarized "Voice Operator.app".
 #
-# Produces a UNIVERSAL binary (arm64 + x86_64) so it runs on both Apple Silicon
-# and Intel Macs, targets the latest macOS release, signs with a
+# Produces an Apple Silicon (arm64) binary — Intel Macs are not supported —
+# targets the latest macOS release, signs with a
 # Developer ID Application certificate under a hardened runtime, notarizes with
 # Apple, and staples the ticket so it launches cleanly on any Mac — offline and
 # without Gatekeeper prompts.
@@ -44,9 +44,9 @@ if [ -z "$IDENTITY" ]; then
     exit 1
 fi
 
-echo "building universal (release, arm64 + x86_64)…"
-swift build -c release --arch arm64 --arch x86_64
-BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/VoiceOperator"
+echo "building (release, arm64)…"
+swift build -c release --arch arm64
+BIN="$(swift build -c release --arch arm64 --show-bin-path)/VoiceOperator"
 
 # The version comes from the committed Info.plist, so this bundle, the commit it
 # was built from, and the vX.Y.Z tag all name the same thing. Allocate it with
@@ -61,6 +61,7 @@ cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
+copy_kokoro_resources "$APP"
 stamp_build_identity "$APP" "$VERSION" "$BUILD_NUMBER"
 
 echo "signing as: $IDENTITY"

@@ -8,7 +8,7 @@ import Foundation
 /// settings can join without accreting one flat file per key.
 ///
 /// TTS URL precedence: `$VOICEOP_KOKORO_URL` → the chosen `TTSProvider`'s URL
-/// (`http://localhost:56841` for the local Kokoro, `tts.url` for a custom server).
+/// (`http://127.0.0.1:56841` for the local Kokoro, `tts.url` for a custom server).
 enum Config {
     struct File: Codable, Equatable, Sendable {
         struct TTS: Codable, Equatable, Sendable {
@@ -21,7 +21,9 @@ enum Config {
         var tts: TTS?
     }
 
-    static let defaultTTSBaseURL = "http://localhost:56841"
+    /// The local Kokoro. An IPv4 literal, not `localhost`: the server binds
+    /// 127.0.0.1 only, and `localhost` would try `::1` first.
+    static let defaultTTSBaseURL = "http://127.0.0.1:56841"
 
     /// Test seam: when set, `load()` returns this instead of reading disk.
     /// Guarded by `lock` together with `cached`.

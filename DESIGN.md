@@ -581,7 +581,7 @@ no reverse-engineering. The server itself lives in this repo under `kokoro/` (me
 old `tts` repo with its history, 2026-10-07; see `kokoro/CLAUDE.md`).
 
 **Provider and service (2026-10-07).** The menu's **Text to Speech** submenu picks a
-`TTSProvider`: `.kokoroLocal` (default, `localhost:56841`) or `.custom(url)` — any
+`TTSProvider`: `.kokoroLocal` (default, `127.0.0.1:56841`) or `.custom(url)` — any
 Kokoro-compatible server; another engine would join as a new case with its own
 `SpeechSynthesizer`. The choice is `config.json` `tts.provider` (a file with only `tts.url`
 still means that server), and `AudioCache` keys carry the provider so a switch never replays
@@ -596,7 +596,7 @@ waits until nothing is dictated or spoken. `/health` reports the server's physic
 
 - `POST {base}/synthesize`, `Content-Type: application/json`,
   body `{ "text": <string ≤5000>, "voice": <voice id>, "speed": <0.5–2.0, default 1.2> }`.
-  Base URL defaults to `http://localhost:56841`, overridable via `$VOICEOP_KOKORO_URL`.
+  Base URL defaults to `http://127.0.0.1:56841`, overridable via `$VOICEOP_KOKORO_URL`.
 - Response is one streaming `audio/wav` body: a **44-byte PCM WAV header** (with placeholder
   `0xffffffff` RIFF/data sizes, since length isn't known up front) followed by raw
   **s16le PCM, mono, 24000 Hz**, flushed as generated so playback starts on the first chunk.

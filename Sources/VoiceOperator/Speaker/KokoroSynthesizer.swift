@@ -11,7 +11,7 @@ import Foundation
 ///     { "text": <string>, "voice": <voice id>, "speed": <0.5–2.0> }
 ///
 /// Base URL precedence: `$VOICEOP_KOKORO_URL` → `config.json` `tts.url` →
-/// `http://localhost:56841`. Optional `tts.headers` (e.g. Cloudflare Access
+/// `http://127.0.0.1:56841`. Optional `tts.headers` (e.g. Cloudflare Access
 /// service-token pair) are attached to every request — see `Config`.
 ///
 /// To fit the app's f32le streaming pipeline (`TTSEngine`/`PCMReframer`), this

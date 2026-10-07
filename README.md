@@ -66,7 +66,7 @@ grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
 Speech goes through a Kokoro TTS server, chosen in the menu's **Text to Speech**
 submenu:
 
-- **Kokoro (This Mac)** — the default, at `http://localhost:56841`. Choose
+- **Kokoro (This Mac)** — the default, at `http://127.0.0.1:56841`. Choose
   **Install Kokoro…** once: Voice Operator copies the server (from `kokoro/` in this
   repo, shipped inside the app) to Application Support, builds its Python
   environment with [`uv`](https://docs.astral.sh/uv/) (~900 MB; install uv first with

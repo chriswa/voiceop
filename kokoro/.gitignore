@@ -1,11 +1,10 @@
-
-# Machine-local environment overrides
+# Machine-local overrides (optional; the code defaults are this Mac's values)
 .env
-venv_kokoro/
+# A dev venv, if you make one here (see CLAUDE.md)
+venv*/
 
-# Runtime logs (launchd-managed Mac service — see CLAUDE.md)
-kokoro.log
-kokoro-restart.log
+# Runtime logs from running the server by hand
+*.log
 
 # Python bytecode
 __pycache__/

@@ -206,7 +206,7 @@ enum DebugCLI {
     /// starts long before synthesis finishes. Uses the default voice.
     @MainActor
     static func runTTSTest(text: String) async {
-        let utterance = Utterance(text: text, voiceID: "af_heart")
+        let utterance = Utterance(text: text, voiceID: Config.ttsProvider.defaultVoiceID)
         func note(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
         note("speaking: \(utterance.spokenText)")
         let engine = TTSEngine()

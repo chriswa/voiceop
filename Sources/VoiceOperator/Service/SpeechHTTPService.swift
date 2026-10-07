@@ -15,8 +15,10 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// `parts` on `POST /v1/speech`; 8 added `/v1/wake-word`; 9 added its
     /// `match=start`, and `watch` on `POST /v1/transcriptions`; 10 removed
     /// `watch` again (Spaceterm's "over and out" is gone); 11 added
-    /// `match=speech` on `/v1/wake-word`.
-    static let discoveryVersion = 11
+    /// `match=speech` on `/v1/wake-word`; 12 made `/v1/voices` name the
+    /// provider the Text to Speech menu chose (`kokoro` or `custom`) and its
+    /// default voice, instead of a fixed `kokoro` / `af_heart`.
+    static let discoveryVersion = 12
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -160,7 +162,8 @@ final class SpeechHTTPService: @unchecked Sendable {
             }
         }
         if r.method == "GET", r.path == "/v1/voices" {
-            do { return .init(status: 200, object: ["provider": "kokoro", "default_voice": "af_heart", "voices": try await KokoroSynthesizer.availableVoiceIDs().map { ["id": $0] }]) }
+            let provider = Config.ttsProvider
+            do { return .init(status: 200, object: ["provider": provider.wireName, "default_voice": provider.defaultVoiceID, "voices": try await KokoroSynthesizer.availableVoiceIDs().map { ["id": $0] }]) }
             catch { return .init(status: 503, object: ["error": "tts_unavailable"]) }
         }
         // Remote synthesis: the audio for one piece of text, handed back rather
@@ -182,7 +185,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             guard let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any],
                   let text = o["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(status: 400, object: ["error": "text_required"]) }
             guard text.unicodeScalars.count <= 5_000 else { return .init(status: 422, object: ["error": "text_too_long"]) }
-            let voice = o["voice"] as? String ?? "af_heart"
+            let voice = o["voice"] as? String ?? Config.ttsProvider.defaultVoiceID
             let synthesizer = KokoroSynthesizer()
             let prepared = TTSPreprocess.prepare(text)
             do {
@@ -339,7 +342,7 @@ enum TranscriptionRoute: Equatable {
 ///
 /// A missing voice falls back to `defaultVoice` in either shape.
 enum SpeechRequestBody {
-    static let defaultVoice = "af_heart"
+    static var defaultVoice: String { Config.ttsProvider.defaultVoiceID }
     /// Applies to the job's whole text — for `parts`, the joined text.
     static let maxScalars = 50_000
 

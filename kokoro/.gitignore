@@ -1,0 +1,12 @@
+
+# Machine-local environment overrides
+.env
+venv_kokoro/
+
+# Runtime logs (launchd-managed Mac service — see CLAUDE.md)
+kokoro.log
+kokoro-restart.log
+
+# Python bytecode
+__pycache__/
+*.pyc

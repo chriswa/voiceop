@@ -1,17 +1,12 @@
 """
-Kokoro TTS — single combined server, port 3004.
+Kokoro TTS — Voice Operator's local speech server, 127.0.0.1:56841.
 
-Serves BOTH the synthesis API and the public web UI (tts.chriswa.com) from one
-process. This replaced a two-process design (a separate Bun UI/proxy server +
-a bash supervisor that arbitrated between up to 5 different TTS engines) —
-once Kokoro was chosen as the only engine we're keeping, always-loaded and
-never switched, that supervision layer was pure overhead. See
-../Research/CRASH_LOG_2026-07-04.md and CRASH_REPORT_2026-07-05.md for the
-history that led here (host RAM exhaustion from running many heavy engines
-at once; this design structurally can't repeat that — there is exactly one
-model, loaded once, for the life of the process).
+Serves the synthesis API and a small test page from one process, installed
+and run by Voice Operator as a launchd agent (see CLAUDE.md next to this
+file). One engine, always loaded, never switched: there is exactly one
+model, loaded once, for the life of the process.
 
-Apache 2.0, 82M params, ~550 MB VRAM. True streaming: yields PCM chunks as
+Apache 2.0, 82M params. True streaming: yields PCM chunks as
 generated. TTFA is measured client-side from the first REAL AUDIO byte
 (the WAV header is flushed near-instantly and contains no sound — timing
 off of it wildly understates real time-to-first-sound; see conversation
@@ -24,14 +19,14 @@ that work with what's already here (English x2, Spanish, French, Hindi,
 Italian, Portuguese) = 41 voices. Add pyopenjtalk / misaki[zh] and the two
 entries in LANGUAGES below to extend.
 """
-import struct, time, threading, json, os, asyncio
+import struct, time, threading, json, os
 
 def _load_dotenv(path=".env"):
     # Minimal .env loader (no dependency): KEY=VALUE lines, '#' comments.
     # Real environment variables always win over the file, so an explicit
-    # `PORT=... python kokoro_server.py` still overrides the .env. This lets
-    # the primary install keep its hard-coded 3004 default while a per-machine
-    # .env picks a non-conflicting port.
+    # `PORT=... python kokoro_server.py` still overrides the .env. The code
+    # defaults are what Voice Operator expects, so a .env is only an escape
+    # hatch (e.g. KOKORO_DEVICE=cpu while debugging).
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), path)) as f:
             for line in f:
@@ -44,7 +39,11 @@ def _load_dotenv(path=".env"):
         pass
 
 _load_dotenv()
+# Must be set before torch is imported: ops MPS doesn't implement fall back to
+# the CPU instead of raising.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
+import ctypes, ctypes.util
 import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
@@ -64,23 +63,10 @@ MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 DEFAULT_SPEED = 1.2
 
-# ── egress pacing toggle ────────────────────────────────────────────────────────
-# When on, /synthesize meters audio out at ~1.3x realtime (see the long note in
-# synthesize()). That smooths a lossy WAN hop (phone -> Cloudflare Tunnel -> the
-# production box), but on a machine whose only client is local it just throttles
-# delivery of audio that's already generated far faster than realtime — turning a
-# ~0.4s job into a multi-second trickle and starving the client's prefetch. So
-# it's a switch, defaulting ON to preserve the production install (which has no
-# .env and relies on defaults); the Mac's .env sets KOKORO_EGRESS_PACING=off.
-# Deliberately NOT auto-detected by client IP: cloudflared runs on the production
-# box, so genuinely-remote requests arrive from 127.0.0.1 there too.
-def _env_flag(name: str, default: bool) -> bool:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return v.strip().lower() not in ("0", "off", "false", "no", "")
-
-EGRESS_PACING = _env_flag("KOKORO_EGRESS_PACING", True)
+# Loopback only: the one client is Voice Operator on this Mac. HOST=0.0.0.0 in
+# .env exposes it to the LAN — with no auth, so only do that deliberately.
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "56841"))
 
 # ── language / voice catalog ───────────────────────────────────────────────────
 # lang_code -> human label. Only languages usable with currently-installed
@@ -204,6 +190,52 @@ def _vram_mb():
         return torch.cuda.memory_allocated() / 1024**2
     return 0.0
 
+# ── memory readings ─────────────────────────────────────────────────────────────
+# The number that matters is the process's physical footprint — Activity
+# Monitor's "Memory" column. It's what the MPS shape-cache leak inflated (to
+# ~19 GB over 4 days before the _advance() fix), and with no scheduled restart
+# any more it's how a returning leak gets noticed. RSS undercounts it (Metal /
+# unified-memory allocations), and _vram_mb() is CUDA-only. Read via libproc's
+# proc_pid_rusage, so there's no new dependency; the struct is read from a
+# generous buffer at ri_phys_footprint's fixed offset (16-byte uuid + 7 uint64s).
+_RUSAGE_INFO_V4 = 4
+_PHYS_FOOTPRINT_OFFSET = 16 + 7 * 8
+try:
+    _libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
+except OSError:
+    _libproc = None
+
+def _footprint_mb():
+    """This process's physical footprint in MB, or None where libproc isn't
+    available (non-macOS)."""
+    if _libproc is None:
+        return None
+    buf = ctypes.create_string_buffer(512)
+    if _libproc.proc_pid_rusage(os.getpid(), _RUSAGE_INFO_V4, buf) != 0:
+        return None
+    return int.from_bytes(buf.raw[_PHYS_FOOTPRINT_OFFSET:_PHYS_FOOTPRINT_OFFSET + 8], "little") / 1024**2
+
+# Memory the Metal driver holds for this process — the leak's direct gauge.
+# Sampled inside _advance(), under the inference lock, because MPS must not be
+# entered from two threads at once; readers get the latest sample. None off MPS.
+_last_mps_mb = None
+
+def _sample_mps():
+    global _last_mps_mb
+    if _model is not None and _model.device.type == "mps":
+        _last_mps_mb = torch.mps.driver_allocated_memory() / 1024**2
+
+def _mps_mb():
+    return _last_mps_mb
+
+def _mem_summary():
+    """`mem=… mps=…` for log lines."""
+    fp, mps = _footprint_mb(), _mps_mb()
+    parts = [f"mem={fp:.0f}MB" if fp is not None else "mem=?"]
+    if mps is not None:
+        parts.append(f"mps={mps:.0f}MB")
+    return " ".join(parts)
+
 def _advance(gen):
     """Run one model step of a KPipeline generator. The only place model work
     executes, so both concerns about MPS live here:
@@ -225,6 +257,7 @@ def _advance(gen):
         if _model is not None and _model.device.type == "mps":
             torch.mps.synchronize()
             torch.mps.empty_cache()
+            _sample_mps()
     return result, waited_ms
 
 def _get_model():
@@ -296,7 +329,8 @@ print("Loading Kokoro model...", flush=True)
 _t0 = time.time()
 _get_model()
 _get_pipeline("a")   # preload the default/most-likely-used language eagerly
-print(f"Kokoro ready in {time.time()-_t0:.1f}s | device: {_pick_device()} | VRAM: {_vram_mb():.0f} MB", flush=True)
+_sample_mps()
+print(f"Kokoro ready in {time.time()-_t0:.1f}s | device: {_pick_device()} | {_mem_summary()}", flush=True)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _wav_stream_header(sample_rate=SAMPLE_RATE, channels=1, bits=16) -> bytes:
@@ -337,51 +371,26 @@ def _parse_synth_params(body: dict):
         raise _BadParams(f"speed must be between {MIN_SPEED} and {MAX_SPEED}")
     return text, voice, speed
 
-def _cors(request: Request | None = None):
-    # A bare "*" is rejected by browsers on credentialed requests (fetch with
-    # credentials:'include', which callers need in order to send the
-    # Cloudflare Access session cookie cross-origin to this host). Reflecting
-    # the specific request Origin + Allow-Credentials is the standard fix,
-    # and is safe here since this endpoint has no cookie-based state of its
-    # own to leak (Cloudflare Access is the actual authZ boundary in front of
-    # this app).
-    origin = request.headers.get("origin") if request is not None else None
-    headers = {
-        "Access-Control-Expose-Headers":
-            "X-TTFA-MS,X-Total-MS,X-RTF,X-Audio-Duration,X-Streaming,X-Model,X-Voice,X-Speed",
-    }
-    if origin:
-        headers["Access-Control-Allow-Origin"] = origin
-        headers["Access-Control-Allow-Credentials"] = "true"
-        headers["Vary"] = "Origin"
-    else:
-        headers["Access-Control-Allow-Origin"] = "*"
-    return headers
-
 # ── app ───────────────────────────────────────────────────────────────────────
 app = FastAPI()
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": "kokoro-82m", "loaded": True, "vram_mb": round(_vram_mb())}
+    # memory_mb is the process's physical footprint (Activity Monitor's
+    # "Memory"); Voice Operator shows it in its Text to Speech menu. mps_mb is
+    # the Metal driver's share, null off MPS. vram_mb is CUDA-only, kept for
+    # compatibility.
+    fp, mps = _footprint_mb(), _mps_mb()
+    return {"status": "ok", "model": "kokoro-82m", "loaded": True, "pid": os.getpid(),
+            "memory_mb": round(fp) if fp is not None else None,
+            "mps_mb": round(mps) if mps is not None else None,
+            "vram_mb": round(_vram_mb())}
 
 @app.get("/voices")
 def voices():
     active = _active_voices()
     default = DEFAULT_VOICE if DEFAULT_VOICE not in BLOCKED_VOICES else (active[0]["id"] if active else None)
     return {"voices": active, "model": "kokoro-82m", "default": default}
-
-@app.options("/synthesize")
-def synthesize_opts(request: Request):
-    return JSONResponse({}, headers={**_cors(request),
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"})
-
-@app.options("/voices/block")
-def block_voice_opts(request: Request):
-    return JSONResponse({}, headers={**_cors(request),
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"})
 
 @app.post("/voices/block")
 async def block_voice(request: Request):
@@ -393,11 +402,11 @@ async def block_voice(request: Request):
     body = await request.json()
     voice = (body.get("voice") or "").strip()
     if voice not in VOICE_IDS:
-        return JSONResponse({"error": f"unknown voice '{voice}'"}, status_code=400, headers=_cors(request))
+        return JSONResponse({"error": f"unknown voice '{voice}'"}, status_code=400)
     with _blocklist_lock:
         BLOCKED_VOICES.add(voice)
         _save_blocklist()
-    return JSONResponse({"status": "ok", "blocked": sorted(BLOCKED_VOICES)}, headers=_cors(request))
+    return JSONResponse({"status": "ok", "blocked": sorted(BLOCKED_VOICES)})
 
 @app.post("/synthesize")
 async def synthesize(request: Request):
@@ -405,43 +414,16 @@ async def synthesize(request: Request):
     try:
         text, voice, speed = _parse_synth_params(body)
     except _BadParams as e:
-        return JSONResponse({"error": str(e)}, status_code=400, headers=_cors(request))
+        return JSONResponse({"error": str(e)}, status_code=400)
 
     lang_code = voice[0]
     pipeline = _get_pipeline(lang_code)
     request_id = _new_request_id()
     request_started = time.monotonic()
 
-    # ── egress pacing ────────────────────────────────────────────────────────
-    # Measured with test_streaming.py: Kokoro generates far faster than real
-    # time on this GPU (RTF ~0.02-0.5x even for 30+s of audio finishing in
-    # well under a second), and for short inputs (no sentence-ending
-    # punctuation) the pipeline yields the *entire* utterance as a single
-    # chunk — there's no per-chunk generation lag to "buffer against"
-    # locally. But naively `yield`ing that whole blob the instant it's ready
-    # hands the ASGI server one huge write to push out as fast as the pipe
-    # allows, which over a real WAN hop (phone/remote -> Cloudflare Tunnel ->
-    # here) tends to front-load onto a cold TCP/QUIC congestion window: the
-    # first ~10-14 packets (roughly the first ~300-500ms of 24kHz/16-bit
-    # audio) go out immediately, then delivery stalls for a round trip while
-    # the window grows, then the rest arrives in a second burst. That matches
-    # the reported symptom exactly (bit of audio, sub-second pause, rest of
-    # audio) even though generation itself was never the bottleneck.
-    #
-    # Fix: buffer the whole utterance server-side (cheap - it's fast), send
-    # an initial chunk immediately so playback can start, then meter out the
-    # remainder in small, evenly-paced writes close to real-time instead of
-    # one firehose blast. This is what the client would otherwise have to do
-    # itself (delay playback ~1s to build a safety margin) — doing it here
-    # means every client (browser UI, curl, phone) gets smooth delivery for
-    # free.
-    INITIAL_BUFFER_MS = 1000   # always send at least this much immediately (or all of it, if shorter)
-    PACE_CHUNK_MS = 200        # size of each subsequent metered write
-    PACE_FACTOR = 0.8          # <1 = send a little ahead of real-time so client buffer keeps growing
-
     # ── incremental generation + disconnect cancellation ────────────────────
     # This used to synthesize the *entire* text in one blocking call before
-    # any pacing/streaming happened at all — fine for short inputs, but for
+    # any streaming happened at all — fine for short inputs, but for
     # a multi-minute script it means: (a) the whole audio sits in RAM as one
     # buffer before a single byte goes out, and (b) if the client disconnects
     # a few seconds in, there was no way to notice — the rest of the
@@ -476,73 +458,30 @@ async def synthesize(request: Request):
         return True
 
     async def generate():
-        print(f"[tts {request_id}] start chars={len(text)} voice={voice} "
-              f"speed={speed} pacing={'on' if EGRESS_PACING else 'off'}", flush=True)
+        print(f"[tts {request_id}] start chars={len(text)} voice={voice} speed={speed}", flush=True)
         try:
             yield _wav_stream_header(SAMPLE_RATE)
 
+            # The client does its own buffering: hand each generated chunk
+            # straight through the instant it's ready. Delivery is
+            # generation-bound (~RTF), so a whole sentence lands in a fraction
+            # of a second and the client can prefetch far ahead. (The old
+            # real-time egress pacing existed only for a WAN hop to a remote
+            # box; see git history.)
             buf = bytearray()
-
-            # ── unpaced fast path (local clients) ────────────────────────────
-            # Nothing to smooth over a loopback pipe, and the client does its
-            # own buffering: hand each generated chunk straight through the
-            # instant it's ready. Delivery becomes generation-bound (~RTF), so
-            # a whole sentence lands in a fraction of a second and the client
-            # can prefetch far ahead.
-            if not EGRESS_PACING:
-                while not gen_exhausted:
-                    if await request.is_disconnected():
-                        return
-                    del buf[:]
-                    await _pull_more(buf)
-                    if buf:
-                        yield bytes(buf)
-                return
-
-            # ── paced path (remote/WAN clients) ──────────────────────────────
-            bytes_per_ms = SAMPLE_RATE * 2 / 1000  # int16 mono
-
-            def _aligned(n_bytes):
-                n = int(n_bytes)
-                return n - (n % 2)  # keep on a 16-bit sample boundary
-
-        # Accumulate chunks until we have enough for the initial burst (or
-        # the whole utterance is shorter than that and the pipeline's done).
-            initial_n_target = _aligned(INITIAL_BUFFER_MS * bytes_per_ms)
-            while len(buf) < initial_n_target and not gen_exhausted:
+            while not gen_exhausted:
                 if await request.is_disconnected():
                     return
+                del buf[:]
                 await _pull_more(buf)
-
-            if not buf:
-                return
-
-            initial_n = _aligned(min(initial_n_target, len(buf)))
-            yield bytes(buf[:initial_n])
-            del buf[:initial_n]
-
-            chunk_n = _aligned(PACE_CHUNK_MS * bytes_per_ms) or 2
-            while buf or not gen_exhausted:
-                if await request.is_disconnected():
-                    return
-                if len(buf) < chunk_n and not gen_exhausted:
-                    await _pull_more(buf)
-                    continue
-                end = min(chunk_n, len(buf))
-                if end == 0:
-                    continue
-                chunk = bytes(buf[:end])
-                del buf[:end]
-                yield chunk
-                if buf or not gen_exhausted:
-                    chunk_duration_sec = len(chunk) / 2 / SAMPLE_RATE
-                    await asyncio.sleep(chunk_duration_sec * PACE_FACTOR)
+                if buf:
+                    yield bytes(buf)
         finally:
             elapsed_ms = (time.monotonic() - request_started) * 1000
-            print(f"[tts {request_id}] finish elapsed={elapsed_ms:.0f}ms", flush=True)
+            print(f"[tts {request_id}] finish elapsed={elapsed_ms:.0f}ms {_mem_summary()}", flush=True)
 
     return StreamingResponse(generate(), media_type="audio/wav",
-        headers={**_cors(request), "X-Streaming": "true", "X-Model": "kokoro-82m", "X-Voice": voice,
+        headers={"X-Streaming": "true", "X-Model": "kokoro-82m", "X-Voice": voice,
                  "X-Speed": str(speed)})
 
 # ── word timestamps (for read-along / word-highlight overlays) ──────────────────
@@ -620,30 +559,24 @@ def _word_timings(text: str, voice: str, speed: float):
               f"falling back to full synthesis", flush=True)
         return _run_timings(pipeline, None, text, voice, speed)
 
-@app.options("/timestamps")
-def timestamps_opts(request: Request):
-    return JSONResponse({}, headers={**_cors(request),
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"})
-
 @app.post("/timestamps")
 async def timestamps(request: Request):
     body = await request.json()
     try:
         text, voice, speed = _parse_synth_params(body)
     except _BadParams as e:
-        return JSONResponse({"error": str(e)}, status_code=400, headers=_cors(request))
+        return JSONResponse({"error": str(e)}, status_code=400)
 
     request_id = _new_request_id()
     started = time.monotonic()
     print(f"[ts {request_id}] start chars={len(text)} voice={voice} speed={speed}", flush=True)
     words, duration = await run_in_threadpool(_word_timings, text, voice, speed)
     elapsed_ms = (time.monotonic() - started) * 1000
-    print(f"[ts {request_id}] finish words={len(words)} dur={duration:.2f}s elapsed={elapsed_ms:.0f}ms", flush=True)
+    print(f"[ts {request_id}] finish words={len(words)} dur={duration:.2f}s elapsed={elapsed_ms:.0f}ms {_mem_summary()}", flush=True)
     return JSONResponse(
         {"model": "kokoro-82m", "voice": voice, "speed": speed,
          "sample_rate": SAMPLE_RATE, "duration": round(duration, 3), "words": words},
-        headers={**_cors(request), "X-Model": "kokoro-82m", "X-Voice": voice, "X-Speed": str(speed)})
+        headers={"X-Model": "kokoro-82m", "X-Voice": voice, "X-Speed": str(speed)})
 
 # ── web UI ──────────────────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
@@ -651,7 +584,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kokoro TTS — tts.chriswa.com</title>
+<title>Kokoro TTS</title>
 <style>
   :root {
     --bg: #0f1115; --card: #1a1d24; --border: #2a2e38; --text: #e8e8ec;
@@ -718,7 +651,7 @@ HTML = r"""<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>Kokoro TTS</h1>
-  <p class="sub">82M params &middot; Apache 2.0 &middot; tts.chriswa.com</p>
+  <p class="sub">82M params &middot; Apache 2.0 &middot; Voice Operator's local speech server</p>
   <div class="card">
     <textarea id="text" placeholder="Type something to synthesize…">The quick brown fox jumps over the lazy dog.</textarea>
     <div class="row">
@@ -750,7 +683,7 @@ HTML = r"""<!DOCTYPE html>
         <tr><td><code>voice</code></td><td>string</td><td>a voice <code>id</code> from <code>/voices</code>, e.g. <code>af_heart</code>. Defaults to <code>af_heart</code> if omitted.</td></tr>
         <tr><td><code>speed</code></td><td>number</td><td>optional, 0.5-2.0, default 1.2. Applied during generation (not a post-hoc playback-rate trick) via Kokoro's native <code>speed</code> param.</td></tr>
       </table>
-      <pre>curl -N -X POST https://tts.chriswa.com/synthesize \
+      <pre>curl -N -X POST http://localhost:56841/synthesize \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello there.", "voice": "af_heart", "speed": 1.2}' \
   --output speech.wav</pre>
@@ -760,7 +693,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="endpoint">
       <h3><span class="method">POST</span>/timestamps</h3>
       <p>Returns word-level timings for read-along / word-highlight overlays as JSON. Same body as <code>/synthesize</code> (<code>text</code>, <code>voice</code>, <code>speed</code>). Times are in seconds from the start of the utterance and are deterministic for a given (text, voice, speed), so they line up with the audio from <code>/synthesize</code> requested with the same parameters.</p>
-      <pre>curl -X POST https://tts.chriswa.com/timestamps \
+      <pre>curl -X POST http://localhost:56841/timestamps \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello there.", "voice": "af_heart", "speed": 1.2}'</pre>
       <pre>{
@@ -776,7 +709,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="endpoint">
       <h3><span class="method">GET</span>/voices</h3>
       <p>Lists every available voice. The <code>id</code> field of each entry (shown in the dropdown above, before the em-dash) is exactly the string to pass as <code>voice</code> in <code>/synthesize</code>. Block-listed voices are omitted.</p>
-      <pre>curl https://tts.chriswa.com/voices</pre>
+      <pre>curl http://localhost:56841/voices</pre>
       <pre>{
   "voices": [
     {"id": "af_heart", "lang_code": "a", "language": "American English", "gender": "female", "label": "Heart (female)"},
@@ -858,7 +791,7 @@ async function checkEngine() {
     const d = await r.json();
     if (d.loaded) {
       dot.className = 'dot ok';
-      txt.textContent = `Engine ready (${d.vram_mb} MB VRAM)`;
+      txt.textContent = d.memory_mb != null ? `Engine ready (${d.memory_mb} MB)` : 'Engine ready';
     } else {
       dot.className = 'dot bad';
       txt.textContent = 'Engine not ready';
@@ -1048,4 +981,4 @@ def index():
     return HTML
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "3004")), log_level="warning")
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

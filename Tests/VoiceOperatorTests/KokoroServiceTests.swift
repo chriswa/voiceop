@@ -303,3 +303,25 @@ private final class FakeRunner: CommandRunner, @unchecked Sendable {
         }
     }
 }
+
+/// The real `Process` runner, on harmless shell commands.
+final class ProcessRunnerTests: XCTestCase {
+    func testCapturesOutputStatusAndLog() async throws {
+        let log = FileManager.default.temporaryDirectory.appendingPathComponent("runner-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: log) }
+        let result = try await ProcessRunner().run("/bin/sh", ["-c", "echo out; echo err >&2; exit 3"], logTo: log)
+        XCTAssertEqual(result.status, 3)
+        XCTAssertTrue(result.output.contains("out") && result.output.contains("err"), result.output)
+        XCTAssertEqual(try String(contentsOf: log, encoding: .utf8), result.output)
+    }
+
+    func testCancellingTerminatesTheProcess() async throws {
+        let started = ContinuousClock.now
+        let task = Task { try await ProcessRunner().run("/bin/sleep", ["30"]) }
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let result = try await task.value
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(10))
+    }
+}

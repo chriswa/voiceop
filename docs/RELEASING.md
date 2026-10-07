@@ -1,6 +1,6 @@
 # Releasing
 
-How to cut a new version: a **universal** (Intel + Apple Silicon), Developer ID–signed,
+How to cut a new version: an **Apple Silicon (arm64)**, Developer ID–signed,
 Apple-notarized, stapled `.app`, published as a GitHub Release. Targets the
 latest macOS release.
 
@@ -80,7 +80,8 @@ build output, so they keep working if the app is renamed. Run them from the repo
    ```bash
    ./scripts/make-release.sh
    ```
-   It builds the universal binary, signs with Developer ID, submits to Apple, waits
+   It builds the arm64 binary (with the Kokoro server files in `Resources/kokoro`),
+   signs with Developer ID, submits to Apple, waits
    for notarization, staples, and writes the distributable zip — printing its path at
    the end (`distributable: build/…zip`).
    - **This can run for up to ~an hour and looks idle while it waits on Apple.** Run it
@@ -100,7 +101,8 @@ build output, so they keep working if the app is renamed. Run them from the repo
    NAME=$(/usr/libexec/PlistBuddy -c 'Print CFBundleName' Resources/Info.plist)
    EXE=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' Resources/Info.plist)
    APP="build/release/$NAME.app"
-   lipo -archs "$APP/Contents/MacOS/$EXE"   # expect: x86_64 arm64
+   lipo -archs "$APP/Contents/MacOS/$EXE"   # expect: arm64
+   ls "$APP/Contents/Resources/kokoro"      # expect: blocked_voices.json kokoro_server.py requirements.txt
    xcrun stapler validate "$APP"            # expect: The validate action worked!
    spctl -a -vvv -t install "$APP"          # expect: accepted / source=Notarized Developer ID
    ```
@@ -112,7 +114,7 @@ build output, so they keep working if the app is renamed. Run them from the repo
    EXE=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' Resources/Info.plist)
    VER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
    gh release create "v$VER" \
-     "build/$EXE.zip#$NAME.app (universal, notarized)" \
+     "build/$EXE.zip#$NAME.app (Apple Silicon, notarized)" \
      --repo chris-spare/voiceop \
      --target main \
      --title "$NAME v$VER" \

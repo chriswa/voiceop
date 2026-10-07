@@ -43,7 +43,7 @@ call — that was the old design and it cost 5–10 s per dictation. The connect
 process-wide and keepalive'd (`FlowChannel`); never build a channel per call.
 Every dictation logs one `trace …` line with the full phase timeline.
 
-Client is **grpc-swift 1.x**. The app targets the latest macOS release / universal.
+Client is **grpc-swift 1.x**. The app targets the latest macOS release / Apple Silicon (arm64).
 It needs Wispr's Baseten `Api-Key`, read at
 runtime from `$VOICEOP_BASETEN_KEY` or
 `~/Library/Application Support/VoiceOperator/baseten-key` (**never commit it**).
@@ -63,6 +63,10 @@ the key file above) rather than the symptom; "no Baseten key" is never normal.
 TTS base URL / Access headers: `$VOICEOP_KOKORO_URL` or
 `~/Library/Application Support/VoiceOperator/config.json` (see `Config.swift`).
 **Never commit** Cloudflare Access secrets.
+
+**Kokoro server (`kokoro/`).** The default TTS backend is a Python service in
+`kokoro/`, installed and managed by Voice Operator (Text to Speech menu). Read
+`kokoro/CLAUDE.md` before touching it; never `kill` it — use the menu's Restart.
 
 ## Building — `swift build` alone is NOT enough
 
@@ -123,7 +127,7 @@ not (a process keeps running a binary that was deleted out from under it).
 Release versions are allocated from the same counter by
 `./scripts/bump-version.sh` — see `docs/RELEASING.md`.
 
-`swift test` runs the unit tests. Notarized universal releases:
+`swift test` runs the unit tests. Notarized arm64 releases:
 `docs/RELEASING.md` / `./scripts/make-release.sh`.
 
 ## Debugging

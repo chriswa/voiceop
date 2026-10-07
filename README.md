@@ -8,12 +8,11 @@ See `DESIGN.md` for architecture, reverse-engineering findings, and the phased p
 
 ## Requirements
 
-**Runtime:** the latest macOS release, Apple Silicon or Intel. Distributable
-builds are universal (`arm64` + `x86_64`); see [`docs/RELEASING.md`](docs/RELEASING.md).
+**Runtime:** the latest macOS release on Apple Silicon (`arm64`). Intel Macs are
+not supported. See [`docs/RELEASING.md`](docs/RELEASING.md).
 
 **Building from source** still needs a full Xcode 16+ toolchain on an Apple Silicon
-Mac (Swift 6 / `swift-tools-version: 6.0`). The Intel machine never compiles —
-it receives a cross-compiled release. The Command Line Tools alone are **not**
+Mac (Swift 6 / `swift-tools-version: 6.0`). The Command Line Tools alone are **not**
 sufficient: SwiftPM invokes `xcrun --show-sdk-platform-path`, which only resolves
 inside a full Xcode installation.
 
@@ -62,16 +61,30 @@ grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
 `flow: gRPC ok — N chars` is the formatted path. `flow: no Baseten key` or
 `flow: gRPC failed (…)` means you're on the raw fallback.
 
-## TTS endpoint
+## Text to Speech
 
-Kokoro TTS defaults to `http://localhost:56841`. A GUI app launched via `open`
-does **not** inherit the shell environment, so durable overrides live in
-`~/Library/Application Support/VoiceOperator/config.json`:
+Speech goes through a Kokoro TTS server, chosen in the menu's **Text to Speech**
+submenu:
+
+- **Kokoro (This Mac)** — the default, at `http://localhost:56841`. Choose
+  **Install Kokoro…** once: Voice Operator copies the server (from `kokoro/` in this
+  repo, shipped inside the app) to Application Support, builds its Python
+  environment with [`uv`](https://docs.astral.sh/uv/) (~900 MB; install uv first with
+  `brew install uv`), and runs it as a launchd agent. The first start downloads the
+  voice model (~325 MB). The same submenu shows its status and memory, and has
+  **Update**, **Restart** and **Uninstall**. See [`kokoro/CLAUDE.md`](kokoro/CLAUDE.md).
+- **Custom Server…** — any Kokoro-compatible server (`/synthesize`, `/voices`, and
+  optionally `/timestamps` for the word overlay).
+
+The choice is stored in `~/Library/Application Support/VoiceOperator/config.json`,
+which is also where a custom server's extra headers go (a GUI app launched via
+`open` does **not** inherit the shell environment):
 
 ```json
 {
   "tts": {
-    "url": "https://tts.chriswa.com",
+    "provider": "custom",
+    "url": "https://tts.example.com",
     "headers": {
       "CF-Access-Client-Id": "…",
       "CF-Access-Client-Secret": "…"
@@ -80,14 +93,14 @@ does **not** inherit the shell environment, so durable overrides live in
 }
 ```
 
-Precedence: `$VOICEOP_KOKORO_URL` → `config.json` → localhost. The `headers`
-block is for Cloudflare Access service tokens on a remote TTS host — without
-them the app would follow Access's login redirect and try to play HTML as audio
-(guarded against, but speech still fails).
+`$VOICEOP_KOKORO_URL` overrides the URL either way. The `headers` block is for
+Cloudflare Access service tokens on a remote TTS host — without them the app would
+follow Access's login redirect and try to play HTML as audio (guarded against, but
+speech still fails).
 
 ## Install
 
-Runs on the **latest macOS release**, on both Apple Silicon and Intel Macs.
+Runs on the **latest macOS release** on Apple Silicon Macs.
 
 1. Download `VoiceOperator.zip` from the [latest release](../../releases/latest).
 2. Unzip it and drag **Voice Operator.app** into `/Applications`.
@@ -104,7 +117,7 @@ swift test                  # unit tests
 open "build/Voice Operator.app"
 ```
 
-For a notarized universal release binary, see [`docs/RELEASING.md`](docs/RELEASING.md)
+For a notarized release binary, see [`docs/RELEASING.md`](docs/RELEASING.md)
 (`./scripts/make-release.sh`).
 
 ### Iterating on changes

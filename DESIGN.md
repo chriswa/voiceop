@@ -577,7 +577,22 @@ client fully contained.
 The app synthesizes speech through a local Kokoro server (`KokoroSynthesizer`), replacing
 the earlier Cartesia integration (removed 2026-07-09 when the Cartesia quota ran out; recover
 it from git history if ever needed). It's a plain, self-documented HTTP service — no API key,
-no reverse-engineering:
+no reverse-engineering. The server itself lives in this repo under `kokoro/` (merged from the
+old `tts` repo with its history, 2026-10-07; see `kokoro/CLAUDE.md`).
+
+**Provider and service (2026-10-07).** The menu's **Text to Speech** submenu picks a
+`TTSProvider`: `.kokoroLocal` (default, `localhost:56841`) or `.custom(url)` — any
+Kokoro-compatible server; another engine would join as a new case with its own
+`SpeechSynthesizer`. The choice is `config.json` `tts.provider` (a file with only `tts.url`
+still means that server), and `AudioCache` keys carry the provider so a switch never replays
+the other server's audio. The local server is installed and run by `KokoroService`: the
+server files ship in `Contents/Resources/kokoro`, Install builds a Python 3.13 venv with `uv`
+in Application Support and bootstraps one launchd agent (`com.chriswa.voiceoperator.kokoro`,
+`KeepAlive`, no scheduled restart), retiring a hand-made `~/tts` agent only once the new venv
+is built and restoring it if the new server never answers. Anything that stops the server
+waits until nothing is dictated or spoken. `/health` reports the server's physical footprint
+(`memory_mb`), shown under the submenu's status line — the guard against the MPS leak the old
+02:00 restart existed for.
 
 - `POST {base}/synthesize`, `Content-Type: application/json`,
   body `{ "text": <string ≤5000>, "voice": <voice id>, "speed": <0.5–2.0, default 1.2> }`.

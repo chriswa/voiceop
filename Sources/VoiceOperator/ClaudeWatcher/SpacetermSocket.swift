@@ -6,9 +6,33 @@ enum SpacetermSocket {
         let dir = ProcessInfo.processInfo.environment["SPACETERM_HOME"] ?? (NSHomeDirectory() as NSString).appendingPathComponent(".spaceterm")
         return (dir as NSString).appendingPathComponent("hooks.sock")
     }
+    /// Serial, so messages leave in the order they were sent.
     private static let queue = DispatchQueue(label: "com.voiceop.spaceterm-socket")
+    /// Names this process to Spaceterm, which starts counting `dictationSeq` again when it changes.
+    private static let launch = UUID().uuidString
+    /// Touched only on `queue`.
+    nonisolated(unsafe) private static var dictationSeq = 0
+
     static func voiceCommand(_ text: String, completion: @escaping @Sendable (Bool) -> Void) {
-        guard let payload = try? JSONSerialization.data(withJSONObject: ["type": "voice-command", "text": text]) else { completion(false); return }
+        send(["type": "voice-command", "text": text], completion: completion)
+    }
+
+    /// Tell Spaceterm a dictation started or ended, so Control neither speaks
+    /// nor prepares anything to say while the user is talking. Sent `false` at
+    /// launch too, which clears a dictation an earlier process never ended.
+    /// Each report is numbered: they travel on separate connections, and
+    /// Spaceterm drops one older than a report it already has.
+    static func dictation(active: Bool) {
+        queue.async {
+            dictationSeq += 1
+            send(["type": "voice-dictation", "active": active, "launch": launch, "seq": dictationSeq]) { ok in
+                if !ok { Log.log("spaceterm: could not report dictation \(active ? "started" : "ended")") }
+            }
+        }
+    }
+
+    private static func send(_ message: [String: Any], completion: @escaping @Sendable (Bool) -> Void) {
+        guard let payload = try? JSONSerialization.data(withJSONObject: message) else { completion(false); return }
         queue.async {
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
             guard fd >= 0 else { completion(false); return }

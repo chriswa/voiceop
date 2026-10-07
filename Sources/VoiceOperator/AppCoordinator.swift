@@ -25,8 +25,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         arbiter.onTranscriptStyle = { [weak self] in self?.menuBar.update(style: $0) }
         arbiter.onStreamHealth = { [weak self] in self?.menuBar.update(streamHealth: $0) }
         arbiter.onHistoryChanged = { [weak self] in self?.menuBar.refreshHistory() }
-        arbiter.onDictationBegan = { Task { await SpeechJobManager.shared.beginDictation() } }
+        SpacetermSocket.dictation(active: false)
+        arbiter.onDictationBegan = {
+            SpacetermSocket.dictation(active: true)
+            Task { await SpeechJobManager.shared.beginDictation() }
+        }
         arbiter.onDictationEnded = { [weak self] in
+            SpacetermSocket.dictation(active: false)
             Task { await SpeechJobManager.shared.endDictation() }
             // A restart asked for mid-dictation has been waiting for exactly this.
             self?.restart.attempt()

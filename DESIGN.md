@@ -146,7 +146,9 @@ as each dictation starts and ends (and `false` at launch). Spaceterm is the one
 client today: it registers as `spaceterm` with its `hooks.sock` and owns what a
 command means. With nobody registered for commands — or the socket unreachable —
 the command transcription is recorded and the unrecognized/error cue plays. Clipboard speech and clipboard summarization remain user-facing tools;
-the latter is an independent Haiku clipboard utility, not transcript tracking.
+the latter is an independent Haiku clipboard utility, not transcript tracking. It asks Haiku
+through `claude-print-daemon` (chriswa-devkit `tools/`, found on the interactive shell's PATH),
+which runs the signed-in Claude Code; Voice Operator reads no Claude credentials itself.
 
 **Which mode, and when it is decided.** Capture starts the instant Fn goes down,
 so the mode cannot be read off the Control flag at that one moment: a Ctrl+Fn
@@ -711,49 +713,10 @@ graph in offline rendering mode, including live rate changes and cross-sentence 
 
 ## Voice commands (command mode)
 
-Command mode (hold **Ctrl** with the dictation trigger) routes the transcript to
-`AppCoordinator.handleVoiceCommand` instead of pasting it. Recognition is a
-hand-written tokenizer (not an LLM classifier). Grammar is **name-first** — an
-optional leading call-sign, then either a reserved word or free text:
-
-    [name] repeat | focus | skip        (a lone reserved word)
-    [name] <anything else>              (free text → an aside)
-
-| Command | Example | Effect |
-|---|---|---|
-| `[name]` | `Apollo` | raise the agent's spaceterm surface (a lone `focus` does the same) |
-| `[name] repeat` | `Apollo repeat` | replay the agent's latest update (free, from cache) |
-| `[name] <message>` | `Apollo what was that second file?` | an **aside**: question the summarizer — a multi-turn Haiku call over the original context + what was spoken + the running aside thread (`ClaudeSummarizer.ask`). Use it to go deeper too, e.g. `Apollo, more detail` |
-| `skip` | `skip` | global: drop the clip playing now so playback advances |
-
-Rules:
-- **Name = a known call-sign.** The first token is a name only if it resolves to a
-  currently-active agent (`registry.claudeSession(forName:)`, homophones included).
-  Otherwise there is no name and the whole utterance targets the **last-referenced**
-  session (the last agent that spoke). `skip` is global and ignores any name.
-- **Bare call-sign = focus.** A name with nothing after it (`"Apollo"`) raises its
-  surface — the quickest way to focus. `focus` remains as an explicit synonym.
-- **Everything that isn't `repeat`/`focus`/`skip` is an aside.** A lone reserved
-  word is that command; any other words (with or without a leading name) are sent
-  as a free-text question to the summarizer. So `Apollo <question>` asks about
-  Apollo's latest update, and a nameless `<question>` asks about the last agent's.
-- **Free-text payload.** The aside message is taken from the *original* transcript
-  (casing/punctuation preserved), with the leading call-sign — if any — dropped.
-- **`aside` behaviour.** It's a genuine back-and-forth that MAY repeat on request,
-  go deeper, or answer a specific question — asking it for "more detail" subsumes
-  the old dedicated `more details` verb. Each aside is stored on the target
-  `TTSHistoryEntry` (`asks`: alternating user/assistant `Turn`s) and is spoken as a
-  new entry, so asides / `repeat` chain off the answer.
-- **Asides are read-only.** They question the low-context Haiku summarizer, which
-  only knows the turn it summarized — they do *not* reach the real Claude Code
-  session. A future **`send`** verb (not yet built) is reserved for pushing a
-  message into the canonical session via spaceterm.
-- **Unrecognized** only when there's nothing to act on — an empty transcript, or an
-  aside/command with no target (unknown name and no last agent). Those play the
-  `unrecognized` cue and are not pasted.
-
-New argument-taking commands should keep this `[name] <verb> [args]` shape so the
-optional-name peel and last-referenced fallback apply uniformly.
+Superseded (2026-10-09). The name-first grammar, call-signs, `repeat`/`focus`/`skip`
+and Haiku "asides" left with transcript tracking; Voice Operator no longer interprets
+commands at all. Ctrl+Fn hands the verbatim transcription to the registered command
+client; see **Dictation and command mode** above.
 
 ---
 

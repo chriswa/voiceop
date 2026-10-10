@@ -161,9 +161,8 @@ Two modes, chosen by whether **Control** is held when you start:
 - **Fn (🌐)** → **paste** mode (icon turns **red**). The transcript is pasted
   verbatim — no voice-tool interpretation.
 - **Ctrl+Fn** → **command** mode (icon turns **magenta**). The transcript is run
-  through the voice-tool router *only* (never pasted). A distinct start/stop
-  chirp signals command mode; a "sad" chirp means no tool matched (transcript
-  dropped).
+  to the app registered for commands (never pasted; see below). A distinct
+  start/stop chirp signals command mode; a "sad" chirp means nobody took it.
 
 Each mode supports **hold** (push-to-talk) and **double-tap** (hands-free; next
 press stops).
@@ -173,24 +172,10 @@ also trigger emoji/dictation/input-switching.
 
 ## Voice commands (command mode — Ctrl+Fn)
 
-In command mode, **say the agent's name first**, then either a reserved word or
-your message. The leading word counts as a name only if it's a currently-active
-call-sign (homophones resolve, e.g. "Amber" → Ember); otherwise there's no name
-and your words target the **last-referenced** agent — the last one that spoke or
-that a command last acted on.
-
-- **"⟨name⟩"** — raise that Claude surface in spaceterm. (A lone **"focus"** does
-  the same for the last agent.)
-- **"⟨name⟩ repeat"** — replay that surface's latest update (free, from cache).
-- **"⟨name⟩ ⟨message⟩"** — anything that isn't `repeat`/`focus`/`skip` is an
-  *aside*: a spoken question about that update, in a continuing conversation (it
-  may repeat or go deeper — e.g. "⟨name⟩, give me more detail"). Read-only: it
-  talks only to the low-context Haiku summarizer, not the real Claude session.
-  With no name, the question goes to the last agent.
-- **"skip"** — global; drop the clip playing now so playback advances.
-
-The menu-bar **Recent Updates → ⟨entry⟩** submenu offers **Replay** and
-**Focus** for the same actions by click.
+Voice Operator doesn't interpret commands itself. The verbatim transcription goes
+to whichever local app registered for commands (Spaceterm today), which decides
+what it means; with none registered, the error chirp plays. See `DESIGN.md`,
+"Dictation and command mode".
 
 ## Global shortcuts
 
@@ -199,6 +184,7 @@ Fire from any app (they run off the CGEvent tap, so no window focus needed):
 - **⌘⌃V** — re-paste the last text Voice Operator pasted, into the frontmost app.
 - **⌘⌃S** — speak the clipboard aloud; press again to stop.
 - **⌘⌃A** — replace the clipboard with a one- or two-sentence Haiku summary of it.
+  Needs chriswa-devkit's `claude-print-daemon` on your shell's PATH and Claude Code signed in.
 - **⌘⌃B** — mute or unmute narration (same as the menu-bar **Mute Speech** item).
 - **⌘⌃/** — move the word overlay: bottom → lower middle → middle → upper
   middle → top → hidden → bottom. Saved between

@@ -195,7 +195,7 @@ enum DebugCLI {
         }
     }
 
-    /// Summarize a small synthetic turn via Haiku (Keychain OAuth). One request.
+    /// Summarize a small synthetic turn via Haiku (claude-print-daemon). One request.
     static func runSummarizeTest() async {
         let summary = await ClaudeSummarizer.summarizeText("I added exponential backoff with three retries to the uploader and a unit test covering the failure path. All tests pass.")
         print("summary: \(summary ?? "(failed)")")

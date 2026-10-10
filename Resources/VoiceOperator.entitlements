@@ -5,7 +5,7 @@
     <!-- Required for microphone capture under a hardened/ad-hoc signature. -->
     <key>com.apple.security.device.audio-input</key>
     <true/>
-    <!-- Outbound HTTPS (Wispr STT, Kokoro TTS, Anthropic). Required under a
+    <!-- Outbound HTTPS (Wispr STT, Kokoro TTS). Required under a
          hardened runtime; harmless otherwise. -->
     <key>com.apple.security.network.client</key>
     <true/>

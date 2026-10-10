@@ -18,6 +18,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     /// stops the server waits until nothing is being dictated or spoken.
     private lazy var kokoro = KokoroService(
         isBusy: { [unowned self] in self.arbiter.isDictating || self.arbiter.isSpeaking })
+    private let kokoroSetup = KokoroSetupWindow()
+    /// What the setup window last showed, so a later health change doesn't
+    /// re-open a window the user closed.
+    private var kokoroSetupShown: KokoroService.Phase?
     private var currentStatus: OperatorStatus = .idle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -187,27 +191,32 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     /// The Text to Speech submenu: provider choice plus the Kokoro service.
     private func wireTextToSpeechMenu() {
-        kokoro.onChange = { [weak self] in self?.menuBar.refreshTTSMenu() }
+        kokoro.onChange = { [weak self] in
+            self?.menuBar.refreshTTSMenu()
+            self?.updateKokoroSetupWindow()
+        }
+        kokoroSetup.onCancel = { [unowned self] in kokoro.cancel() }
+        kokoroSetup.onShowLog = { [unowned self] in menuBar.onShowKokoroLog?() }
+        kokoroSetup.detailProvider = { [unowned self] in kokoro.lastLogLine() }
         menuBar.ttsMenuState = { [unowned self] in
             TTSMenuState.make(provider: Config.ttsProvider, phase: kokoro.phase,
-                              installed: kokoro.isInstalled, legacyInstalled: kokoro.legacyInstalled,
+                              installed: kokoro.isInstalled,
                               updateAvailable: kokoro.updateAvailable, canCancel: kokoro.canCancel,
                               health: kokoro.health)
         }
         menuBar.onTTSMenuOpened = { [unowned self] in
             Task { await kokoro.refreshHealth(); menuBar.refreshTTSMenu() }
         }
-        menuBar.onSelectLocalTTS = { [unowned self] in setTTSProvider(.kokoroLocal) }
+        menuBar.onSelectLocalTTS = { [unowned self] in
+            setTTSProvider(.kokoroLocal)
+            kokoro.autoStart(provider: .kokoroLocal)
+        }
         menuBar.onChooseCustomTTS = { [unowned self] in
             let current: String? = if case .custom(let url) = Config.ttsProvider { url } else { Config.load().tts?.url }
             guard let url = TTSDialogs.customServerURL(current: current) else { return }
             setTTSProvider(.custom(url: url))
         }
-        menuBar.onInstallKokoro = { [unowned self] in
-            guard KokoroService.findUV() != nil else { TTSDialogs.showUVMissing(); return }
-            guard TTSDialogs.confirmInstall(replacingLegacy: kokoro.legacyInstalled) else { return }
-            kokoro.install()
-        }
+        menuBar.onInstallKokoro = { [unowned self] in kokoro.install() }
         menuBar.onCancelKokoroInstall = { [unowned self] in kokoro.cancel() }
         menuBar.onUpdateKokoro = { [unowned self] in kokoro.update() }
         menuBar.onRestartKokoro = { [unowned self] in kokoro.restart() }
@@ -222,6 +231,24 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 return
             }
             NSWorkspace.shared.open(log)
+        }
+        // No prompt: install (or update) on its own, with the setup window up.
+        kokoro.autoStart(provider: Config.ttsProvider)
+    }
+
+    /// The setup window follows installs only; the menu's status line covers
+    /// the quick actions (restart, update, uninstall).
+    private func updateKokoroSetupWindow() {
+        guard kokoro.action == .install else { return }
+        if case .working = kokoro.phase {} else if kokoro.phase == kokoroSetupShown { return }
+        kokoroSetupShown = kokoro.phase
+        switch kokoro.phase {
+        case .working(let step):
+            kokoroSetup.show(.working(step: step, progress: kokoro.progress ?? 0, cancellable: kokoro.canCancel))
+        case .idle:
+            kokoroSetup.show(.done)
+        case .failed(let reason):
+            kokoroSetup.show(.failed(reason))
         }
     }
 

@@ -11,17 +11,27 @@ merge into this repo). The Swift side that talks to it is
 
 ## Installed and managed by Voice Operator
 
-Users never set this up by hand. The **Text to Speech** submenu (Install / Update /
-Restart / Uninstall / Show Kokoro Log) drives `KokoroService`:
+Users never set this up by hand. `KokoroService` does it, with no prompt: at
+launch, when speech is set to the local Kokoro and nothing is installed, it installs
+(a small setup window shows progress); when the app ships a different server than
+the installed one, it updates. The **Text to Speech** submenu (Install / Update /
+Restart / Uninstall / Show Kokoro Log) does the same on demand. An Uninstall is
+remembered (`KokoroAutoInstallDeclined` in the app's defaults) so the next launch
+doesn't undo it; choosing Install clears it.
 
 - **Source of truth is this folder.** `make-app.sh` / `make-release.sh` copy
   `kokoro_server.py`, `requirements.txt` and `blocked_voices.json` into
   `Voice Operator.app/Contents/Resources/kokoro/`. Install copies them from there.
-  An edit here reaches the installed server only via a rebuilt app + **Update Kokoro**.
+  An edit here reaches the installed server when the rebuilt app next launches
+  (automatic update) or via **Update Kokoro**.
 - **Installed at** `~/Library/Application Support/VoiceOperator/kokoro/`: the
   server, `requirements.txt`, `blocked_voices.json` (seeded once, never
-  overwritten — it is runtime state), and `venv/` (Python 3.13, built by `uv`
-  from `requirements.txt`, ~900 MB).
+  overwritten — it is runtime state), `venv/` (built by `uv` from
+  `requirements.txt`, ~900 MB), `python/` (the uv-managed CPython 3.13 the venv
+  links to — `--managed-python` + `UV_PYTHON_INSTALL_DIR`, so nothing outside can
+  upgrade it away) and, only on a Mac without its own `uv`, `uv/uv` (a pinned uv
+  release fetched from GitHub and checked against its SHA-256 —
+  `KokoroService.uvURL` / `uvSHA256`). Uninstall removes the whole folder.
 - **One launchd agent**, `com.chriswa.voiceoperator.kokoro`
   (`~/Library/LaunchAgents/com.chriswa.voiceoperator.kokoro.plist`, written by the
   app): `RunAtLoad` + `KeepAlive`, `ThrottleInterval 10`. There is **no** scheduled
@@ -40,12 +50,8 @@ curl -s localhost:56841/health   # → {"status":"ok",...,"pid":…,"memory_mb":
 tail -f ~/Library/Logs/VoiceOperator-kokoro.log
 ```
 
-**Migrating an old hand-made setup.** Before the merge this ran from a `~/tts`
-checkout under `com.chriswa.kokoro-tts` (+ a `com.chriswa.kokoro-tts-restart` 02:00
-agent). Install retires those: after the new venv is built it boots them out and
-moves their plists to `~/Library/Application Support/VoiceOperator/legacy-kokoro-launchagents/`
-(never deleting them, never touching `~/tts`); if the new server fails to come up
-it puts them back.
+If anything else holds port 56841, Install stops and says what (it never stops
+another server).
 
 ---
 

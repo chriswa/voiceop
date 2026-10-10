@@ -66,13 +66,15 @@ grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
 Speech goes through a Kokoro TTS server, chosen in the menu's **Text to Speech**
 submenu:
 
-- **Kokoro (This Mac)** — the default, at `http://127.0.0.1:56841`. Choose
-  **Install Kokoro…** once: Voice Operator copies the server (from `kokoro/` in this
-  repo, shipped inside the app) to Application Support, builds its Python
-  environment with [`uv`](https://docs.astral.sh/uv/) (~900 MB; install uv first with
-  `brew install uv`), and runs it as a launchd agent. The first start downloads the
-  voice model (~325 MB). The same submenu shows its status and memory, and has
-  **Update**, **Restart** and **Uninstall**. See [`kokoro/CLAUDE.md`](kokoro/CLAUDE.md).
+- **Kokoro (This Mac)** — the default, at `http://127.0.0.1:56841`. Nothing to set
+  up: on first launch Voice Operator installs it by itself, with a progress window —
+  it copies the server (from `kokoro/` in this repo, shipped inside the app) to
+  Application Support, builds its Python environment with
+  [`uv`](https://docs.astral.sh/uv/) (downloading uv and Python if the Mac has
+  neither; ~900 MB in all), and runs it as a launchd agent. The first start
+  downloads the voice model (~325 MB). The submenu shows its status and memory,
+  and has **Install**, **Update**, **Restart** and **Uninstall**. See
+  [`kokoro/CLAUDE.md`](kokoro/CLAUDE.md).
 - **Custom Server…** — any Kokoro-compatible server (`/synthesize`, `/voices`, and
   optionally `/timestamps` for the word overlay).
 

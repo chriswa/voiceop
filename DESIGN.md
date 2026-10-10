@@ -586,10 +586,12 @@ Kokoro-compatible server; another engine would join as a new case with its own
 `SpeechSynthesizer`. The choice is `config.json` `tts.provider` (a file with only `tts.url`
 still means that server), and `AudioCache` keys carry the provider so a switch never replays
 the other server's audio. The local server is installed and run by `KokoroService`: the
-server files ship in `Contents/Resources/kokoro`, Install builds a Python 3.13 venv with `uv`
-in Application Support and bootstraps one launchd agent (`com.chriswa.voiceoperator.kokoro`,
-`KeepAlive`, no scheduled restart), retiring a hand-made `~/tts` agent only once the new venv
-is built and restoring it if the new server never answers. Anything that stops the server
+server files ship in `Contents/Resources/kokoro`, Install builds a venv on a private
+uv-managed Python 3.13 in Application Support (using the Mac's `uv`, or a pinned, checksummed
+download) and bootstraps one launchd agent (`com.chriswa.voiceoperator.kokoro`, `KeepAlive`,
+no scheduled restart). It runs unprompted: installed at launch when missing (unless the user
+uninstalled it), updated when the app ships a different server, with a setup window showing
+progress. The app is self-contained — no other checkout is involved. Anything that stops the server
 waits until nothing is dictated or spoken. `/health` reports the server's physical footprint
 (`memory_mb`), shown under the submenu's status line — the guard against the MPS leak the old
 02:00 restart existed for.

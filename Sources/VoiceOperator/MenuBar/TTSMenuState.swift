@@ -24,7 +24,6 @@ struct TTSMenuState: Equatable {
     static func make(provider: TTSProvider,
                      phase: KokoroService.Phase,
                      installed: Bool,
-                     legacyInstalled: Bool,
                      updateAvailable: Bool,
                      canCancel: Bool,
                      health: KokoroService.Health?) -> TTSMenuState {
@@ -43,9 +42,7 @@ struct TTSMenuState: Equatable {
             if !local {
                 status = "Speaking through \(provider.summary)"
             } else if health != nil {
-                status = installed ? "Kokoro: running"
-                    : legacyInstalled ? "Kokoro: running (old ~/tts setup — Install to replace it)"
-                    : "Kokoro: running (not installed by Voice Operator)"
+                status = installed ? "Kokoro: running" : "Kokoro: running (not installed by Voice Operator)"
             } else {
                 status = installed ? "⚠︎ Kokoro: not responding" : "⚠︎ Kokoro: not installed — speech is off"
             }

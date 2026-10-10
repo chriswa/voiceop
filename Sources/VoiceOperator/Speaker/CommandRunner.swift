@@ -13,22 +13,28 @@ protocol CommandRunner: Sendable {
     /// Run `executable` with `arguments` and wait for it to exit, returning its
     /// combined stdout/stderr. When `logTo` is given, output is also appended
     /// there as it arrives, so a minutes-long `uv pip install` can be followed
-    /// live. Cancelling the calling task terminates the process.
-    func run(_ executable: String, _ arguments: [String], logTo: URL?) async throws -> CommandResult
+    /// live. `environment` entries are added to (or override) this process's
+    /// own. Cancelling the calling task terminates the process.
+    func run(_ executable: String, _ arguments: [String], environment: [String: String],
+             logTo: URL?) async throws -> CommandResult
 }
 
 extension CommandRunner {
-    func run(_ executable: String, _ arguments: [String]) async throws -> CommandResult {
-        try await run(executable, arguments, logTo: nil)
+    func run(_ executable: String, _ arguments: [String], logTo: URL? = nil) async throws -> CommandResult {
+        try await run(executable, arguments, environment: [:], logTo: logTo)
     }
 }
 
 /// The real thing, over `Process`.
 struct ProcessRunner: CommandRunner {
-    func run(_ executable: String, _ arguments: [String], logTo: URL?) async throws -> CommandResult {
+    func run(_ executable: String, _ arguments: [String], environment: [String: String],
+             logTo: URL?) async throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        if !environment.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment.merging(environment) { $1 }
+        }
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe

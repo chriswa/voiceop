@@ -106,9 +106,9 @@ final class TTSProviderTests: XCTestCase {
 
 final class TTSMenuStateTests: XCTestCase {
     private func make(provider: TTSProvider = .kokoroLocal, phase: KokoroService.Phase = .idle,
-                      installed: Bool = true, legacy: Bool = false, update: Bool = false,
+                      installed: Bool = true, update: Bool = false,
                       canCancel: Bool = false, health: KokoroService.Health? = .init(memoryMB: 1843, pid: 1)) -> TTSMenuState {
-        TTSMenuState.make(provider: provider, phase: phase, installed: installed, legacyInstalled: legacy,
+        TTSMenuState.make(provider: provider, phase: phase, installed: installed,
                           updateAvailable: update, canCancel: canCancel, health: health)
     }
 
@@ -131,12 +131,12 @@ final class TTSMenuStateTests: XCTestCase {
         XCTAssertNil(state.memory)
     }
 
-    func testLegacyServerIsRunningButOffersInstall() {
-        let state = make(installed: false, legacy: true, health: .init(memoryMB: nil, pid: nil))
+    func testSomeoneElsesServerIsRunningButOffersInstall() {
+        let state = make(installed: false, health: .init(memoryMB: nil, pid: nil))
         XCTAssertFalse(state.isWarning)
-        XCTAssertTrue(state.status.contains("~/tts"))
+        XCTAssertEqual(state.status, "Kokoro: running (not installed by Voice Operator)")
         XCTAssertEqual(state.install, .install)
-        XCTAssertNil(state.memory, "the old server doesn't report memory")
+        XCTAssertNil(state.memory, "a server without memory_mb shows no memory line")
     }
 
     func testInstalledButNotAnsweringIsAWarning() {

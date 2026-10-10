@@ -287,6 +287,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         outputWatcher.stop()
         arbiter.prepareForTermination()
         speechService.stop()
+        Log.log("quit: teardown finished")
     }
 
     private func routeCommand(_ text: String, context: DictationContext) {

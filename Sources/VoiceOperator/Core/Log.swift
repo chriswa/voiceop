@@ -5,6 +5,11 @@ import Foundation
 /// the unified log). Also mirrors to stderr for `swift run`.
 enum Log {
     static let fileURL: URL = {
+        // Under `swift test`, keep test noise out of the user's real log: it is
+        // what gets read when diagnosing the running app.
+        if NSClassFromString("XCTestCase") != nil {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("VoiceOperator-tests.log")
+        }
         let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

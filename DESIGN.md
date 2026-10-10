@@ -122,17 +122,30 @@ immediately halts/cancels every live or queued job; new queue attempts receive
 ### Dictation and command mode
 
 Fn dictation still transcribes and pastes into the frontmost app. Ctrl+Fn is
-command mode: the app identity is captured when recording stops. If it is
-Spaceterm (`com.spaceterm.app`), Voice Operator sends the verbatim transcription
-as newline-delimited JSON to `~/.spaceterm/hooks.sock`:
+command mode: the verbatim transcription goes, as newline-delimited JSON, to the
+Unix socket of whichever local client registered for commands (latest
+registration wins):
 
 ```json
 {"type":"voice-command","text":"<transcription>"}
 ```
 
-Spaceterm owns the meaning of that event. Any other focused app records the
-command transcription but plays the unrecognized/error cue and performs no
-action. Clipboard speech and clipboard summarization remain user-facing tools;
+**Voice Operator knows no client by name** (2026-10-09). A client registers
+itself over the loopback API and the registration is saved in
+`subscribers.json` (Application Support), so it outlives restarts of either side;
+the client re-registers whenever it starts, which keeps its socket path current:
+
+```
+PUT    /v1/subscribers/<name>   {"socket": "/abs/path.sock", "commands": true, "events": ["dictation"]}
+DELETE /v1/subscribers/<name>
+GET    /v1/subscribers
+```
+
+`events: ["dictation"]` adds `{"type":"voice-dictation","active":…,"launch":…,"seq":…}`
+as each dictation starts and ends (and `false` at launch). Spaceterm is the one
+client today: it registers as `spaceterm` with its `hooks.sock` and owns what a
+command means. With nobody registered for commands — or the socket unreachable —
+the command transcription is recorded and the unrecognized/error cue plays. Clipboard speech and clipboard summarization remain user-facing tools;
 the latter is an independent Haiku clipboard utility, not transcript tracking.
 
 **Which mode, and when it is decided.** Capture starts the instant Fn goes down,

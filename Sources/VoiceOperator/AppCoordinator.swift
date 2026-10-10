@@ -33,13 +33,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         arbiter.onTranscriptStyle = { [weak self] in self?.menuBar.update(style: $0) }
         arbiter.onStreamHealth = { [weak self] in self?.menuBar.update(streamHealth: $0) }
         arbiter.onHistoryChanged = { [weak self] in self?.menuBar.refreshHistory() }
-        SpacetermSocket.dictation(active: false)
+        SubscriberSocket.dictation(active: false)
         arbiter.onDictationBegan = {
-            SpacetermSocket.dictation(active: true)
+            SubscriberSocket.dictation(active: true)
             Task { await SpeechJobManager.shared.beginDictation() }
         }
         arbiter.onDictationEnded = { [weak self] in
-            SpacetermSocket.dictation(active: false)
+            SubscriberSocket.dictation(active: false)
             Task { await SpeechJobManager.shared.endDictation() }
             // A restart asked for mid-dictation has been waiting for exactly this.
             self?.restart.attempt()
@@ -291,9 +291,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     private func routeCommand(_ text: String, context: DictationContext) {
         Log.log("command: captured frontmost bundleID=\(context.bundleIdentifier ?? "(none)")")
-        Log.log("command: forwarding \(text.count)-char transcript to Spaceterm")
-        SpacetermSocket.voiceCommand(text) { ok in
-            guard !ok else { return }
+        SubscriberSocket.voiceCommand(text) { delivered, route in
+            Log.log(route.map { "command: \(text.count)-char transcript to \($0) — \(delivered ? "delivered" : "unreachable")" }
+                    ?? "command: no subscriber takes commands (PUT /v1/subscribers/<name>)")
+            guard !delivered else { return }
             Task { @MainActor in SoundEffect.unrecognized.play() }
         }
     }

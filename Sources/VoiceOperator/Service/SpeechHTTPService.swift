@@ -17,8 +17,10 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// `watch` again (Spaceterm's "over and out" is gone); 11 added
     /// `match=speech` on `/v1/wake-word`; 12 made `/v1/voices` name the
     /// provider the Text to Speech menu chose (`kokoro` or `custom`) and its
-    /// default voice, instead of a fixed `kokoro` / `af_heart`.
-    static let discoveryVersion = 12
+    /// default voice, instead of a fixed `kokoro` / `af_heart`; 13 added
+    /// `/v1/subscribers` — clients register their own socket for command
+    /// dictations and dictation start/end events (see `Subscriber`).
+    static let discoveryVersion = 13
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -139,6 +141,11 @@ final class SpeechHTTPService: @unchecked Sendable {
         if let route = TranscriptionRoute(method: r.method, path: r.path) {
             return await handle(route, body: r.body)
         }
+        // Clients register themselves for command dictations and dictation
+        // events; Voice Operator knows none of them by name. See `Subscriber`.
+        if r.path == "/v1/subscribers" || r.path.hasPrefix("/v1/subscribers/") {
+            return handleSubscribers(r)
+        }
         // Hands-free: does this short clip start with the wake word (`match=start`)
         // or is it the word alone (`match=only`, the default)? Raw s16le mono
         // PCM in, `?word=control&sample_rate=16000`. On-device only — see
@@ -233,6 +240,33 @@ final class SpeechHTTPService: @unchecked Sendable {
         }
         return .init(status: 405, object: ["error": "method_not_allowed"])
     }
+    private func handleSubscribers(_ r: Request) -> Response {
+        let registry = SubscriberRegistry.shared
+        let name = String(r.path.dropFirst("/v1/subscribers".count).drop { $0 == "/" })
+        switch (r.method, name.isEmpty) {
+        case ("GET", true):
+            return .init(status: 200, object: ["subscribers": registry.all.map(\.object)])
+        case ("PUT", false):
+            switch Subscriber.parse(name: name, body: r.body) {
+            case .failure(let rejection): return .init(status: 400, object: rejection.object)
+            case .success(let subscriber):
+                do { try registry.register(subscriber) } catch {
+                    return .init(status: 500, object: ["error": "not_saved", "detail": "\(error)"])
+                }
+                return .init(status: 200, object: subscriber.object)
+            }
+        case ("DELETE", false):
+            do {
+                return try registry.unregister(name) ? .init(status: 204, object: nil)
+                    : .init(status: 404, object: ["error": "unknown_subscriber"])
+            } catch {
+                return .init(status: 500, object: ["error": "not_saved", "detail": "\(error)"])
+            }
+        default:
+            return .init(status: 405, object: ["error": "method_not_allowed"])
+        }
+    }
+
     /// `words` for a timed `/v1/synthesize`: Kokoro times the prepared text, and
     /// each word is mapped back to where it ends in the text as sent — a spoken
     /// "slash" ends just past the `/` it stands for.

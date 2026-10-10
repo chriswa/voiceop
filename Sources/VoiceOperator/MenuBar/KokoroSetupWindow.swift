@@ -21,6 +21,8 @@ final class KokoroSetupWindow: NSObject, NSWindowDelegate {
     private let primary = NSButton(title: "Hide", target: nil, action: nil)
     private let secondary = NSButton(title: "Cancel", target: nil, action: nil)
     private var timer: Timer?
+    /// Fixed: the log line changes twice a second and must never resize the window.
+    private static let width: CGFloat = 440
     private var hiddenByUser = false
 
     enum State: Equatable {
@@ -63,6 +65,9 @@ final class KokoroSetupWindow: NSObject, NSWindowDelegate {
         panel?.orderFrontRegardless()
     }
 
+    /// The window's current width, nil when it isn't up (tests).
+    var currentWidth: CGFloat? { panel?.frame.width }
+
     @objc func close() {
         stopPolling()
         panel?.orderOut(nil)
@@ -100,7 +105,7 @@ final class KokoroSetupWindow: NSObject, NSWindowDelegate {
 
     private func ensurePanel() {
         guard panel == nil else { return }
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 150),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 150),
                             styleMask: [.titled, .closable, .utilityWindow],
                             backing: .buffered, defer: false)
         panel.title = "Voice Operator"
@@ -110,10 +115,18 @@ final class KokoroSetupWindow: NSObject, NSWindowDelegate {
         panel.delegate = self
 
         title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.lineBreakMode = .byTruncatingTail
+        title.lineBreakMode = .byWordWrapping
+        title.maximumNumberOfLines = 2
         detail.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingMiddle
+        detail.maximumNumberOfLines = 1
+        // Long text truncates or wraps inside the fixed width instead of
+        // pushing the window wider.
+        for label in [title, detail] {
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            label.preferredMaxLayoutWidth = Self.width - 40
+        }
         bar.style = .bar
         bar.minValue = 0; bar.maxValue = 1
         for button in [primary, secondary] { button.target = self; button.bezelStyle = .rounded }
@@ -130,6 +143,7 @@ final class KokoroSetupWindow: NSObject, NSWindowDelegate {
         panel.contentView = NSView()
         panel.contentView!.addSubview(stack)
         NSLayoutConstraint.activate([
+            panel.contentView!.widthAnchor.constraint(equalToConstant: Self.width),
             stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor),
             stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor),

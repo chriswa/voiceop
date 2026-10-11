@@ -230,20 +230,23 @@ actor SpeechJobManager {
     /// A job's result with `character_offset` at word resolution while it is
     /// the one speaking: how far into the current sentence the voice has got,
     /// by the narration's word timings, instead of the end of the last
-    /// sentence that finished. Never less than that sentence-level offset. A
-    /// client that decides mid-speech what is still to come — Spaceterm's
-    /// receptionist, weighing whether news should cut in — needs to know where
-    /// the voice is now, not where it was at the last full stop.
+    /// sentence that finished. A client that decides mid-speech what is still
+    /// to come — Spaceterm's receptionist, weighing whether news should cut
+    /// in, and lighting its transcript up to the word being said — needs to
+    /// know where the voice is now, not where it was at the last full stop.
+    ///
+    /// That can be *behind* the sentence-level offset: a rewind puts the voice
+    /// back into a sentence the queue has already finished, and the word
+    /// position is the truth then too. It is what an interruption there
+    /// reports, so the two agree.
     func liveResult(id: String) async -> Result? {
         guard let job = jobs[id] else { return nil }
         guard current == id, job.playbackState == .speaking, !terminal(job.state),
               let position = await spokenPosition?() else { return result(job) }
         // The actor may have moved on while the position was read.
         guard var now = jobs[id], current == id, !terminal(now.state) else { return jobs[id].map(result) }
-        let sentenceLevel = result(now)
         now.stoppedAt = position
-        let wordLevel = result(now)
-        return wordLevel.characterOffset > sentenceLevel.characterOffset ? wordLevel : sentenceLevel
+        return result(now)
     }
 
     /// Long-poll a job.

@@ -39,7 +39,6 @@ final class SpeechJobManagerTests: XCTestCase {
         await gate.waitForStarts(1)
         await gate.startNext()
         try? await Task.sleep(for: .milliseconds(20))
-        // First sentence playing: the live read is clamped below by sentence level, here 0.
         await gate.finishNext()
         await gate.waitForStarts(2)
         await gate.startNext()
@@ -48,6 +47,30 @@ final class SpeechJobManagerTests: XCTestCase {
         let live = await manager.liveResult(id: job.id)
         XCTAssertEqual(plain?.characterOffset, 11)
         XCTAssertEqual(live?.characterOffset, 11 + 5)
+        await gate.finishNext()
+    }
+
+    func testLiveResultFollowsARewindIntoAFinishedSentence() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        await manager.configure(
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in }, halt: { nil },
+            // Rewound into the first sentence, after it finished: "First " heard.
+            spokenPosition: { SpokenPosition(sentence: 0, characterOffset: 6) })
+        let job = await manager.enqueue(text: "First one. Then the second.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
+        await gate.finishNext()
+        await gate.waitForStarts(2)
+        await gate.startNext()
+        try? await Task.sleep(for: .milliseconds(20))
+        let plain = await manager.result(id: job.id)
+        let live = await manager.liveResult(id: job.id)
+        XCTAssertEqual(plain?.characterOffset, 11)
+        // Behind the sentence that finished: where the voice is, not where it has been.
+        XCTAssertEqual(live?.characterOffset, 6)
         await gate.finishNext()
     }
 

@@ -24,8 +24,20 @@ if CommandLine.arguments.contains("--dict-test") {
     await DebugCLI.runDictTest()
     exit(0)
 }
+// Dictate `say`-synthesized speech through a provider's live path, the way a
+// held key does: `--provider-test <wispr-flow|…> [text]`.
+if let i = CommandLine.arguments.firstIndex(of: "--provider-test") {
+    let rest = CommandLine.arguments.dropFirst(i + 1)
+    guard let name = rest.first, let id = TranscriptionProviderID(rawValue: name) else {
+        FileHandle.standardError.write(Data("usage: --provider-test <\(TranscriptionProviderID.allCases.map(\.rawValue).joined(separator: "|"))> [text]\n".utf8))
+        exit(2)
+    }
+    await DebugCLI.runProviderTest(provider: id, text: rest.dropFirst().first
+                                   ?? "Claude and kubectl and Coda are proper nouns.")
+    exit(0)
+}
 // Transcribe `say`-synthesized speech through the gRPC flow path
-// (WisprFlowTranscriber) — the formatted Wispr-parity path. Needs
+// (WisprFlowProvider) — the formatted Wispr-parity path. Needs
 // VOICEOP_BASETEN_KEY; otherwise exercises the /llm/asr fallback.
 if CommandLine.arguments.contains("--flow-grpc-test") {
     await DebugCLI.runFlowGRPCTest(

@@ -19,8 +19,9 @@ import FlowAPI
 ///
 /// Two entry points:
 ///
-///   • `openLiveSession` — what live dictation uses. The arbiter calls it the
-///     instant the trigger key goes down, then streams packets into the session.
+///   • `openSession` — what live dictation uses. The arbiter calls it the
+///     instant the trigger key goes down, then streams PCM into the session,
+///     which opus-encodes it (`WisprFlowSession`).
 ///   • `transcribe(wavData:)` — stored clips (history retry, the debug CLI). Also
 ///     a stream, just one that gets all its audio at once. It is deliberately
 ///     *not* cut into 28 s segments any more: the old code issued one sequential
@@ -33,9 +34,12 @@ import FlowAPI
 /// absent or the stream fails, so dictation always degrades gracefully. That
 /// fallback is a genuine failure path, not the normal one — if the log shows it
 /// running routinely, something is broken.
-struct WisprFlowTranscriber: LiveTranscriber {
+struct WisprFlowProvider: TranscriptionProvider {
     static var modelId: String { FlowChannel.modelId }
     static var host: String { FlowChannel.host }
+
+    let id = TranscriptionProviderID.wisprFlow
+    let fallbackLabel = "raw /llm/asr"
 
     /// How much audio to put in one request message when replaying a stored clip.
     /// Only affects framing on the wire — every send goes down the same stream.
@@ -50,9 +54,24 @@ struct WisprFlowTranscriber: LiveTranscriber {
         self.dictionary = dictionary
     }
 
+    func prewarm() async -> String? {
+        FlowChannel.shared.warmUp()
+        Task { await WisprToken.shared.prewarm() }
+        Task { _ = await dictionary.contextWords() }
+        return WisprBasetenKey.value == nil ? TranscriberError.noBasetenKey.userMessage : nil
+    }
+
     // MARK: - Live dictation
 
-    func openLiveSession(app: FlowAppTarget, trace: DictationTrace?) async throws -> FlowSession {
+    func openSession(target: DictationTarget, trace: DictationTrace?) async throws -> any TranscriptionSession {
+        // Nudge the pooled connection in case it dropped while the Mac slept.
+        FlowChannel.shared.warmUp()
+        let packetizer = try OpusPacketizer()
+        let flow = try await openFlowSession(target: target, trace: trace)
+        return WisprFlowSession(flow: flow, packetizer: packetizer)
+    }
+
+    private func openFlowSession(target: DictationTarget, trace: DictationTrace?) async throws -> FlowSession {
         guard let apiKey = WisprBasetenKey.value else { throw TranscriberError.noBasetenKey }
         let token = try await WisprToken.shared.accessToken()
         trace?.mark("token")
@@ -62,25 +81,24 @@ struct WisprFlowTranscriber: LiveTranscriber {
             words: words,
             token: token,
             apiKey: apiKey,
-            app: FlowSession.app(bundleIdentifier: app.bundleIdentifier, name: app.name),
+            app: FlowSession.app(bundleIdentifier: target.bundleIdentifier, name: target.name),
             trace: trace)
     }
 
-    func transcribeWithoutStreaming(wavData: Data, language: String) async throws -> String {
-        try await fallback.transcribe(wavData: wavData, language: language)
+    func transcribeAfterLiveFailure(wavData: Data) async throws -> String {
+        try await fallback.transcribe(wavData: wavData, language: "en")
     }
 
     // MARK: - Stored clips
 
-    /// `language` is honoured on the fallback path only. The reverse-engineered
-    /// gRPC proto has an unresolved `Language` enum, so the flow request sends no
-    /// language and lets the server detect it. This app is English-only, so
-    /// detection is reliable and the formatted result is worth it.
-    func transcribe(wavData: Data, language: String) async throws -> String {
+    /// The reverse-engineered gRPC proto has an unresolved `Language` enum, so the
+    /// flow request sends no language and lets the server detect it. This app is
+    /// English-only, so detection is reliable and the formatted result is worth it.
+    func transcribe(wavData: Data) async throws -> String {
         let wav = try WAVFile.parse(wavData)
         guard WisprBasetenKey.value != nil else {
             Log.log("flow: no Baseten key — using raw /llm/asr")
-            return try await fallback.transcribe(wavData: wavData, language: language)
+            return try await fallback.transcribe(wavData: wavData, language: "en")
         }
         do {
             let text = try await replay(wav)
@@ -88,7 +106,7 @@ struct WisprFlowTranscriber: LiveTranscriber {
             return text
         } catch {
             Log.log("flow: stream failed (\(TranscriberError.userMessage(for: error))) — falling back to /llm/asr")
-            return try await fallback.transcribe(wavData: wavData, language: language)
+            return try await fallback.transcribe(wavData: wavData, language: "en")
         }
     }
 
@@ -96,7 +114,7 @@ struct WisprFlowTranscriber: LiveTranscriber {
     private func replay(_ wav: WAVFile) async throws -> String {
         let trace = DictationTrace("replay")
         defer { trace.flush() }
-        let session = try await openLiveSession(app: FlowAppTarget(), trace: trace)
+        let session = try await openFlowSession(target: DictationTarget(), trace: trace)
         do {
             let encoder = try OpusEncoder()
             let packets = try encoder.encode(pcm: wav.samples).packets
@@ -123,5 +141,73 @@ struct WisprFlowTranscriber: LiveTranscriber {
             await session.cancel()
             throw error
         }
+    }
+}
+
+/// A live Wispr dictation: PCM in, 20 ms opus packets up the `FlowSession`.
+actor WisprFlowSession: TranscriptionSession {
+    private let flow: FlowSession
+    private let packetizer: OpusPacketizer
+    /// An encode failure leaves a hole in the audio, so the stream's answer could
+    /// only be missing words. Remembered so `commit` fails and the clip is
+    /// transcribed from the recording instead.
+    private var encodeFailure: Error?
+
+    init(flow: FlowSession, packetizer: OpusPacketizer) {
+        self.flow = flow
+        self.packetizer = packetizer
+    }
+
+    func send(pcm: Data) async {
+        guard encodeFailure == nil else { return }
+        let packets: [Data]
+        do { packets = try packetizer.append(pcm) }
+        catch {
+            Log.log("dictation: opus encode failed: \(error)")
+            encodeFailure = error
+            return
+        }
+        guard !packets.isEmpty else { return }
+        await flow.send(packets: packets)
+    }
+
+    func commit(pcm: Data) async throws -> String {
+        if let encodeFailure {
+            await flow.cancel()
+            throw encodeFailure
+        }
+        var tail: [Data] = []
+        do { tail = try packetizer.finish(pcm) }
+        catch { Log.log("dictation: final opus encode failed: \(error)") }
+        return try await flow.commit(packets: tail, timeout: FlowSession.defaultCommitTimeout)
+    }
+
+    func cancel() async { await flow.cancel() }
+}
+
+/// Turns a dictation's PCM, arriving in arbitrary slices, into opus packets.
+/// Only whole 20 ms frames are encoded as audio arrives; a trailing partial frame
+/// is held back for the next slice, so no silence is ever spliced into the middle
+/// of the stream. `finish` pads the last partial frame, which is correct there —
+/// the recording really has ended. One encoder per dictation: opus is stateful
+/// across frames.
+final class OpusPacketizer {
+    private let encoder: OpusEncoder
+    private var remainder = Data()
+
+    init() throws { encoder = try OpusEncoder() }
+
+    func append(_ pcm: Data) throws -> [Data] {
+        remainder.append(pcm)
+        let (audio, consumed) = try encoder.encodeWholeFrames(pcm: remainder)
+        remainder = Data(remainder.dropFirst(consumed))
+        return audio.packets
+    }
+
+    func finish(_ pcm: Data) throws -> [Data] {
+        remainder.append(pcm)
+        defer { remainder = Data() }
+        guard !remainder.isEmpty else { return [] }
+        return try encoder.encode(pcm: remainder).packets
     }
 }

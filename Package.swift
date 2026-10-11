@@ -16,6 +16,9 @@ let package = Package(
         // resolution, it just makes the imports legitimate.
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.31.0"),
+        // On-device Parakeet speech recognition (CoreML, Apple Silicon): the
+        // Parakeet transcription provider.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
     ],
     targets: [
         // Vendored libopus (prebuilt universal static lib + public headers) for
@@ -43,6 +46,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHPACK", package: "swift-nio-http2"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "Sources/VoiceOperator",
             linkerSettings: [

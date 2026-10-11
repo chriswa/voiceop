@@ -16,13 +16,15 @@ enum StreamHealth: Equatable, Sendable {
     case unverified
     /// The last dictation was committed over the stream.
     case streaming
-    /// The last attempt fell back. `reason` is the short user message from
-    /// `TranscriberError.userMessage(for:)`, e.g. "no Baseten key".
-    case degraded(reason: String)
+    /// The last attempt fell back (Wispr Flow) or failed (Parakeet). `reason` is
+    /// the short user message from `TranscriberError.userMessage(for:)`, e.g.
+    /// "no Baseten key"; `provider` is the one in trouble — always the primary,
+    /// since a struggling shadow is the shadow's business.
+    case degraded(reason: String, provider: TranscriptionProviderID = .wisprFlow)
 
     var isDegraded: Bool { if case .degraded = self { return true } else { return false } }
 
-    var reason: String? { if case .degraded(let r) = self { return r } else { return nil } }
+    var reason: String? { if case .degraded(let r, _) = self { return r } else { return nil } }
 
     /// The value reported by `/v1/status`.
     var wireName: String {
@@ -38,8 +40,13 @@ enum StreamHealth: Equatable, Sendable {
     /// or rotated key is a one-time configuration job, while a stream that opened
     /// and then failed is usually the network or Baseten and clears on its own.
     var menuWarning: String? {
-        guard case .degraded(let reason) = self else { return nil }
-        return "⚠︎ Dictation is slow: live stream unavailable (\(reason))\(Self.hint(for: reason))"
+        guard case .degraded(let reason, let provider) = self else { return nil }
+        switch provider {
+        case .wisprFlow:
+            return "⚠︎ Dictation is slow: live stream unavailable (\(reason))\(Self.hint(for: reason))"
+        case .parakeet:
+            return "⚠︎ Parakeet is failing: \(reason)"
+        }
     }
 
     private static func hint(for reason: String) -> String {
@@ -53,7 +60,9 @@ enum StreamHealth: Equatable, Sendable {
         switch self {
         case .unverified: return "stream health: unverified"
         case .streaming:  return "stream health: streaming — dictation is on the fast path"
-        case .degraded(let reason):
+        case .degraded(let reason, .parakeet):
+            return "stream health: WARNING degraded (\(reason)) — Parakeet dictations are failing"
+        case .degraded(let reason, .wisprFlow):
             return "stream health: WARNING degraded (\(reason)) — dictation is falling back to raw /llm/asr and will be slow and unformatted"
         }
     }

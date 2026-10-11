@@ -48,7 +48,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             .init(status: currentStatus, dictating: arbiter.isDictating,
                   speaking: arbiter.isSpeaking, restart: restart.state,
                   stream: arbiter.streamHealth,
-                  remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active)
+                  remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active,
+                  provider: TranscriptionPreferences.primary, shadow: TranscriptionPreferences.shadow)
         }
         // The last remote transcription finishing is a third way to become idle.
         RemoteTranscriptionManager.shared.activity.onIdle = { [weak self] in
@@ -83,6 +84,22 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onCopySTT = { [weak self] in self?.arbiter.copySTT(id: $0) }
         menuBar.onRetryCommand = { [weak self] in self?.arbiter.retryCommand(id: $0) }
         menuBar.onCopyCommand = { [weak self] in self?.arbiter.copyCommand(id: $0) }
+        menuBar.transcriptionState = { (TranscriptionPreferences.primary, TranscriptionPreferences.shadow) }
+        menuBar.lastShadow = { [weak self] in self?.arbiter.lastShadow }
+        menuBar.onCopyLastShadow = { [weak self] in self?.arbiter.copyLastShadow() }
+        menuBar.onCopyShadowSTT = { [weak self] in self?.arbiter.copyShadowSTT(id: $0) }
+        menuBar.onCopyShadowCommand = { [weak self] in self?.arbiter.copyShadowCommand(id: $0) }
+        menuBar.onSelectProvider = { [weak self] id in
+            guard id != TranscriptionPreferences.primary else { return }
+            Log.log("transcription: provider set to \(id.displayName)")
+            TranscriptionPreferences.primary = id
+            self?.arbiter.providersChanged()
+        }
+        menuBar.onSelectShadow = { [weak self] id in
+            Log.log("transcription: shadow set to \(id?.displayName ?? "none")")
+            TranscriptionPreferences.shadow = id
+            self?.arbiter.providersChanged()
+        }
         menuBar.onMenuOpenChanged = { [weak self] open in self?.hotkey.chordsSuppressed = open }
         menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }

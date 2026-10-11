@@ -5,11 +5,11 @@ import AppKit
 /// subsequent sentence from starting until transcription has finished.
 ///
 /// Dictation is **streamed**, the way Wispr Flow does it. The moment the trigger
-/// key goes down three things start at once: the microphone, the gRPC stream to
-/// Baseten, and an upload pump. The pump encodes each new slice of captured PCM
-/// into 20 ms opus packets and pushes them up the already-open stream while the
-/// user is still speaking, so when the key comes up all that is left to do is
-/// commit and wait for the tail plus the formatting pass.
+/// key goes down three things start at once: the microphone, the transcription
+/// provider's live session (`TranscriptionLeg`), and an upload pump. The pump
+/// hands each new slice of captured PCM to the session while the user is still
+/// speaking, so when the key comes up all that is left to do is commit and wait
+/// for the tail plus whatever clean-up the provider does.
 ///
 /// The previous design did none of this: it recorded to a file, and only after
 /// the key came up did it fetch a token, encode the whole clip, dial a fresh TLS
@@ -22,8 +22,8 @@ final class AudioArbiter {
     private let recorder = AudioRecorder()
     let muter = OutputMuter()
     private let narrationDucker = NarrationDucker()
-    private let transcriber: Transcriber
-    private let liveTranscriber: LiveTranscriber?
+    /// Read at each dictation, so a change of provider applies from the next one.
+    private let currentProvider: @MainActor () -> any TranscriptionProvider
     private let tts = TTSEngine()
     private var speechSessionID: String?
     /// Where the voice was when this session was last halted. Held so a second
@@ -75,6 +75,8 @@ final class AudioArbiter {
     private var transcriptionProgressTask: Task<Void, Never>?
     private var ttsWaitCueTask: Task<Void, Never>?
     private var live: LiveDictation?
+    /// Shadow transcripts that finished before their dictation was filed.
+    private var pendingShadows: [UUID: ShadowTranscript] = [:]
 
     /// Whether the microphone is held open between dictations rather than being
     /// woken for each one — see `AudioRecorder.setAlwaysOn`. Set from the menu's
@@ -134,9 +136,8 @@ final class AudioArbiter {
         static let trailQuiet: Duration = .milliseconds(500)
     }
 
-    init(transcriber: Transcriber = WisprFlowTranscriber()) {
-        self.transcriber = transcriber
-        self.liveTranscriber = transcriber as? LiveTranscriber
+    init(provider: @escaping @MainActor () -> any TranscriptionProvider = { TranscriptionProviders.primary }) {
+        self.currentProvider = provider
         let loaded = historyStore.load()
         sttHistory = loaded.stt
         commandHistory = loaded.commands
@@ -144,22 +145,33 @@ final class AudioArbiter {
         try? FileManager.default.createDirectory(at: sttDir, withIntermediateDirectories: true)
     }
 
-    /// Establish the warm gRPC connection and pre-fetch the credentials dictation
-    /// needs, so the first dictation of a session is as quick as the tenth.
+    /// Warm the providers' connections, credentials and models, so the first
+    /// dictation of a session is as quick as the tenth.
     func prewarm() {
         // Say so at launch rather than at the first key press: the icon badge and
         // the menu warning should already be there when the user looks, not
-        // appear after they have sat through a slow dictation.
-        if liveTranscriber != nil, WisprBasetenKey.value == nil {
-            noteStreamHealth(.degraded(reason: TranscriberError.noBasetenKey.userMessage))
+        // appear after they have sat through a slow dictation. Only the primary
+        // speaks for the health: a struggling shadow is the shadow's business.
+        let provider = currentProvider()
+        Task { [weak self] in
+            guard let reason = await provider.prewarm() else { return }
+            self?.noteStreamHealth(.degraded(reason: reason, provider: provider.id))
         }
-        FlowChannel.shared.warmUp()
-        Task { await WisprToken.shared.prewarm() }
-        Task { _ = await WisprDictionary.shared.contextWords() }
+        if let shadow = TranscriptionProviders.shadow {
+            Task { _ = await shadow.prewarm() }
+        }
         // Synthesizing the cue bank happens on first use and is not instant. Do it
         // now: the start cue is on the critical path for "safe to talk", and the
         // silence-gate exclusion window is anchored the moment we ask for it.
         _ = SoundBank.shared
+    }
+
+    /// The menu changed the provider or its shadow. The old health belonged to
+    /// the old provider, so it starts over, and the new ones are warmed now
+    /// rather than on the next key press.
+    func providersChanged() {
+        noteStreamHealth(.unverified)
+        prewarm()
     }
 
     /// Record a change of transcription path. Idempotent, so the callers can be
@@ -183,27 +195,17 @@ final class AudioArbiter {
         /// wait for the second one — see `DictationModeDecision`. Read it through
         /// `whenResolved`/`resolve()`; `decision.mode` on its own is provisional.
         let modeDecision: DictationModeDecision
-        /// One encoder for the whole dictation: opus is stateful across frames,
-        /// so a fresh encoder mid-stream would corrupt the audio.
-        let encoder: OpusEncoder?
-        var session: FlowSession?
-        var opening: Task<Void, Never>?
-        /// Packets encoded before the stream finished opening.
-        var pending: [Data] = []
-        /// Captured PCM bytes already handed to the encoder.
+        /// The provider's live session for this dictation. Its liveness is its
+        /// own, not "is this the *current* dictation": the arbiter clears `live`
+        /// at key-up while the commit is still in flight.
+        var leg: TranscriptionLeg?
+        /// The shadow provider's leg, fed the same audio. Its transcript is only
+        /// filed beside the real one for comparison; it never pastes, never holds
+        /// anything up, and its failures are its own.
+        var shadow: TranscriptionLeg?
+        /// Captured PCM bytes already handed to the leg.
         var offset = 0
         var pump: Timer?
-        /// Sends are chained rather than fired concurrently — audio packet order
-        /// is load-bearing and two tasks racing into the actor could reorder them.
-        var sendChain: Task<Void, Never>?
-        /// Set when the stream is unusable, so we stop feeding a dead socket and
-        /// fall back once the user finishes.
-        var broken = false
-        /// Set once this dictation is definitively over and its stream should be
-        /// thrown away. Distinct from "no longer the *current* dictation": the
-        /// arbiter clears `live` at key-up while the commit is still in flight, so
-        /// identity against `AudioArbiter.live` is not a liveness test.
-        var abandoned = false
         var heardAudio = false
         /// True only after the start cue actually played. Distinct from
         /// `heardAudio`, which flips earlier — before the mode/`live` guards that
@@ -214,15 +216,14 @@ final class AudioArbiter {
         /// pasted. Cycled by tapping left Shift while recording, and deliberately
         /// per-dictation: it belongs to the sentence being spoken, not to the app.
         var style: TranscriptStyle = .normal
-        /// PCM captured but not yet encoded, snapshotted synchronously at key-up.
+        /// PCM captured but not yet handed over, snapshotted synchronously at key-up.
         /// Read from the recorder later would race the *next* dictation's
         /// `start()`, which resets the shared capture buffer.
         var tailPCM = Data()
 
-        init(trace: DictationTrace, mode decision: DictationModeDecision, encoder: OpusEncoder?) {
+        init(trace: DictationTrace, mode decision: DictationModeDecision) {
             self.trace = trace
             self.modeDecision = decision
-            self.encoder = encoder
         }
     }
 
@@ -246,12 +247,7 @@ final class AudioArbiter {
         narrationDucker.stop()
         onDictationBegan?()
 
-        let encoder = try? OpusEncoder()
-        if encoder == nil {
-            Log.log("dictation: opus encoder unavailable — live upload disabled")
-            noteStreamHealth(.degraded(reason: "opus encoder unavailable"))
-        }
-        let live = LiveDictation(trace: trace, mode: decision, encoder: encoder)
+        let live = LiveDictation(trace: trace, mode: decision)
         self.live = live
 
         // The start cue means "it is safe to talk now", so it must wait for the
@@ -385,38 +381,17 @@ final class AudioArbiter {
     }
 
     private func openStream(for live: LiveDictation) {
-        guard let liveTranscriber, live.encoder != nil else {
-            live.broken = true
-            return
-        }
-        // Nudge the pooled connection in case it dropped while the Mac slept.
-        FlowChannel.shared.warmUp()
-        let app = FlowAppTarget(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-                                name: NSWorkspace.shared.frontmostApplication?.localizedName)
-        live.opening = Task { [weak self] in
-            do {
-                let session = try await liveTranscriber.openLiveSession(app: app, trace: live.trace)
-                // Test `abandoned`, NOT `self.live === live`: the arbiter clears
-                // `live` at key-up while this dictation is still being committed,
-                // so identity would reject a stream that opened a moment late and
-                // silently drop every such dictation back to the slow path.
-                guard let self, !live.abandoned else {
-                    await session.cancel()
-                    return
-                }
-                live.session = session
-                self.flushPending(for: live)
-            } catch {
-                // We cancelled it ourselves because the grace period expired —
-                // that path already logged, and `CancellationError` renders as
-                // noise. Don't report it twice under a different name.
-                guard !Task.isCancelled else { return }
-                let reason = TranscriberError.userMessage(for: error)
-                Log.log("dictation: live stream unavailable (\(reason)) — will transcribe the clip afterwards")
-                live.trace.note("stream open failed: \(reason)")
-                live.broken = true
-                self?.noteStreamHealth(.degraded(reason: reason))
-            }
+        let target = DictationTarget(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                                     name: NSWorkspace.shared.frontmostApplication?.localizedName)
+        let provider = currentProvider()
+        live.leg = TranscriptionLeg(provider: provider, target: target, trace: live.trace,
+                                    onOpenFailed: { [weak self] reason in
+            Task { @MainActor in self?.noteStreamHealth(.degraded(reason: reason, provider: provider.id)) }
+        })
+        if let shadow = TranscriptionProviders.shadow, shadow.id != provider.id {
+            live.shadow = TranscriptionLeg(provider: shadow, target: target,
+                                           trace: DictationTrace("shadow-\(shadow.id.rawValue)"),
+                                           logPrefix: "shadow \(shadow.id.rawValue)")
         }
     }
 
@@ -435,55 +410,25 @@ final class AudioArbiter {
         live.pump = timer
     }
 
-    /// Encode whatever new audio the recorder has captured and hand it to the
-    /// stream. Only whole 20 ms frames are consumed; a trailing partial frame is
-    /// left in place and re-offered next tick, so no silence is ever spliced into
-    /// the middle of the stream.
+    /// Hand whatever new audio the recorder has captured to the provider's
+    /// session, and the shadow's.
     private func pumpAudio(_ live: LiveDictation) {
-        guard recorder.isRecording, live === self.live, !live.broken,
-              let encoder = live.encoder else { return }
-        let packets: [Data]
-        do {
-            let slice = unencodedPCM(for: live)
-            guard !slice.isEmpty else { return }
-            let (audio, consumed) = try encoder.encodeWholeFrames(pcm: slice)
-            live.offset += consumed
-            packets = audio.packets
-        } catch {
-            Log.log("dictation: opus encode failed: \(error)")
-            live.broken = true
-            return
-        }
-        guard !packets.isEmpty else { return }
-        deliver(packets, to: live)
+        guard recorder.isRecording, live === self.live else { return }
+        let legs = [live.leg, live.shadow].compactMap { $0 }.filter { !$0.isBroken }
+        guard !legs.isEmpty else { return }
+        let slice = unencodedPCM(for: live)
+        guard !slice.isEmpty else { return }
+        live.offset += slice.count
+        legs.forEach { $0.append(slice) }
     }
 
-    /// Captured bytes the encoder has not seen yet. Only valid while this
+    /// Captured bytes the leg has not been given yet. Only valid while this
     /// dictation is the one recording — the capture buffer is shared and reset by
     /// the next `start()`.
     private func unencodedPCM(for live: LiveDictation) -> Data {
         let available = recorder.capturedByteCount
         guard available > live.offset else { return Data() }
         return recorder.capturedData(offset: live.offset, maxCount: available - live.offset)
-    }
-
-    private func deliver(_ packets: [Data], to live: LiveDictation) {
-        guard let session = live.session else {
-            live.pending.append(contentsOf: packets)
-            return
-        }
-        let batch = live.pending.isEmpty ? packets : live.pending + packets
-        live.pending = []
-        let previous = live.sendChain
-        live.sendChain = Task {
-            _ = await previous?.value
-            await session.send(packets: batch)
-        }
-    }
-
-    private func flushPending(for live: LiveDictation) {
-        guard !live.pending.isEmpty else { return }
-        deliver([], to: live)
     }
 
     // MARK: - End
@@ -583,7 +528,7 @@ final class AudioArbiter {
         // Say it at the moment it starts costing: a stream that has already
         // failed means this dictation goes the long way round, so the finish
         // cue carries a low tail instead of ending clean (see StreamHealth).
-        let slow = live?.broken ?? false
+        let slow = live?.leg?.isBroken ?? false
         playClosingCue(slow ? mode.slowFinishCue : mode.finishCue, mode: mode)
         onStatus?(.transcribing)
         startTranscriptionProgressCue()
@@ -594,6 +539,10 @@ final class AudioArbiter {
         // dictation as one, and file either in the wrong history list. (`mode` is
         // already per-dictation: it lives on the `LiveDictation`.)
         let routingContext = context
+        let entryID = UUID()
+        if let live, let shadow = live.shadow {
+            runShadow(shadow, tail: live.tailPCM, pcm: pcm, entryID: entryID)
+        }
         Task { [weak self] in
             guard let self else { return }
             defer { live?.trace.flush() }
@@ -603,7 +552,8 @@ final class AudioArbiter {
                 // A command is spoken to the router, not written into a document,
                 // so the fragment-shaping the style does would only confuse it.
                 let text = isCommand ? raw : style.apply(to: raw)
-                self.record(wav: wav, duration: duration, transcript: text, command: isCommand, error: nil)
+                self.record(wav: wav, duration: duration, transcript: text, command: isCommand, error: nil,
+                            id: entryID)
                 // Emptiness is judged on the transcript, not on the styled text:
                 // the style adds spaces, and " " must not paste as if it were speech.
                 if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -617,126 +567,96 @@ final class AudioArbiter {
             } catch {
                 self.stopTranscriptionProgressCue()
                 Log.log("transcribe failed: \(error)")
+                let provider = live?.leg?.provider.id ?? TranscriptionPreferences.primary
+                self.noteStreamHealth(.degraded(reason: TranscriberError.userMessage(for: error), provider: provider))
                 live?.trace.note("failed: \(TranscriberError.userMessage(for: error))")
                 SoundEffect.transcriptionFailed.play()
                 self.record(wav: wav, duration: duration, transcript: "", command: isCommand,
-                            error: TranscriberError.userMessage(for: error))
+                            error: TranscriberError.userMessage(for: error), id: entryID)
             }
             self.finishDictation()
         }
     }
 
-    /// Finish the live stream if we have one; otherwise (or if it failed) fall
-    /// back to transcribing the recorded clip from scratch. The fallback is a
+    /// Finish the live session if we have one; it falls back to the provider's
+    /// whole-clip path if the session never opened or failed. The fallback is a
     /// genuine failure path — routine appearances in the log mean the streaming
     /// path is broken, not that this is normal.
     private func transcribe(_ live: LiveDictation?, wavURL: URL) async throws -> String {
-        if let live {
-            // True once real time has gone into the streaming path — waiting for it
-            // to open, or committing to it. Either way, routing the fallback back
-            // through the normal transcriber would open a *second* stream and could
-            // burn its whole hang guard before conceding.
-            let streamWasTried = live.opening != nil
-            if live.session == nil {
-                _ = await awaitStreamOpen(live)
-            }
-            if live.session != nil, !live.broken {
-                do {
-                    let text = try await commit(live)
-                    noteStreamHealth(.streaming)
-                    return text
-                } catch {
-                    let reason = TranscriberError.userMessage(for: error)
-                    Log.log("dictation: live stream failed after commit (\(reason)) — re-transcribing the recorded clip")
-                    live.trace.note("live failed: \(reason)")
-                    noteStreamHealth(.degraded(reason: reason))
-                }
-            }
-            // Whatever went wrong, this stream is done: release it rather than
-            // leaving the RPC and its response-consumer task alive.
-            cancelStream(live)
-            if streamWasTried, let liveTranscriber {
-                // Streaming is unwell right now: skip straight to raw /llm/asr.
-                live.trace.note("fell back to raw /llm/asr")
-                return try await liveTranscriber.transcribeWithoutStreaming(wavURL: wavURL, language: "en")
-            }
-            live.trace.note("fell back to whole-clip transcription")
+        guard let live, let leg = live.leg else {
+            return try await currentProvider().transcribe(wavURL: wavURL)
         }
-        return try await transcriber.transcribe(wavURL: wavURL, language: "en")
+        let tail = live.tailPCM
+        live.tailPCM = Data()
+        let outcome = try await leg.finish(tail: tail, openGrace: Self.streamOpenGrace,
+                                           clip: { try Data(contentsOf: wavURL) })
+        noteStreamHealth(outcome.liveFailure.map { .degraded(reason: $0, provider: leg.provider.id) } ?? .streaming)
+        return outcome.text
     }
 
-    /// Wait for a stream that was still opening at key-up — but not forever. The
-    /// open does a token fetch, which on a captive-portal network can sit on
-    /// URLSession's default timeout while the user stares at "transcribing".
-    ///
-    /// - Returns: whether the stream opened inside the grace period.
-    @discardableResult
-    private func awaitStreamOpen(_ live: LiveDictation) async -> Bool {
-        guard let opening = live.opening else { return true }
-        let grace = Self.streamOpenGrace
-        let raced = await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                // The cancellation handler is what makes the race actually bound
-                // the wait: `await someTask.value` does not carry the awaiting
-                // task's cancellation into `opening`, and the group drains its
-                // children before returning, so without this the "grace period"
-                // would wait for the open no matter how long it took.
-                await withTaskCancellationHandler {
-                    await opening.value
-                } onCancel: {
-                    opening.cancel()
-                }
-                return true
-            }
-            group.addTask {
-                try? await Task.sleep(for: grace)
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
-        }
-        if !raced {
-            Log.log("dictation: stream still opening \(grace) after key-up — using the recorded clip")
-            live.trace.note("stream open timed out")
-            live.broken = true
-            noteStreamHealth(.degraded(reason: "stream did not open in time"))
-        }
-        return raced
-    }
-
-    private func commit(_ live: LiveDictation) async throws -> String {
-        guard let session = live.session else { throw TranscriberError.streamEnded }
-
-        // Everything still unsent: packets buffered while the stream opened, plus
-        // the tail the pump had not reached (snapshotted at key-up). The tail is
-        // the only place a partial frame gets padded, which is correct — the
-        // recording really has ended there.
-        var tail = live.pending
-        live.pending = []
-        if let encoder = live.encoder, !live.tailPCM.isEmpty {
+    /// Finish the shadow leg on its own, and file what it said beside the history
+    /// entry `entryID` — whenever that lands, before or after the primary's.
+    /// Nothing waits for this: not the paste, not the closing cue, not a restart.
+    private func runShadow(_ leg: TranscriptionLeg, tail: Data, pcm: Data, entryID: UUID) {
+        let keyUp = ContinuousClock.now
+        leg.trace.mark("key-up")
+        Task { [weak self] in
+            var result = ShadowTranscript(provider: leg.provider.id.rawValue)
             do {
-                tail += try encoder.encode(pcm: live.tailPCM).packets
-                live.offset += live.tailPCM.count
-                live.tailPCM = Data()
+                let outcome = try await leg.finish(tail: tail, openGrace: Self.streamOpenGrace, clip: {
+                    WAVFile(sampleRate: AudioRecorder.asrSampleRate, samples: pcm).data
+                })
+                result.text = outcome.text
+                leg.trace.note("\(outcome.text.count) chars")
             } catch {
-                Log.log("dictation: final opus encode failed: \(error)")
+                let message = TranscriberError.userMessage(for: error)
+                result.error = message
+                leg.trace.note("failed: \(message)")
             }
+            result.latencyMS = Int(keyUp.duration(to: .now) / .milliseconds(1))
+            leg.trace.mark("done")
+            leg.trace.flush()
+            self?.attachShadow(result, to: entryID)
         }
-        _ = await live.sendChain?.value   // preserve ordering ahead of the commit
-        return try await session.commit(packets: tail, timeout: FlowSession.defaultCommitTimeout)
     }
 
-    /// Release a dictation's stream. Idempotent, and safe to call whether or not
-    /// the stream ever opened — `abandoned` also stops a late-arriving open from
-    /// installing a session nobody will use.
-    private func cancelStream(_ live: LiveDictation) {
-        live.abandoned = true
-        live.sendChain?.cancel()
-        if let session = live.session {
-            live.session = nil
-            Task { await session.cancel() }
+    private func attachShadow(_ shadow: ShadowTranscript, to id: UUID) {
+        if let i = sttHistory.firstIndex(where: { $0.id == id }) {
+            sttHistory[i].shadow = shadow
+        } else if let i = commandHistory.firstIndex(where: { $0.id == id }) {
+            commandHistory[i].shadow = shadow
+        } else {
+            // The primary has not filed its entry yet; `record` picks this up.
+            pendingShadows[id] = shadow
+            return
         }
+        save()
+    }
+
+    /// The most recent dictation's shadow transcript, if any dictation has one.
+    var lastShadow: ShadowTranscript? {
+        let stt = sttHistory.first { $0.shadow != nil }.map { ($0.date, $0.shadow!) }
+        let command = commandHistory.first { $0.shadow != nil }.map { ($0.date, $0.shadow!) }
+        return [stt, command].compactMap { $0 }.max { $0.0 < $1.0 }?.1
+    }
+
+    /// Copy the last shadow transcript (the menu's "Copy Last Shadow Transcript").
+    func copyLastShadow() {
+        guard let text = lastShadow?.text, !text.isEmpty else {
+            SoundEffect.transcriptionFailed.play(); return
+        }
+        copy(text)
+        SoundEffect.clipFinished.play()
+    }
+
+    func copyShadowSTT(id: UUID) { if let t = sttHistory.first(where: { $0.id == id })?.shadow?.text { copy(t) } }
+    func copyShadowCommand(id: UUID) { if let t = commandHistory.first(where: { $0.id == id })?.shadow?.text { copy(t) } }
+
+    /// Release a dictation's live session. Idempotent, and safe to call whether or
+    /// not it ever opened.
+    private func cancelStream(_ live: LiveDictation) {
+        live.leg?.cancel()
+        live.shadow?.cancel()
     }
 
     /// Record how loud the opening half-second was, in 50 ms bins.
@@ -801,7 +721,7 @@ final class AudioArbiter {
             guard let self else { return }
             defer { self.onStatus?(.idle) }
             do {
-                let text = try await self.transcriber.transcribe(wavURL: url, language: "en")
+                let text = try await self.currentProvider().transcribe(wavURL: url)
                 self.stopTranscriptionProgressCue()
                 if command {
                     if let i = self.commandHistory.firstIndex(where: { $0.id == id }) { self.commandHistory[i].transcript = text; self.commandHistory[i].error = nil }
@@ -905,10 +825,12 @@ final class AudioArbiter {
     }
     /// File the dictation in history. `wav` is nil when there is no clip worth
     /// keeping — a capture that produced no samples has nothing to retry from.
-    private func record(wav: URL?, duration: TimeInterval, transcript: String, command: Bool, error: String?) {
+    private func record(wav: URL?, duration: TimeInterval, transcript: String, command: Bool, error: String?,
+                        id: UUID = UUID()) {
         let stored = wav.flatMap(persist)
-        if command { commandHistory.insert(CommandHistoryEntry(date: Date(), duration: duration, transcript: transcript, recognized: false, error: error, wavURL: stored), at: 0) }
-        else { sttHistory.insert(STTHistoryEntry(date: Date(), duration: duration, transcript: transcript, error: error, wavURL: stored), at: 0) }
+        let shadow = pendingShadows.removeValue(forKey: id)
+        if command { commandHistory.insert(CommandHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, recognized: false, error: error, wavURL: stored, shadow: shadow), at: 0) }
+        else { sttHistory.insert(STTHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, error: error, wavURL: stored, shadow: shadow), at: 0) }
         save()
     }
     private func save() { historyStore.save(.init(stt: sttHistory, commands: commandHistory)); onHistoryChanged?() }

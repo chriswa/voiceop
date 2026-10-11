@@ -61,8 +61,8 @@ final class RemoteTranscriptionTests: XCTestCase {
     // MARK: - Session bookkeeping
 
     func testStreamsAudioAndReturnsTheCommittedText() async throws {
-        let stream = FakeStream(result: .success("hello world"))
-        let manager = RemoteTranscriptionManager(backend: .fake(stream: stream))
+        let session = FakeSession(result: .success("hello world"))
+        let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: session) })
         let id = try await manager.create(sampleRate: 16_000)
         XCTAssertEqual(manager.activity.active, 1)
         let second = sine(rate: 16_000, seconds: 1)
@@ -70,14 +70,14 @@ final class RemoteTranscriptionTests: XCTestCase {
         try await manager.append(id: id, pcm: second.dropFirst(4_000))
         let text = try await manager.finish(id: id)
         XCTAssertEqual(text, "hello world")
-        // One second is 50 whole 20 ms frames, split between sends and the commit.
-        let (sent, committed) = await stream.counts
-        XCTAssertEqual(sent + committed, 50)
+        // Every byte of the second reaches the session, between sends and the commit.
+        let (sent, committed) = await session.byteCounts
+        XCTAssertEqual(sent + committed, second.count)
         XCTAssertEqual(manager.activity.active, 0)
     }
 
     func testFinishedSessionsAnswerConflictAndUnknownIDsNotFound() async throws {
-        let manager = RemoteTranscriptionManager(backend: .fake(stream: FakeStream(result: .success("x"))))
+        let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: FakeSession(result: .success("x"))) })
         let id = try await manager.create()
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.2))
         _ = try await manager.finish(id: id)
@@ -88,21 +88,22 @@ final class RemoteTranscriptionTests: XCTestCase {
     }
 
     func testNoAudioIsEmptyTextWithoutCommitting() async throws {
-        let stream = FakeStream(result: .success("should not be used"))
-        let manager = RemoteTranscriptionManager(backend: .fake(stream: stream))
+        let session = FakeSession(result: .success("should not be used"))
+        let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: session) })
         let id = try await manager.create()
         let text = try await manager.finish(id: id)
         XCTAssertEqual(text, "")
-        let cancelled = await stream.cancelled
-        XCTAssertTrue(cancelled)
+        await session.waitUntilCancelled()
+        let committed = await session.byteCounts.committed
+        XCTAssertEqual(committed, 0)
     }
 
     func testFallsBackToTheClipWhenTheStreamCannotOpen() async throws {
         let clips = ClipLog()
-        let backend = RemoteTranscriptionBackend(
-            openStream: { _ in throw TranscriberError.noBasetenKey },
-            transcribeClip: { wav in await clips.add(wav); return "from fallback" })
-        let manager = RemoteTranscriptionManager(backend: backend)
+        let manager = RemoteTranscriptionManager(provider: {
+            FakeProvider(openError: TranscriberError.noBasetenKey,
+                         fallback: { wav in await clips.add(wav); return "from fallback" })
+        })
         let id = try await manager.create(sampleRate: 16_000)
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.5))
         let text = try await manager.finish(id: id)
@@ -113,10 +114,10 @@ final class RemoteTranscriptionTests: XCTestCase {
     }
 
     func testFallsBackWhenTheCommitFails() async throws {
-        let backend = RemoteTranscriptionBackend(
-            openStream: { _ in FakeStream(result: .failure(TranscriberError.streamTimeout)) },
-            transcribeClip: { _ in "rescued" })
-        let manager = RemoteTranscriptionManager(backend: backend)
+        let manager = RemoteTranscriptionManager(provider: {
+            FakeProvider(session: FakeSession(result: .failure(TranscriberError.streamTimeout)),
+                         fallback: { _ in "rescued" })
+        })
         let id = try await manager.create()
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.3))
         let text = try await manager.finish(id: id)
@@ -124,10 +125,10 @@ final class RemoteTranscriptionTests: XCTestCase {
     }
 
     func testUpstreamFailureSurfaces() async throws {
-        let backend = RemoteTranscriptionBackend(
-            openStream: { _ in throw TranscriberError.noBasetenKey },
-            transcribeClip: { _ in throw TranscriberError.signInExpired })
-        let manager = RemoteTranscriptionManager(backend: backend)
+        let manager = RemoteTranscriptionManager(provider: {
+            FakeProvider(openError: TranscriberError.noBasetenKey,
+                         fallback: { _ in throw TranscriberError.signInExpired })
+        })
         let id = try await manager.create()
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.1))
         do {
@@ -139,17 +140,18 @@ final class RemoteTranscriptionTests: XCTestCase {
     }
 
     func testCancelForgetsTheSessionAndReleasesTheStream() async throws {
-        let stream = FakeStream(result: .success("x"))
-        let manager = RemoteTranscriptionManager(backend: .fake(stream: stream))
+        let session = FakeSession(result: .success("x"))
+        let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: session) })
         let id = try await manager.create()
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.1))
         try await manager.cancel(id: id)
+        await session.waitUntilCancelled()
         XCTAssertEqual(manager.activity.active, 0)
         await assertThrows(.unknownSession) { try await manager.finish(id: id) }
     }
 
     func testReaperDropsIdleSessionsAndSignalsIdle() async throws {
-        let manager = RemoteTranscriptionManager(backend: .fake(stream: FakeStream(result: .success("x"))))
+        let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: FakeSession(result: .success("x"))) })
         let idled = expectation(description: "idle")
         manager.activity.onIdle = { idled.fulfill() }
         let start = Date()
@@ -187,32 +189,8 @@ final class RemoteTranscriptionTests: XCTestCase {
     }
 }
 
-private actor FakeStream: TranscriptionStream {
-    private let result: Result<String, Error>
-    private var sent = 0
-    private var committed = 0
-    private(set) var cancelled = false
-
-    init(result: Result<String, Error>) { self.result = result }
-
-    var counts: (Int, Int) { (sent, committed) }
-
-    func send(packets: [Data]) { sent += packets.count }
-    func commit(packets: [Data], timeout: Duration) throws -> String {
-        committed = packets.count
-        return try result.get()
-    }
-    func cancel() { cancelled = true }
-}
-
 private actor ClipLog {
     private var clips: [Data] = []
     func add(_ clip: Data) { clips.append(clip) }
     var first: Data? { clips.first }
-}
-
-private extension RemoteTranscriptionBackend {
-    static func fake(stream: FakeStream) -> RemoteTranscriptionBackend {
-        RemoteTranscriptionBackend(openStream: { _ in stream }, transcribeClip: { _ in "fallback" })
-    }
 }

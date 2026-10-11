@@ -30,14 +30,25 @@ something new, record it in `DESIGN.md` + `spike/` so it's never lost.
 
 ## Dictation transcription paths
 
-`WisprFlowTranscriber` (the `AudioArbiter` default) transcribes over Wispr's
-primary **gRPC** path (`flow_api.v1.TranscriptionService` on Baseten), which
-returns **formatted** text with the user's dictionary — see DESIGN.md Milestone C
-and `proto/flow_api_v1.proto`.
+Dictation goes through a **transcription provider**, picked from the menu bar's
+**Transcription** submenu (persisted in `TranscriptionPreferences`): **Wispr Flow**
+(the default) or **Parakeet** (on device, FluidAudio, raw — no fix-up, no custom
+words, never falls back to Wispr). The same submenu can turn on a **shadow**
+provider: fed the same audio, never pastes, its result filed on the history entry
+for comparison, and it never touches `StreamHealth` (which follows the primary
+only). The arbiter and phone dictation know only `TranscriptionProvider` /
+`TranscriptionLeg`; each provider owns its encoding, credentials and fallback. See
+DESIGN.md, "Transcription providers (2026-10-11)". Live-test any provider's live
+path with `--provider-test <wispr-flow|parakeet> [text]`.
+
+`WisprFlowProvider` transcribes over Wispr's primary **gRPC** path
+(`flow_api.v1.TranscriptionService` on Baseten), which returns **formatted** text
+with the user's dictionary — see DESIGN.md Milestone C and `proto/flow_api_v1.proto`.
 
 **Use `TranscribeStream`, not `Transcribe`.** The unary RPC is Wispr's *fallback*;
 its primary is the duplex stream, opened on key-down and fed opus packets while
-the user is still speaking (`FlowSession`, driven by `AudioArbiter.pumpAudio`), so
+the user is still speaking (`FlowSession`, fed by `WisprFlowSession` from
+`AudioArbiter.pumpAudio`), so
 only the tail remains at key-up. Do not "simplify" this back to a single unary
 call — that was the old design and it cost 5–10 s per dictation. The connection is
 process-wide and keepalive'd (`FlowChannel`); never build a channel per call.
@@ -52,7 +63,8 @@ the gRPC/protobuf Swift with `scripts/gen-proto.sh`. Live-test either path with
 `--flow-grpc-test` / `--asr-test`.
 
 **The fallback is loud by design** (`StreamHealth`): while dictation is on the
-slow path the menu carries a `⚠︎ Dictation is slow…` line naming the reason, the
+slow path the menu carries a `⚠︎ Dictation is slow…` line naming the reason
+(`⚠︎ Parakeet is failing…` when Parakeet is the primary), the
 icon wears an amber dot even at idle, the key-up cue gains a low tail, the log
 gets a `stream health: WARNING degraded` line, `/v1/status` reports
 `"stream":"degraded"` + `stream_reason`, and `restart-app.sh` prints a WARNING

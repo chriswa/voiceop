@@ -1,54 +1,121 @@
 import Foundation
 
-/// A speech-to-text provider. The whole point of this protocol is that Wispr is
-/// swappable: a future on-device engine (Whisper/Parakeet) implements the same
-/// contract and drops in with no change to the arbiter or UI.
-protocol Transcriber: Sendable {
-    /// Transcribe a complete 16 kHz mono PCM WAV blob to text.
-    /// - Returns: the recognized text (already punctuated for Wispr), possibly empty.
-    ///
-    /// This is the *stored clip* path — history retries and the debug CLI. Live
-    /// dictation does not go through it: it streams audio while the user talks
-    /// via `LiveTranscriber`, so that nothing but the tail is left to do when the
-    /// key comes up.
-    func transcribe(wavData: Data, language: String) async throws -> String
-}
+/// Which transcription provider. A hard-coded list: adding one is a code change,
+/// and the menu offers exactly these.
+enum TranscriptionProviderID: String, CaseIterable, Codable, Sendable {
+    case wisprFlow = "wispr-flow"
+    case parakeet = "parakeet"
 
-/// A transcriber that can upload audio *during* the recording rather than after
-/// it, which is the entire reason dictation feels instant in Wispr Flow.
-///
-/// The arbiter opens a session when the trigger key goes down, feeds it opus
-/// packets as they are encoded, and commits when the key comes up.
-protocol LiveTranscriber: Transcriber {
-    /// Open a streaming session. Called concurrently with microphone start-up, so
-    /// it must not depend on any audio existing yet.
-    func openLiveSession(app: FlowAppTarget, trace: DictationTrace?) async throws -> FlowSession
-
-    /// Transcribe a stored clip *without* attempting the streaming path.
-    ///
-    /// Used when a live stream has just failed: `transcribe(wavData:)` would open
-    /// another stream and could spend its whole hang guard again before giving up,
-    /// so one bad network moment would cost the user two timeouts back to back.
-    func transcribeWithoutStreaming(wavData: Data, language: String) async throws -> String
-}
-
-extension LiveTranscriber {
-    func transcribeWithoutStreaming(wavURL: URL, language: String) async throws -> String {
-        try await transcribeWithoutStreaming(wavData: Data(contentsOf: wavURL), language: language)
+    var displayName: String {
+        switch self {
+        case .wisprFlow: return "Wispr Flow"
+        case .parakeet: return "Parakeet (on this Mac)"
+        }
     }
 }
 
-/// The app a dictation is destined for, passed to the server as tone context.
-struct FlowAppTarget: Sendable {
+/// Which provider pastes, and which (if any) shadows it. Persisted in
+/// `UserDefaults` alongside the other preferences, so the choice survives
+/// relaunches.
+enum TranscriptionPreferences {
+    private static let primaryKey = "vo.transcriptionProvider"
+    private static let shadowKey = "vo.shadowTranscriptionProvider"
+
+    /// The provider whose transcript is pasted. Defaults to Wispr Flow.
+    static var primary: TranscriptionProviderID {
+        get { UserDefaults.standard.string(forKey: primaryKey).flatMap(TranscriptionProviderID.init) ?? .wisprFlow }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: primaryKey) }
+    }
+
+    /// A second provider fed the same audio, whose transcript is only kept for
+    /// comparison. Never the primary: choosing the shadow as primary clears it.
+    static var shadow: TranscriptionProviderID? {
+        get {
+            let id = UserDefaults.standard.string(forKey: shadowKey).flatMap(TranscriptionProviderID.init)
+            return id == primary ? nil : id
+        }
+        set { UserDefaults.standard.set(newValue?.rawValue, forKey: shadowKey) }
+    }
+}
+
+/// Everything from the user's audio to the text that gets pasted — recognition
+/// and any clean-up pass behind it are one provider, not two stages the arbiter
+/// stitches together. `AudioArbiter` and `RemoteTranscriptionManager` only ever
+/// talk to this; each provider owns its own encoding, credentials and fallback.
+protocol TranscriptionProvider: Sendable {
+    var id: TranscriptionProviderID { get }
+
+    /// Open a live session. Called the instant the trigger key goes down,
+    /// concurrently with microphone start-up, so it must not need any audio yet.
+    func openSession(target: DictationTarget, trace: DictationTrace?) async throws -> any TranscriptionSession
+
+    /// Transcribe a complete stored clip (16 kHz mono PCM WAV): history retries,
+    /// the debug CLI, and dictations whose live session never opened.
+    func transcribe(wavData: Data) async throws -> String
+
+    /// Transcribe a clip whose live session has just failed, *without* opening
+    /// another one: a fresh session would spend its whole hang guard again, so one
+    /// bad network moment would cost two timeouts back to back.
+    func transcribeAfterLiveFailure(wavData: Data) async throws -> String
+
+    /// What `transcribeAfterLiveFailure` is called in traces ("raw /llm/asr").
+    var fallbackLabel: String { get }
+
+    /// Whether a failed live session is worth retrying on the recorded clip at
+    /// all. False for a provider whose live session *is* its only path, where a
+    /// retry would just fail the same way after the same wait.
+    var retriesAfterLiveFailure: Bool { get }
+
+    /// Warm connections, credentials and models so the first dictation is as
+    /// quick as the tenth. Returns why the provider cannot work at all, when that
+    /// is known before anyone dictates (no key, no model), else nil.
+    func prewarm() async -> String?
+}
+
+extension TranscriptionProvider {
+    var retriesAfterLiveFailure: Bool { true }
+
+    func transcribe(wavURL: URL) async throws -> String {
+        try await transcribe(wavData: Data(contentsOf: wavURL))
+    }
+}
+
+/// The providers themselves, one instance each for the life of the process.
+enum TranscriptionProviders {
+    static let wisprFlow = WisprFlowProvider()
+    static let parakeet = ParakeetProvider()
+
+    static func provider(_ id: TranscriptionProviderID) -> any TranscriptionProvider {
+        switch id {
+        case .wisprFlow: return wisprFlow
+        case .parakeet: return parakeet
+        }
+    }
+
+    /// The provider whose transcript gets pasted.
+    static var primary: any TranscriptionProvider { provider(TranscriptionPreferences.primary) }
+
+    /// The provider shadowing it, if one is chosen.
+    static var shadow: (any TranscriptionProvider)? { TranscriptionPreferences.shadow.map(provider) }
+}
+
+/// One live dictation inside a provider. Fed audio while the user is still
+/// speaking, so only the tail is left to do when the key comes up.
+protocol TranscriptionSession: Sendable {
+    /// Newly captured 16 kHz mono PCM16, any length. Callers send in capture
+    /// order and never concurrently (`TranscriptionLeg` chains them).
+    func send(pcm: Data) async
+    /// The last of the audio, then the final text. Bounded by the provider's own
+    /// hang guard, after which it throws.
+    func commit(pcm: Data) async throws -> String
+    /// Abandon the session. Safe to call more than once.
+    func cancel() async
+}
+
+/// The app a dictation is destined for; a provider may use it for tone.
+struct DictationTarget: Sendable {
     var bundleIdentifier: String?
     var name: String?
-}
-
-extension Transcriber {
-    /// Transcribe a 16 kHz mono PCM WAV file to text.
-    func transcribe(wavURL: URL, language: String) async throws -> String {
-        try await transcribe(wavData: Data(contentsOf: wavURL), language: language)
-    }
 }
 
 enum TranscriberError: Error {

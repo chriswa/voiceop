@@ -25,7 +25,7 @@ enum DebugCLI {
             let bytes = (try? Data(contentsOf: wav).count) ?? 0
             FileHandle.standardError.write(Data("said \(text.count) chars -> WAV \(bytes) B\n".utf8))
 
-            let transcript = try await WisprTranscriber().transcribe(wavURL: wav, language: "en")
+            let transcript = try await WisprTranscriber().transcribe(wavData: Data(contentsOf: wav), language: "en")
             print("transcript: \(transcript)")
         } catch {
             FileHandle.standardError.write(Data("asr-test failed: \(error)\n".utf8))
@@ -33,7 +33,7 @@ enum DebugCLI {
     }
 
     /// Synthesize `text` with `say` and transcribe it through the gRPC flow path
-    /// (`WisprFlowTranscriber`) — the formatted Wispr-parity path, streamed over
+    /// (`WisprFlowProvider`) — the formatted Wispr-parity path, streamed over
     /// `TranscribeStream` exactly as live dictation is. Requires
     /// `VOICEOP_BASETEN_KEY`; otherwise it exercises the `/llm/asr` fallback.
     /// One stream (endpoint etiquette). The `trace …` line it logs shows the
@@ -52,10 +52,56 @@ enum DebugCLI {
             try AudioRecorder.convertToASRWav(from: aiff, to: wav)
             let haveKey = WisprBasetenKey.value != nil
             FileHandle.standardError.write(Data("flow-grpc-test: said \(text.count) chars; baseten key \(haveKey ? "present" : "ABSENT → /llm fallback")\n".utf8))
-            let transcript = try await WisprFlowTranscriber().transcribe(wavURL: wav, language: "en")
+            let transcript = try await WisprFlowProvider().transcribe(wavURL: wav)
             print("transcript: \(transcript)")
         } catch {
             FileHandle.standardError.write(Data("flow-grpc-test failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    /// Synthesize `text` with `say` and dictate it through a provider's *live*
+    /// path — a `TranscriptionLeg` fed 100 ms slices in real time, then finished,
+    /// exactly as a held key does. The `trace …` line shows the timing.
+    static func runProviderTest(provider id: TranscriptionProviderID, text: String) async {
+        do {
+            let tmp = FileManager.default.temporaryDirectory
+            let aiff = tmp.appendingPathComponent("vo-say-\(UUID().uuidString).aiff")
+            let wavURL = aiff.deletingPathExtension().appendingPathExtension("wav")
+            defer { try? FileManager.default.removeItem(at: aiff)
+                    try? FileManager.default.removeItem(at: wavURL) }
+            let say = Process()
+            say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+            say.arguments = ["-o", aiff.path, text]
+            try say.run(); say.waitUntilExit()
+            try AudioRecorder.convertToASRWav(from: aiff, to: wavURL)
+            let clip = try Data(contentsOf: wavURL)
+            let wav = try WAVFile.parse(clip)
+
+            let provider = TranscriptionProviders.provider(id)
+            if let problem = await provider.prewarm() {
+                FileHandle.standardError.write(Data("provider-test: \(id.rawValue) not ready: \(problem)\n".utf8))
+            }
+            let trace = DictationTrace("provider-test")
+            let leg = TranscriptionLeg(provider: provider, target: DictationTarget(), trace: trace)
+            let slice = 3_200   // 100 ms of 16 kHz PCM16
+            var offset = 0
+            while offset < wav.samples.count {
+                let end = min(offset + slice, wav.samples.count)
+                leg.append(wav.samples.subdata(in: offset ..< end))
+                offset = end
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            trace.mark("key-up")
+            let outcome = try await leg.finish(tail: Data(), openGrace: .seconds(2), clip: { clip })
+            trace.mark("done")
+            trace.flush()
+            if let failure = outcome.liveFailure {
+                FileHandle.standardError.write(Data("provider-test: live path failed (\(failure)), fell back\n".utf8))
+            }
+            print("transcript: \(outcome.text)")
+        } catch {
+            FileHandle.standardError.write(Data("provider-test failed: \(error)\n".utf8))
             exit(1)
         }
     }
@@ -68,7 +114,7 @@ enum DebugCLI {
             let wav = try WAVFile(contentsOf: url)
             FileHandle.standardError.write(Data(String(format: "clip: %.1fs @ %d Hz\n",
                                                        wav.duration, wav.sampleRate).utf8))
-            let transcript = try await WisprTranscriber().transcribe(wavURL: url, language: "en")
+            let transcript = try await WisprTranscriber().transcribe(wavData: Data(contentsOf: url), language: "en")
             print(transcript)
         } catch {
             FileHandle.standardError.write(Data("transcribe-file failed: \(error)\n".utf8))

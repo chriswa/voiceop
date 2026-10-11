@@ -19,6 +19,8 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
+    /// Which provider transcribes, and which shadows it — rebuilt on every open.
+    private let transcription = NSMenuItem(title: "Transcription", action: nil, keyEquivalent: "")
     private let playbackSpeed = NSMenuItem(title: "Playback Speed: 1.0×", action: nil, keyEquivalent: "")
     private let fasterSpeech = NSMenuItem(title: "Faster Speech", action: #selector(faster), keyEquivalent: ".")
     private let slowerSpeech = NSMenuItem(title: "Slower Speech", action: #selector(slower), keyEquivalent: ",")
@@ -92,6 +94,15 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onCopySTT: ((UUID) -> Void)?
     var onRetryCommand: ((UUID) -> Void)?
     var onCopyCommand: ((UUID) -> Void)?
+    /// The provider that pastes, and the one shadowing it (nil for none).
+    var transcriptionState: (() -> (primary: TranscriptionProviderID, shadow: TranscriptionProviderID?))?
+    var onSelectProvider: ((TranscriptionProviderID) -> Void)?
+    var onSelectShadow: ((TranscriptionProviderID?) -> Void)?
+    /// The latest shadow transcript, for the copy item's title and enablement.
+    var lastShadow: (() -> ShadowTranscript?)?
+    var onCopyLastShadow: (() -> Void)?
+    var onCopyShadowSTT: ((UUID) -> Void)?
+    var onCopyShadowCommand: ((UUID) -> Void)?
     /// The menu opened (true) or closed (false). Its items carry the same ⌘⌃
     /// shortcuts the global tap watches for, and AppKit fires them itself while
     /// the menu is open, so the tap must stand down for exactly that window.
@@ -110,6 +121,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         mute.keyEquivalent = "b"; mute.keyEquivalentModifierMask = [.command, .control]
         mute.target = self; menu.addItem(mute); menu.addItem(.separator())
         stt.submenu = NSMenu(); commands.submenu = NSMenu(); menu.addItem(stt); menu.addItem(commands)
+        transcription.submenu = NSMenu(); menu.addItem(transcription)
         menu.addItem(.separator())
         // Real key equivalents, so each item shows its shortcut right-aligned the
         // way every other menu does. While the menu is open AppKit fires these
@@ -237,8 +249,11 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         typeInsteadOfPaste.state = (typeInsteadOfPasteState?() ?? false) ? .on : .off
         keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
         keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
-        rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT)
-        rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand)
+        rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT,
+                copyShadow: onCopyShadowSTT)
+        rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand,
+                copyShadow: onCopyShadowCommand)
+        rebuildTranscriptionMenu()
         refreshTTSMenu()
         onTTSMenuOpened?()
     }
@@ -264,21 +279,76 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         guard menu === self.menu else { return }
         onMenuOpenChanged?(false)
     }
-    private func rebuild<T>(_ menu: NSMenu, entries: [T], retry: ((UUID) -> Void)?, copy: ((UUID) -> Void)?) {
+    private func rebuild<T>(_ menu: NSMenu, entries: [T], retry: ((UUID) -> Void)?, copy: ((UUID) -> Void)?,
+                            copyShadow: ((UUID) -> Void)?) {
         menu.removeAllItems()
         if entries.isEmpty { menu.addItem(NSMenuItem(title: "None yet", action: nil, keyEquivalent: "")); return }
         for e in entries.prefix(10) {
-            let id: UUID; let title: String
-            if let x = e as? STTHistoryEntry { id = x.id; title = x.menuTitle }
-            else if let x = e as? CommandHistoryEntry { id = x.id; title = x.menuTitle }
+            let id: UUID; let title: String; let shadow: ShadowTranscript?
+            if let x = e as? STTHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow }
+            else if let x = e as? CommandHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow }
             else { continue }
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             let sub = NSMenu(); let retryItem = NSMenuItem(title: "Retry", action: #selector(runRetry(_:)), keyEquivalent: "")
             retryItem.target = self; retryItem.representedObject = Action(id: id, handler: retry); sub.addItem(retryItem)
             let copyItem = NSMenuItem(title: "Copy transcription", action: #selector(runCopy(_:)), keyEquivalent: "")
             copyItem.target = self; copyItem.representedObject = Action(id: id, handler: copy); sub.addItem(copyItem)
+            if let shadow {
+                sub.addItem(.separator())
+                let line = NSMenuItem(title: "Shadow — \(shadow.menuTitle)", action: nil, keyEquivalent: "")
+                line.isEnabled = false; sub.addItem(line)
+                if let text = shadow.text, !text.isEmpty {
+                    let copyShadowItem = NSMenuItem(title: "Copy shadow transcription", action: #selector(runCopy(_:)), keyEquivalent: "")
+                    copyShadowItem.target = self; copyShadowItem.representedObject = Action(id: id, handler: copyShadow)
+                    sub.addItem(copyShadowItem)
+                }
+            }
             item.submenu = sub; menu.addItem(item)
         }
+    }
+    private func rebuildTranscriptionMenu() {
+        guard let state = transcriptionState?(), let menu = transcription.submenu else { return }
+        transcription.title = "Transcription: \(state.primary.displayName)"
+            + (state.shadow.map { " (shadow: \($0.displayName))" } ?? "")
+        menu.removeAllItems()
+        let providerHeader = NSMenuItem(title: "Provider", action: nil, keyEquivalent: "")
+        providerHeader.isEnabled = false; menu.addItem(providerHeader)
+        for id in TranscriptionProviderID.allCases {
+            let item = NSMenuItem(title: id.displayName, action: #selector(selectProvider(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = id.rawValue; item.indentationLevel = 1
+            item.state = id == state.primary ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let shadowHeader = NSMenuItem(title: "Shadow (kept for comparison, never pasted)", action: nil, keyEquivalent: "")
+        shadowHeader.isEnabled = false; menu.addItem(shadowHeader)
+        let none = NSMenuItem(title: "None", action: #selector(selectShadow(_:)), keyEquivalent: "")
+        none.target = self; none.indentationLevel = 1; none.state = state.shadow == nil ? .on : .off
+        menu.addItem(none)
+        for id in TranscriptionProviderID.allCases where id != state.primary {
+            let item = NSMenuItem(title: id.displayName, action: #selector(selectShadow(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = id.rawValue; item.indentationLevel = 1
+            item.state = id == state.shadow ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let last = lastShadow?()
+        let copyLast = NSMenuItem(title: "Copy Last Shadow Transcript", action: #selector(copyLastShadow), keyEquivalent: "")
+        copyLast.target = self
+        menu.addItem(copyLast)
+        if let last {
+            let preview = NSMenuItem(title: last.menuTitle, action: nil, keyEquivalent: "")
+            preview.isEnabled = false; preview.indentationLevel = 1
+            menu.addItem(preview)
+        }
+    }
+    @objc private func copyLastShadow() { onCopyLastShadow?() }
+    @objc private func selectProvider(_ sender: NSMenuItem) {
+        guard let id = (sender.representedObject as? String).flatMap(TranscriptionProviderID.init) else { return }
+        onSelectProvider?(id)
+    }
+    @objc private func selectShadow(_ sender: NSMenuItem) {
+        onSelectShadow?((sender.representedObject as? String).flatMap(TranscriptionProviderID.init))
     }
     private final class Action: NSObject { let id: UUID; let handler: ((UUID) -> Void)?; init(id: UUID, handler: ((UUID) -> Void)?) { self.id = id; self.handler = handler } }
     @objc private func runRetry(_ sender: NSMenuItem) { (sender.representedObject as? Action)?.handler?((sender.representedObject as! Action).id) }
@@ -337,6 +407,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         // One Kokoro action at a time; Cancel Install stays live while one runs.
         if item === ttsUpdate || item === ttsRestart || item === ttsUninstall { return ttsActionsEnabled }
         if item === ttsInstall { return ttsActionsEnabled || item.title == "Cancel Install" }
+        if item.action == #selector(copyLastShadow) { return !(lastShadow?()?.text ?? "").isEmpty }
         guard item === keepMicOpen else { return true }
         return !(keepMicOpenForWirelessState?() ?? false)
     }

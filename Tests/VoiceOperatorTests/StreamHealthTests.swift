@@ -14,6 +14,12 @@ final class StreamHealthTests: XCTestCase {
         XCTAssertEqual(warning, "⚠︎ Dictation is slow: live stream unavailable (network timeout)")
     }
 
+    func testParakeetFailuresAreNotCalledSlow() {
+        let health = StreamHealth.degraded(reason: "the Parakeet model is still loading", provider: .parakeet)
+        XCTAssertEqual(health.menuWarning, "⚠︎ Parakeet is failing: the Parakeet model is still loading")
+        XCTAssertTrue(health.logLine.contains("Parakeet dictations are failing"), health.logLine)
+    }
+
     func testMissingKeyGetsAFixHint() {
         let warning = StreamHealth.degraded(reason: TranscriberError.noBasetenKey.userMessage).menuWarning ?? ""
         XCTAssertTrue(warning.contains("no Baseten key"), warning)

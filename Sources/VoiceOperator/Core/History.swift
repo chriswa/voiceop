@@ -12,6 +12,8 @@ struct STTHistoryEntry: Identifiable, Sendable, Codable {
     /// the menu so a failure isn't silently indistinguishable from "(empty)".
     var error: String? = nil
     let wavURL: URL?
+    /// What the shadow provider made of the same audio, if one was on.
+    var shadow: ShadowTranscript? = nil
 
     var menuTitle: String {
         let secs = String(format: "%.1fs", duration)
@@ -33,6 +35,8 @@ struct CommandHistoryEntry: Identifiable, Sendable, Codable {
     /// Why the last transcription attempt failed (nil on success).
     var error: String? = nil
     let wavURL: URL?
+    /// What the shadow provider made of the same audio, if one was on.
+    var shadow: ShadowTranscript? = nil
 
     var menuTitle: String {
         let secs = String(format: "%.1fs", duration)
@@ -42,6 +46,30 @@ struct CommandHistoryEntry: Identifiable, Sendable, Codable {
         let text = transcript.isEmpty ? "(empty)" : transcript.vo_truncated(46)
         return "\(date.vo_relativeAge) · \(secs) · \(recognized ? "" : "✗ ")\(text)"
     }
+}
+
+/// A shadow provider's result for one dictation — kept beside the pasted
+/// transcript so the two can be compared after the fact.
+struct ShadowTranscript: Sendable, Codable, Equatable {
+    /// A `TranscriptionProviderID` raw value — stored as a string so a provider
+    /// later dropped from the list cannot make the whole history undecodable.
+    let provider: String
+    /// The raw transcript (no transcript style applied), or nil if it failed.
+    var text: String?
+    /// Why it failed, or nil.
+    var error: String?
+    /// Key-up to result, in milliseconds.
+    var latencyMS: Int?
+
+    /// One line for the history submenu.
+    var menuTitle: String {
+        let body = if let error { "⚠️ \(error.vo_truncated(40))" }
+                   else if let text, !text.isEmpty { text.vo_truncated(60) }
+                   else { "(empty)" }
+        return "\(providerName): \(body)"
+    }
+
+    var providerName: String { TranscriptionProviderID(rawValue: provider)?.displayName ?? provider }
 }
 
 extension String {

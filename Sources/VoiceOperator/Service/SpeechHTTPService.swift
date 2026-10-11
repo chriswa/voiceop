@@ -19,8 +19,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// provider the Text to Speech menu chose (`kokoro` or `custom`) and its
     /// default voice, instead of a fixed `kokoro` / `af_heart`; 13 added
     /// `/v1/subscribers` — clients register their own socket for command
-    /// dictations and dictation start/end events (see `Subscriber`).
-    static let discoveryVersion = 13
+    /// dictations and dictation start/end events (see `Subscriber`); 14 added
+    /// `transcription_provider` and `shadow_provider` to `/v1/status`.
+    static let discoveryVersion = 14
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -38,6 +39,9 @@ final class SpeechHTTPService: @unchecked Sendable {
         /// Remote transcriptions in flight. Like `dictating`, these hold off a
         /// restart — a phone mid-sentence would otherwise lose what it said.
         var remoteTranscriptions: Int
+        /// The provider that pastes, and the one shadowing it (nil for none).
+        var provider: TranscriptionProviderID = .wisprFlow
+        var shadow: TranscriptionProviderID?
 
         var object: [String: Any] {
             var o: [String: Any] =
@@ -48,6 +52,8 @@ final class SpeechHTTPService: @unchecked Sendable {
                  "stream": stream.wireName,
                  "remote_transcription": true, "remote_transcriptions": remoteTranscriptions]
             if let reason = stream.reason { o["stream_reason"] = reason }
+            o["transcription_provider"] = provider.rawValue
+            if let shadow { o["shadow_provider"] = shadow.rawValue }
             return o
         }
     }

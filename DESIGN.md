@@ -288,10 +288,26 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   decision is the whole-clip peak/RMS gate in `endDictation` (i.e. skip only when the entire
   recording was silent). An earlier per-chunk gate that dropped individual 28 s slices judged
   in isolation lost soft words and boundary-split words and was removed.
+- **Transcription providers (2026-10-11).** Everything from captured audio to pasted text —
+  recognition plus any clean-up pass — is one `TranscriptionProvider`
+  (`Transcriber/Transcriber.swift`); the arbiter and the remote (phone) path know nothing
+  else. A provider opens a `TranscriptionSession` that takes plain 16 kHz PCM16 while the key
+  is held and commits at key-up; it owns its own encoding, credentials, fallback
+  (`transcribeAfterLiveFailure`) and health reason. `TranscriptionLeg` is one provider's share
+  of one dictation — open-while-the-mic-starts, buffer until open, chained in-order sends,
+  open-grace, commit, fallback — shared by `AudioArbiter` and `RemoteTranscriptionManager`.
+  Providers are a hard-coded list (`TranscriptionProviderID`): **Wispr Flow**
+  (`Transcriber/WisprFlow/`, opus-encoded inside `WisprFlowSession`) and **Parakeet**
+  (`Transcriber/Parakeet/`, FluidAudio, buffers and transcribes at key-up, never retries and
+  never falls back to Wispr). The menu picks the primary and an optional **shadow**: a second
+  leg fed the same audio whose result is filed on the history entry (`ShadowTranscript`) for
+  comparison. The shadow never pastes, never delays anything, and never touches
+  `StreamHealth`, which follows the primary only. Remote dictation uses the primary, without
+  a shadow (it has no history entry to file one on).
 - **Streaming dictation (2026-08-04).** The trigger key going down starts three things at
   once: the microphone, the duplex gRPC stream, and a 100 ms upload pump
-  (`AudioArbiter.pumpAudio`) that opus-encodes each new slice of captured PCM and pushes it up
-  the open stream. Key-up sends the tail with `commit: TRUE` and closes the request stream, so
+  (`AudioArbiter.pumpAudio`) that hands each new slice of captured PCM to the provider's
+  session (for Wispr, `WisprFlowSession` opus-encodes it and pushes it up the open stream). Key-up sends the tail with `commit: TRUE` and closes the request stream, so
   the only latency the user sees is the tail plus the server's formatting pass — flat
   regardless of dictation length. This replaced a post-hoc unary call that uploaded nothing
   until the key came up (and dialled a fresh TLS connection per call, and cut anything over
@@ -794,7 +810,7 @@ client; see **Dictation and command mode** above.
   Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest` + the
   `flow_api.v1` protobuf), captured in `spike/flow_request.md`, `spike/flow_spike.py`, and
   `proto/flow_api_v1.proto`. Three transports Wispr uses, in fallback order:
-  1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowTranscriber` + `FlowSession`).**
+  1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowProvider` + `FlowSession`).**
      Bidirectional `flow_api.v1.TranscriptionService/**TranscribeStream**` on
      `model-v31pl413.grpc.api.baseten.co:443` (TLS, grpc-swift **1.x** — 2.x floors the
      generated clients), over one process-wide keepalive'd connection

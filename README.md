@@ -41,7 +41,22 @@ checked in, so a normal build doesn't need it.
 
 ## Transcription backends
 
-`WisprFlowTranscriber` (the default) uses Wispr's gRPC path, which returns
+Dictation goes through a **transcription provider**, chosen from the menu bar's
+**Transcription** submenu (the choice survives restarts):
+
+- **Wispr Flow** (the default) — described below.
+- **Parakeet (on this Mac)** — NVIDIA Parakeet TDT v3 via FluidAudio, entirely
+  on device. Raw recognition with its own punctuation and casing: no clean-up
+  and no custom vocabulary. The model (a few hundred MB) downloads from Hugging
+  Face the first time it is chosen and loads at every launch. If it fails, the
+  dictation fails — it never falls back to Wispr.
+
+The same submenu can turn on a **shadow** provider: it gets the same audio,
+never pastes, and its transcript is filed beside the real one in **Recent
+Dictations** (each entry's submenu shows it and can copy it). **Copy Last Shadow
+Transcript** copies the most recent one.
+
+`WisprFlowProvider` uses Wispr's gRPC path, which returns
 **formatted** text honouring your Wispr dictionary. It needs Wispr's Baseten
 API key, read at runtime from `$VOICEOP_BASETEN_KEY` or
 `~/Library/Application Support/VoiceOperator/baseten-key`. **Never commit it.**

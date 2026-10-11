@@ -27,7 +27,7 @@ import Foundation
 /// /llm/asr in order, joining the per-chunk transcripts with spaces. We
 /// replicate exactly that: fixed 28 s cuts, sequential requests, space-joined
 /// result.
-struct WisprTranscriber: Transcriber {
+struct WisprTranscriber {
     private let endpoint = URL(string: "https://api.wisprflow.ai/llm/asr")!
 
     /// Wispr Flow's chunk size (`basetenChunkSizeSeconds` in the Flow app). Only

@@ -28,6 +28,7 @@ final class StreamingSpeechPlayer {
     private var pendingSeekFrame: Int64?
     private(set) var rate: Float = 1
     var onDrain: (() -> Void)?
+    private var configurationObserver: NSObjectProtocol?
 
     var duration: Double { Double(frameCount) / (format?.sampleRate ?? 24_000) }
     var atEnd: Bool { completed }
@@ -68,8 +69,32 @@ final class StreamingSpeechPlayer {
         engine.connect(timePitch, to: engine.mainMixerNode, format: format)
         if manualRendering {
             try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
+        } else {
+            configurationObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.outputChanged() }
+            }
         }
         try engine.start()
+    }
+
+    /// The output device or its format changed under us — AirPods connecting, a
+    /// headset switching profile, another output picked. AVAudioEngine stops
+    /// itself and drops everything scheduled, so without this the job would sit
+    /// at its position until cancelled. Restart on the new hardware and
+    /// re-schedule from where the listener was.
+    private func outputChanged() {
+        // A change the engine rode out (it is still running) needs nothing.
+        guard !halted, !engine.isRunning else { return }
+        let resumeAt = position
+        do { try engine.start() }
+        catch {
+            Log.log("tts playback: could not restart after an output change: \(error)")
+            return
+        }
+        Log.log(String(format: "tts playback: output changed (%@, engine %.0f Hz) — resuming at %.2fs",
+                       OutputDevice.formatSummary, engine.outputNode.outputFormat(forBus: 0).sampleRate, resumeAt))
+        if !completed, frameCount > 0 { seek(to: resumeAt) }
     }
 
     /// Queue audio without starting playback until `release()`. Synthesis keeps
@@ -186,6 +211,8 @@ final class StreamingSpeechPlayer {
     func halt() {
         guard !halted else { return }
         halted = true
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+        configurationObserver = nil
         timeline.reset(at: 0)
         node.stop()
         engine.stop()

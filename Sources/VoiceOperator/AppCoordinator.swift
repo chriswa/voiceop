@@ -152,7 +152,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         // output change rather than sampling it at dictation time, so the headset
         // is already in the profile it will stay in before the key is pressed.
         outputWatcher.onChange = { [weak self] in
-            MainActor.assumeIsolated { self?.applyMicrophonePolicy(reason: "output device changed") }
+            MainActor.assumeIsolated {
+                self?.applyMicrophonePolicy(reason: "output device changed")
+                self?.arbiter.outputDeviceChanged()
+            }
         }
         outputWatcher.start()
         applyMicrophonePolicy(reason: "launch")

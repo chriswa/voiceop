@@ -38,7 +38,14 @@ enum OutputDevice {
         return "\(name(device) ?? "unnamed") (\(fourCC(transport(device))))"
     }
 
-    private static func defaultOutput() -> AudioObjectID? {
+    /// `summary` plus the device's current sample rate — a Bluetooth headset
+    /// drops from 48 kHz to 24 or 16 kHz when it switches to its call profile.
+    static var formatSummary: String {
+        guard let device = defaultOutput() else { return summary }
+        return "\(summary) at \(Int(sampleRate(device))) Hz"
+    }
+
+    static func defaultOutput() -> AudioObjectID? {
         var id = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
         var addr = AudioObjectPropertyAddress(
@@ -59,6 +66,17 @@ enum OutputDevice {
         var size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectHasProperty(device, &addr),
               AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr else { return 0 }
+        return value
+    }
+
+    private static func sampleRate(_ device: AudioObjectID) -> Double {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr else { return 0 }
         return value
     }
 
@@ -85,24 +103,36 @@ enum OutputDevice {
 }
 
 /// Calls back whenever the default output device changes — AirPods connecting or
-/// going away, the user picking a different output in Control Center.
+/// going away, the user picking a different output in Control Center — and logs
+/// every such change, and every sample-rate change of the current device (a
+/// headset switching between its music and call profiles), so an audio problem
+/// can be lined up against what the hardware was doing.
 ///
 /// The callback carries nothing: ask `OutputDevice` for the answer when it
 /// arrives, so there is one place that decides what "wireless" means and no
-/// cached copy of it to go stale.
+/// cached copy of it to go stale. All of this runs on the main queue.
 final class OutputDeviceWatcher: @unchecked Sendable {
-    /// Fired **on the main queue**.
+    /// Fired **on the main queue**, after the change is logged.
     var onChange: (@Sendable () -> Void)?
 
     private var address = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
+    private var rateAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
     private var listener: AudioObjectPropertyListenerBlock?
+    /// The sample-rate listener and the device it is on — moved to each new
+    /// default output as it arrives.
+    private var rateListener: (device: AudioObjectID, block: AudioObjectPropertyListenerBlock)?
 
     func start() {
         guard listener == nil else { return }
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Log.log("output device: now \(OutputDevice.formatSummary)")
+            self?.watchSampleRate()
             self?.onChange?()
         }
         listener = block
@@ -112,13 +142,33 @@ final class OutputDeviceWatcher: @unchecked Sendable {
             listener = nil
             Log.log("output watcher: could not observe the default output device (status \(status))")
         }
+        Log.log("output device: \(OutputDevice.formatSummary)")
+        watchSampleRate()
     }
 
     func stop() {
+        unwatchSampleRate()
         guard let listener else { return }
         AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener)
         self.listener = nil
+    }
+
+    private func watchSampleRate() {
+        unwatchSampleRate()
+        guard let device = OutputDevice.defaultOutput() else { return }
+        let block: AudioObjectPropertyListenerBlock = { _, _ in
+            Log.log("output format: \(OutputDevice.formatSummary)")
+        }
+        if AudioObjectAddPropertyListenerBlock(device, &rateAddress, DispatchQueue.main, block) == noErr {
+            rateListener = (device, block)
+        }
+    }
+
+    private func unwatchSampleRate() {
+        guard let rateListener else { return }
+        AudioObjectRemovePropertyListenerBlock(rateListener.device, &rateAddress, DispatchQueue.main, rateListener.block)
+        self.rateListener = nil
     }
 
     deinit { stop() }

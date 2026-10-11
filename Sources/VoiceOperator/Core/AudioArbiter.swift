@@ -979,7 +979,7 @@ final class AudioArbiter {
         let wasSpeaking = isSpeaking
         isSpeaking = active
         if active {
-            narrationDucker.start()
+            applyDucking(announce: !wasSpeaking)
             wordOverlay.activate()
         } else {
             narrationDucker.stop()
@@ -989,8 +989,30 @@ final class AudioArbiter {
         if wasSpeaking && !active { onSpeechIdle?() }
         onPlaybackControlsChanged?()
     }
+    /// Duck other audio under narration — except on a Bluetooth output. Voice
+    /// Processing I/O opens the microphone and runs echo cancellation, which puts
+    /// AirPods and every other Bluetooth headset into its call profile: low-rate,
+    /// distorted playback, with the canceller working against our own speech.
+    private func applyDucking(announce: Bool) {
+        if OutputDevice.isWireless {
+            narrationDucker.stop()
+            if announce { Log.log("tts ducking: off on Bluetooth output — \(OutputDevice.summary)") }
+        } else {
+            narrationDucker.start()
+        }
+    }
+
+    /// The default output device changed. Ducking follows it: dropped the moment
+    /// a Bluetooth headset becomes the output, restored when it goes, if speech is
+    /// playing at the time. (The player rebuilds itself — see `StreamingSpeechPlayer`.)
+    func outputDeviceChanged() {
+        guard isSpeaking else { return }
+        applyDucking(announce: true)
+    }
+
     /// Starting the ducker's Voice Processing I/O graph reconfigures the output
-    /// device. On the built-in output and Bluetooth headsets that is inaudible;
+    /// device. On the built-in output that is inaudible (and on Bluetooth the
+    /// ducker never starts — see `applyDucking`);
     /// on a USB headset dongle (EPOS BTD 800) it is a cut-out that, unheld, lands
     /// on the first second or two of speech, because the graph takes about as
     /// long to start as the first sentence takes to synthesize. There, the first

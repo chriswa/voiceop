@@ -21,24 +21,14 @@ enum TranscriptionPreferences {
     private static let primaryKey = "vo.transcriptionProvider"
     private static let shadowKey = "vo.shadowTranscriptionProvider"
 
-    /// The provider whose transcript is pasted. Until one is chosen it is Wispr
-    /// Flow on a Mac already signed in to Wispr, and Parakeet everywhere else —
-    /// decided once and stored, so signing in to Wispr later does not quietly
-    /// switch providers.
-    static var primary: TranscriptionProviderID {
-        get {
-            if let stored = UserDefaults.standard.string(forKey: primaryKey).flatMap(TranscriptionProviderID.init) {
-                return stored
-            }
-            let chosen = defaultPrimary(wisprSignedIn: WisprToken.hasSession)
-            UserDefaults.standard.set(chosen.rawValue, forKey: primaryKey)
-            return chosen
-        }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: primaryKey) }
-    }
+    /// What dictation uses until the menu says otherwise: always Parakeet, even
+    /// on a Mac signed in to Wispr Flow. Wispr is only ever a deliberate choice.
+    static let defaultPrimary = TranscriptionProviderID.parakeet
 
-    static func defaultPrimary(wisprSignedIn: Bool) -> TranscriptionProviderID {
-        wisprSignedIn ? .wisprFlow : .parakeet
+    /// The provider whose transcript is pasted.
+    static var primary: TranscriptionProviderID {
+        get { UserDefaults.standard.string(forKey: primaryKey).flatMap(TranscriptionProviderID.init) ?? defaultPrimary }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: primaryKey) }
     }
 
     /// Whether a provider can be chosen at all on this Mac: Wispr Flow needs a

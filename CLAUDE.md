@@ -31,9 +31,10 @@ something new, record it in `DESIGN.md` + `spike/` so it's never lost.
 ## Dictation transcription paths
 
 Dictation goes through a **transcription provider**, picked from the menu bar's
-**Transcription** submenu (persisted in `TranscriptionPreferences`): **Wispr Flow**
-(the default) or **Parakeet** (on device, FluidAudio, raw — no fix-up, no custom
-words, never falls back to Wispr). The same submenu can turn on a **shadow**
+**Transcription** submenu (persisted in `TranscriptionPreferences`): **Parakeet**
+(always the default, even where Wispr is installed; on device, FluidAudio, raw —
+no fix-up, no custom words, never falls back to Wispr) or **Wispr Flow** (only
+when chosen in the menu). The same submenu can turn on a **shadow**
 provider: fed the same audio, never pastes, its result filed on the history entry
 for comparison, and it never touches `StreamHealth` (which follows the primary
 only). The arbiter and phone dictation know only `TranscriptionProvider` /

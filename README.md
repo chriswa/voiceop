@@ -44,9 +44,9 @@ checked in, so a normal build doesn't need it.
 Dictation goes through a **transcription provider**, chosen from the menu bar's
 **Transcription** submenu (the choice survives restarts):
 
-- **Wispr Flow** — described below. The default on a Mac already signed in to
-  Wispr Flow; greyed out on one that isn't.
-- **Parakeet (on this Mac)** — the default everywhere else. NVIDIA Parakeet TDT
+- **Wispr Flow** — described below. Used only when chosen in the menu; greyed
+  out on a Mac without a Wispr sign-in.
+- **Parakeet (on this Mac)** — the default, on every Mac. NVIDIA Parakeet TDT
   v3 via FluidAudio, entirely on device. Raw recognition with its own punctuation and casing: no clean-up
   and no custom vocabulary. The model (a few hundred MB) downloads from Hugging
   Face the first time it is chosen and loads at every launch. If it fails, the

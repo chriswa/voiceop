@@ -296,9 +296,9 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   (`transcribeAfterLiveFailure`) and health reason. `TranscriptionLeg` is one provider's share
   of one dictation — open-while-the-mic-starts, buffer until open, chained in-order sends,
   open-grace, commit, fallback — shared by `AudioArbiter` and `RemoteTranscriptionManager`.
-  Until one is chosen, the primary is Wispr Flow on a Mac with a Wispr sign-in to borrow
-  (`WisprToken.hasSession`) and Parakeet otherwise, decided once and stored; Wispr Flow is
-  greyed out in the menu without a sign-in, and nothing Wispr runs unless it is chosen.
+  The primary is Parakeet until the menu says otherwise, on every Mac — Wispr Flow is only
+  ever a deliberate choice, greyed out in the menu without a Wispr sign-in to borrow
+  (`WisprToken.hasSession`), and nothing Wispr runs unless it is chosen.
   Providers are a hard-coded list (`TranscriptionProviderID`): **Wispr Flow**
   (`Transcriber/WisprFlow/`, opus-encoded inside `WisprFlowSession`) and **Parakeet**
   (`Transcriber/Parakeet/`, FluidAudio, buffers and transcribes at key-up, never retries and

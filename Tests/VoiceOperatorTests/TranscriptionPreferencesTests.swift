@@ -19,9 +19,12 @@ final class TranscriptionPreferencesTests: XCTestCase {
         XCTAssertNil(TranscriptionPreferences.shadow)
     }
 
-    func testAMacWithoutWisprStartsOnParakeet() {
-        XCTAssertEqual(TranscriptionPreferences.defaultPrimary(wisprSignedIn: false), .parakeet)
-        XCTAssertEqual(TranscriptionPreferences.defaultPrimary(wisprSignedIn: true), .wisprFlow)
+    func testParakeetIsTheDefaultAndThereIsNoShadow() {
+        UserDefaults.standard.removeObject(forKey: "vo.transcriptionProvider")
+        UserDefaults.standard.removeObject(forKey: "vo.shadowTranscriptionProvider")
+        XCTAssertEqual(TranscriptionPreferences.defaultPrimary, .parakeet)
+        XCTAssertEqual(TranscriptionPreferences.primary, .parakeet)
+        XCTAssertNil(TranscriptionPreferences.shadow)
     }
 
     func testParakeetIsAlwaysAvailable() {

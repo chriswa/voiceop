@@ -34,6 +34,14 @@ actor WisprToken {
     }
     private static let tokenKey = "sb-dodjkfqhwrzqjwkfnthl-auth-token"
 
+    /// Whether there is any Wispr sign-in to work from: Wispr Flow's own session
+    /// or our rotated copy of it. A Mac that never had Wispr Flow has neither.
+    /// File checks only — no Keychain, no network, nothing logged.
+    static var hasSession: Bool {
+        FileManager.default.fileExists(atPath: sessionPath)
+            || FileManager.default.fileExists(atPath: storePath.path)
+    }
+
     /// Our own copy of the rotated session. Deliberately *not* Wispr's file: we
     /// never write to another app's storage, and Wispr rewrites that file
     /// wholesale whenever it runs.

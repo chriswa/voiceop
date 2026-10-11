@@ -314,7 +314,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         let providerHeader = NSMenuItem(title: "Provider", action: nil, keyEquivalent: "")
         providerHeader.isEnabled = false; menu.addItem(providerHeader)
         for id in TranscriptionProviderID.allCases {
-            let item = NSMenuItem(title: id.displayName, action: #selector(selectProvider(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: Self.title(for: id), action: #selector(selectProvider(_:)), keyEquivalent: "")
             item.target = self; item.representedObject = id.rawValue; item.indentationLevel = 1
             item.state = id == state.primary ? .on : .off
             menu.addItem(item)
@@ -326,7 +326,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         none.target = self; none.indentationLevel = 1; none.state = state.shadow == nil ? .on : .off
         menu.addItem(none)
         for id in TranscriptionProviderID.allCases where id != state.primary {
-            let item = NSMenuItem(title: id.displayName, action: #selector(selectShadow(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: Self.title(for: id), action: #selector(selectShadow(_:)), keyEquivalent: "")
             item.target = self; item.representedObject = id.rawValue; item.indentationLevel = 1
             item.state = id == state.shadow ? .on : .off
             menu.addItem(item)
@@ -343,6 +343,11 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         }
     }
     @objc private func copyLastShadow() { onCopyLastShadow?() }
+    /// A provider this Mac cannot use is listed, but greyed out (see
+    /// `validateMenuItem`) and says why.
+    private static func title(for id: TranscriptionProviderID) -> String {
+        TranscriptionPreferences.isAvailable(id) ? id.displayName : "\(id.displayName) (not signed in)"
+    }
     @objc private func selectProvider(_ sender: NSMenuItem) {
         guard let id = (sender.representedObject as? String).flatMap(TranscriptionProviderID.init) else { return }
         onSelectProvider?(id)
@@ -408,6 +413,11 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         if item === ttsUpdate || item === ttsRestart || item === ttsUninstall { return ttsActionsEnabled }
         if item === ttsInstall { return ttsActionsEnabled || item.title == "Cancel Install" }
         if item.action == #selector(copyLastShadow) { return !(lastShadow?()?.text ?? "").isEmpty }
+        if item.action == #selector(selectProvider(_:)) || item.action == #selector(selectShadow(_:)),
+           let id = (item.representedObject as? String).flatMap(TranscriptionProviderID.init) {
+            // The current choice stays enabled so it can always be seen as chosen.
+            return TranscriptionPreferences.isAvailable(id) || item.state == .on
+        }
         guard item === keepMicOpen else { return true }
         return !(keepMicOpenForWirelessState?() ?? false)
     }

@@ -19,6 +19,15 @@ final class TranscriptionPreferencesTests: XCTestCase {
         XCTAssertNil(TranscriptionPreferences.shadow)
     }
 
+    func testAMacWithoutWisprStartsOnParakeet() {
+        XCTAssertEqual(TranscriptionPreferences.defaultPrimary(wisprSignedIn: false), .parakeet)
+        XCTAssertEqual(TranscriptionPreferences.defaultPrimary(wisprSignedIn: true), .wisprFlow)
+    }
+
+    func testParakeetIsAlwaysAvailable() {
+        XCTAssertTrue(TranscriptionPreferences.isAvailable(.parakeet))
+    }
+
     func testTheRegistryFollowsThePreference() {
         for id in TranscriptionProviderID.allCases {
             TranscriptionPreferences.primary = id

@@ -214,7 +214,7 @@ final class SpeechJobManagerTests: XCTestCase {
         // as the budget allows: both free slots go to the next two sentences.
         await h.gate.synthesizeNext()
         await h.synth.waitForStarts(3)
-        await h.assertStarted(["Two.", "Three.", "Four."])
+        await h.assertStartedInAnyOrder(["Two.", "Three.", "Four."])
     }
 
     /// A budget rather than a fixed distance. Short sentences settle quickly and
@@ -270,6 +270,15 @@ private struct WindowHarness {
                        file: StaticString = #filePath, line: UInt = #line) async {
         let started = await synth.startedTexts
         XCTAssertEqual(started, expected, message, file: file, line: line)
+    }
+
+    /// For clips the window opens together: each starts in its own task, so
+    /// which reaches the synthesizer first is a race, not a rule.
+    func assertStartedInAnyOrder(_ expected: Set<String>, _ message: String = "",
+                                 file: StaticString = #filePath, line: UInt = #line) async {
+        let started = await synth.startedTexts
+        XCTAssertEqual(started.count, expected.count, message, file: file, line: line)
+        XCTAssertEqual(Set(started), expected, message, file: file, line: line)
     }
 }
 

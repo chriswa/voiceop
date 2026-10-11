@@ -64,20 +64,21 @@ actor ParakeetSession: TranscriptionSession {
 
 /// The loaded model, shared by every Parakeet session. Loading means a download
 /// of about 470 MB from Hugging Face the first time (cached under Application
-/// Support/FluidAudio), a CoreML compile of about 30 s the first time each new
-/// build loads it, and 0.2 s after that — so it happens once and is kept for the
-/// life of the process.
+/// Support/FluidAudio) and a CoreML compile of about 30 s, cached per app and
+/// macOS build in Caches/<bundle id>/com.apple.e5rt.e5bundlecache — so after a
+/// rebuild it still loads in 0.2 s. It is kept for the life of the process.
 actor ParakeetEngine {
     static let shared = ParakeetEngine()
 
     static let version = AsrModelVersion.v3
 
     /// How long a dictation waits for a load that is still under way — the app
-    /// was just launched, or Parakeet was just chosen. Sized for the CoreML
-    /// compile a freshly built binary pays once (about 30 s measured on this Mac;
-    /// later launches of the same build load in 0.2 s). A first download takes far
-    /// longer, and the dictation fails rather than hang.
-    static let loadWait: Duration = .seconds(45)
+    /// was just launched, or Parakeet was just chosen. A normal load takes 0.2 s.
+    /// The CoreML compile (about 30 s) happens only when its cache is missing:
+    /// the first load after a macOS update or a cleared cache, not after a
+    /// rebuild. That and a first download take longer than this, and the
+    /// dictation fails rather than hang.
+    static let loadWait: Duration = .seconds(15)
 
     enum EngineError: LocalizedError {
         case stillLoading

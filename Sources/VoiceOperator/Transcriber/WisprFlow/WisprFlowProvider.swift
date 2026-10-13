@@ -55,15 +55,27 @@ struct WisprFlowProvider: TranscriptionProvider {
     }
 
     func prewarm() async -> String? {
+        // Incognito: say why up front, and dial nothing.
+        guard Incognito.allows(Self.incognitoActivity) else { return Self.incognitoMessage }
         FlowChannel.shared.warmUp()
         Task { await WisprToken.shared.prewarm() }
         Task { _ = await dictionary.contextWords() }
         return WisprBasetenKey.value == nil ? TranscriberError.noBasetenKey.userMessage : nil
     }
 
+    /// Every request Wispr gets is also refused lower down (`FlowChannel`,
+    /// `WisprTranscriber`, `WisprToken`, `WisprDictionary`); these checks just
+    /// fail first, so the error names Wispr instead of a fallback's failure.
+    static let incognitoActivity = Incognito.Activity.network("Wispr Flow")
+
+    /// The reason incognito gives, which `StreamHealth` recognises: the fix is
+    /// a different provider, not a key or a network.
+    static var incognitoMessage: String { Incognito.Blocked(activity: incognitoActivity).description }
+
     // MARK: - Live dictation
 
     func openSession(target: DictationTarget, trace: DictationTrace?) async throws -> any TranscriptionSession {
+        try Incognito.check(Self.incognitoActivity)
         // Nudge the pooled connection in case it dropped while the Mac slept.
         FlowChannel.shared.warmUp()
         let packetizer = try OpusPacketizer()
@@ -86,7 +98,8 @@ struct WisprFlowProvider: TranscriptionProvider {
     }
 
     func transcribeAfterLiveFailure(wavData: Data) async throws -> String {
-        try await fallback.transcribe(wavData: wavData, language: "en")
+        try Incognito.check(Self.incognitoActivity)
+        return try await fallback.transcribe(wavData: wavData, language: "en")
     }
 
     // MARK: - Stored clips
@@ -95,6 +108,7 @@ struct WisprFlowProvider: TranscriptionProvider {
     /// flow request sends no language and lets the server detect it. This app is
     /// English-only, so detection is reliable and the formatted result is worth it.
     func transcribe(wavData: Data) async throws -> String {
+        try Incognito.check(Self.incognitoActivity)
         let wav = try WAVFile.parse(wavData)
         guard WisprBasetenKey.value != nil else {
             Log.log("flow: no Baseten key — using raw /llm/asr")

@@ -66,7 +66,12 @@ actor RemoteTranscriptionManager {
 
     // MARK: - Session lifecycle
 
+    /// The phone's audio and the transcript it gets back both pass through
+    /// Spaceterm, so incognito mode refuses remote dictation outright.
+    static let incognitoActivity = Incognito.Activity.spaceterm("phone dictation")
+
     func create(sampleRate: Int = PCM16Resampler.outputRate, now: Date = Date()) async throws -> String {
+        try Incognito.check(Self.incognitoActivity)
         guard let resampler = PCM16Resampler(inputRate: sampleRate) else { throw Failure.unsupportedSampleRate }
         let id = UUID().uuidString.lowercased()
         let trace = DictationTrace("remote")
@@ -171,7 +176,9 @@ actor RemoteTranscriptionManager {
 
     // MARK: - Plumbing
 
+    /// Also where a session opened before incognito was turned on stops.
     private func openSession(_ id: String) throws -> Session {
+        try Incognito.check(Self.incognitoActivity)
         guard let session = sessions[id] else { throw Failure.unknownSession }
         guard session.phase == .open else { throw Failure.alreadyFinished }
         return session

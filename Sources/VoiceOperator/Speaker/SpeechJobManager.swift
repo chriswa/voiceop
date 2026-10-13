@@ -184,7 +184,7 @@ actor SpeechJobManager {
         return jobs[id].map(result)
     }
 
-    nonisolated func enqueueLocal(text: String) { Task { _ = await self.enqueue(text: text, voice: Config.ttsProvider.defaultVoiceID, local: true) } }
+    nonisolated func enqueueLocal(text: String) { Task { _ = await self.enqueue(text: text, voice: KokoroSynthesizer.defaultVoiceID, local: true) } }
 
     /// Speak Clipboard toggle: stop any active/queued speech, otherwise enqueue
     /// `text` as a local job. Empty text is a no-op when nothing is speaking.
@@ -199,7 +199,7 @@ actor SpeechJobManager {
                 Log.log("speak-clipboard: clipboard has no text — nothing to speak")
                 return
             }
-            guard let result = await self.enqueue(text: trimmed, voice: Config.ttsProvider.defaultVoiceID, local: true) else {
+            guard let result = await self.enqueue(text: trimmed, voice: KokoroSynthesizer.defaultVoiceID, local: true) else {
                 Log.log("speak-clipboard: enqueue returned nothing")
                 return
             }

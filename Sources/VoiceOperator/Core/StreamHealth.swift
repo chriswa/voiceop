@@ -42,6 +42,8 @@ enum StreamHealth: Equatable, Sendable {
     var menuWarning: String? {
         guard case .degraded(let reason, let provider) = self else { return nil }
         switch provider {
+        case .wisprFlow where reason == WisprFlowProvider.incognitoMessage:
+            return "⚠︎ Dictation is off: \(reason) — choose Parakeet under Transcription"
         case .wisprFlow:
             return "⚠︎ Dictation is slow: live stream unavailable (\(reason))\(Self.hint(for: reason))"
         case .parakeet:

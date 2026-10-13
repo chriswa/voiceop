@@ -174,6 +174,14 @@ final class AudioArbiter {
         prewarm()
     }
 
+    /// Incognito mode was turned on or off. Turning it on forgets the
+    /// transcript re-paste would have replayed; either way the provider's
+    /// health starts over, since Wispr is blocked one way and not the other.
+    func incognitoChanged() {
+        if Incognito.isOn { lastInsertion = nil }
+        providersChanged()
+    }
+
     /// Record a change of transcription path. Idempotent, so the callers can be
     /// generous: every fallback and every successful commit reports in, and only
     /// the transitions reach the log, the menu bar and `/v1/status`.
@@ -388,7 +396,8 @@ final class AudioArbiter {
                                     onOpenFailed: { [weak self] reason in
             Task { @MainActor in self?.noteStreamHealth(.degraded(reason: reason, provider: provider.id)) }
         })
-        if let shadow = TranscriptionProviders.shadow, shadow.id != provider.id {
+        // A shadow's only product is a history entry, which incognito never files.
+        if let shadow = TranscriptionProviders.shadow, shadow.id != provider.id, !Incognito.isOn {
             live.shadow = TranscriptionLeg(provider: shadow, target: target,
                                            trace: DictationTrace("shadow-\(shadow.id.rawValue)"),
                                            logPrefix: "shadow \(shadow.id.rawValue)")
@@ -461,9 +470,8 @@ final class AudioArbiter {
         live?.pump?.invalidate()
         live?.pump = nil
 
-        let wav: URL
         let pcm: Data
-        do { (wav, pcm) = try recorder.stop() }
+        do { pcm = try recorder.stop() }
         catch {
             Log.log("recorder stop failed: \(error)")
             if let live { cancelStream(live) }
@@ -482,6 +490,8 @@ final class AudioArbiter {
         muter.restore()
 
         if let live { noteLeadingLevels(live, pcm: pcm) }
+        // In memory only. Whether it is ever written down is `record`'s call.
+        let clip = WAVFile(sampleRate: AudioRecorder.asrSampleRate, samples: pcm).data
 
         let silent = peak < Self.silencePeak && rms < Self.silenceRMS
         if silent {
@@ -497,11 +507,10 @@ final class AudioArbiter {
                                heldSeconds))
                 live?.trace.note(String(format: "captured nothing in %.1fs", heldSeconds))
                 live?.trace.flush()
-                try? FileManager.default.removeItem(at: wav)
                 // Not `playClosingCue`: there is no closing to announce, and the
                 // start chirp this would silence never played either.
                 SoundEffect.captureFailed.play()
-                record(wav: nil, duration: heldSeconds, transcript: "", command: isCommand,
+                record(clip: nil, duration: heldSeconds, transcript: "", command: isCommand,
                        error: "the microphone captured no audio")
                 finishDictation()
                 return
@@ -511,7 +520,6 @@ final class AudioArbiter {
             if duration <= Self.accidentalTapSeconds {
                 live?.trace.note(String(format: "discarded silent %.2fs tap", duration))
                 live?.trace.flush()
-                try? FileManager.default.removeItem(at: wav)
                 if announcedListening { playClosingCue(.silenceSkipped, mode: mode) }
                 finishDictation()
                 return
@@ -519,7 +527,7 @@ final class AudioArbiter {
             playClosingCue(.silenceSkipped, mode: mode)
             live?.trace.note("no speech detected")
             live?.trace.flush()
-            record(wav: wav, duration: duration, transcript: "", command: isCommand,
+            record(clip: clip, duration: duration, transcript: "", command: isCommand,
                    error: "no speech detected")
             finishDictation()
             return
@@ -547,12 +555,12 @@ final class AudioArbiter {
             guard let self else { return }
             defer { live?.trace.flush() }
             do {
-                let raw = try await self.transcribe(live, wavURL: wav)
+                let raw = try await self.transcribe(live, clip: clip)
                 self.stopTranscriptionProgressCue()
                 // A command is spoken to the router, not written into a document,
                 // so the fragment-shaping the style does would only confuse it.
                 let text = isCommand ? raw : style.apply(to: raw)
-                self.record(wav: wav, duration: duration, transcript: text, command: isCommand, error: nil,
+                self.record(clip: clip, duration: duration, transcript: text, command: isCommand, error: nil,
                             id: entryID)
                 // Emptiness is judged on the transcript, not on the styled text:
                 // the style adds spaces, and " " must not paste as if it were speech.
@@ -571,7 +579,7 @@ final class AudioArbiter {
                 self.noteStreamHealth(.degraded(reason: TranscriberError.userMessage(for: error), provider: provider))
                 live?.trace.note("failed: \(TranscriberError.userMessage(for: error))")
                 SoundEffect.transcriptionFailed.play()
-                self.record(wav: wav, duration: duration, transcript: "", command: isCommand,
+                self.record(clip: clip, duration: duration, transcript: "", command: isCommand,
                             error: TranscriberError.userMessage(for: error), id: entryID)
             }
             self.finishDictation()
@@ -582,14 +590,14 @@ final class AudioArbiter {
     /// whole-clip path if the session never opened or failed. The fallback is a
     /// genuine failure path — routine appearances in the log mean the streaming
     /// path is broken, not that this is normal.
-    private func transcribe(_ live: LiveDictation?, wavURL: URL) async throws -> String {
+    private func transcribe(_ live: LiveDictation?, clip: Data) async throws -> String {
         guard let live, let leg = live.leg else {
-            return try await currentProvider().transcribe(wavURL: wavURL)
+            return try await currentProvider().transcribe(wavData: clip)
         }
         let tail = live.tailPCM
         live.tailPCM = Data()
         let outcome = try await leg.finish(tail: tail, openGrace: Self.streamOpenGrace,
-                                           clip: { try Data(contentsOf: wavURL) })
+                                           clip: { clip })
         noteStreamHealth(outcome.liveFailure.map { .degraded(reason: $0, provider: leg.provider.id) } ?? .streaming)
         return outcome.text
     }
@@ -687,6 +695,11 @@ final class AudioArbiter {
             Log.log("summarize-clipboard: clipboard has no text — nothing to summarize")
             return
         }
+        // `askHaiku` refuses too; this is for the cue, without a "summarizing" status first.
+        guard Incognito.allows(ClaudeSummarizer.incognitoActivity) else {
+            Log.log("summarize-clipboard: incognito mode — not sending the clipboard to Claude")
+            SoundEffect.transcriptionFailed.play(); return
+        }
         Log.log("summarize-clipboard: summarizing \(text.count) char(s) via Haiku")
         onStatus?(.summarizing)
         Task { [weak self] in
@@ -723,6 +736,11 @@ final class AudioArbiter {
             do {
                 let text = try await self.currentProvider().transcribe(wavURL: url)
                 self.stopTranscriptionProgressCue()
+                // Pasted, but not written into the (persisted) entry it came from.
+                guard Incognito.allows(Self.historyActivity) else {
+                    if !command { self.pasteAndRemember(text) }
+                    return
+                }
                 if command {
                     if let i = self.commandHistory.firstIndex(where: { $0.id == id }) { self.commandHistory[i].transcript = text; self.commandHistory[i].error = nil }
                 } else {
@@ -814,20 +832,34 @@ final class AudioArbiter {
     /// for the better part of a second, and a cue that plays at the start would
     /// announce text that is not there yet.
     private func pasteAndRemember(_ text: String) {
-        lastInsertion = text
+        // Re-paste keeps the transcript after the dictation is over, so incognito
+        // drops it (and any older one) instead.
+        lastInsertion = Incognito.isOn ? nil : text
         TextInserter.insert(text) { SoundEffect.pasted.play() }
     }
     private func copy(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
-    private func persist(_ wav: URL) -> URL? {
+    /// What incognito refuses when a dictation would be filed: the clip and the
+    /// transcript, both written to Application Support.
+    nonisolated static let historyActivity = Incognito.Activity.persist("dictation history")
+
+    private func persist(_ clip: Data) -> URL? {
+        guard Incognito.refusal(Self.historyActivity) == nil else { return nil }
         let dst = sttDir.appendingPathComponent("\(UUID().uuidString).wav")
-        try? FileManager.default.copyItem(at: wav, to: dst); try? FileManager.default.removeItem(at: wav)
-        return FileManager.default.fileExists(atPath: dst.path) ? dst : nil
+        do { try clip.write(to: dst) } catch { Log.log("history: could not keep the clip: \(error)"); return nil }
+        return dst
     }
-    /// File the dictation in history. `wav` is nil when there is no clip worth
+    /// File the dictation in history. `clip` is nil when there is no clip worth
     /// keeping — a capture that produced no samples has nothing to retry from.
-    private func record(wav: URL?, duration: TimeInterval, transcript: String, command: Bool, error: String?,
+    ///
+    /// In incognito mode nothing is filed at all, not even in memory: the menu's
+    /// recent lists would otherwise hold the transcript after the dictation ended.
+    private func record(clip: Data?, duration: TimeInterval, transcript: String, command: Bool, error: String?,
                         id: UUID = UUID()) {
-        let stored = wav.flatMap(persist)
+        guard Incognito.refusal(Self.historyActivity) == nil else {
+            pendingShadows.removeValue(forKey: id)
+            return
+        }
+        let stored = clip.flatMap(persist)
         let shadow = pendingShadows.removeValue(forKey: id)
         if command { commandHistory.insert(CommandHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, recognized: false, error: error, wavURL: stored, shadow: shadow), at: 0) }
         else { sttHistory.insert(STTHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, error: error, wavURL: stored, shadow: shadow), at: 0) }

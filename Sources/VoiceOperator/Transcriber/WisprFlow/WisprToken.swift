@@ -190,6 +190,7 @@ actor WisprToken {
     }
 
     private func refresh(_ refreshToken: String) async throws -> Session {
+        try Incognito.check(.network("Wispr Flow"))
         var req = URLRequest(url: URL(string: "\(Self.supabaseURL)/auth/v1/token?grant_type=refresh_token")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

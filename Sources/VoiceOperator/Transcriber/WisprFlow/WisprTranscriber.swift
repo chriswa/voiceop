@@ -98,6 +98,7 @@ struct WisprTranscriber {
     }
 
     private func transcribeChunkOnce(_ wavData: Data, language: String, token: String) async throws -> String {
+        try Incognito.check(.network("Wispr Flow"))
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

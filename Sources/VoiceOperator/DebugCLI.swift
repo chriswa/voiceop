@@ -252,7 +252,7 @@ enum DebugCLI {
     /// starts long before synthesis finishes. Uses the default voice.
     @MainActor
     static func runTTSTest(text: String) async {
-        let utterance = Utterance(text: text, voiceID: Config.ttsProvider.defaultVoiceID)
+        let utterance = Utterance(text: text, voiceID: KokoroSynthesizer.defaultVoiceID)
         func note(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
         note("speaking: \(utterance.spokenText)")
         let engine = TTSEngine()
@@ -311,10 +311,10 @@ enum DebugCLI {
             ducker.stop()
         }
         try? await Task.sleep(for: .seconds(4))
-        let clip = try? recorder.stop()
+        let clip = try? recorder.stop()   // PCM16
         ducker.stopSynchronously()
         let first = heard.at.map { "\(Int($0.timeIntervalSince(t0) * 1000))ms" } ?? "NEVER"
-        if let pcm = clip?.pcm {
+        if let pcm = clip {
             let perSecond = stride(from: 0, to: pcm.count, by: AudioRecorder.asrSampleRate * 2).map { off -> String in
                 let end = min(off + AudioRecorder.asrSampleRate * 2, pcm.count)
                 return String(format: "%.4f", AudioRecorder.levels(pcm16: Data(pcm[off..<end])).peak)
@@ -323,7 +323,7 @@ enum DebugCLI {
         }
         note(String(format: "duck-race %@ delay=%dms: firstAudio=%@ bytes=%d peak=%.4f rms=%.4f",
                     held ? "held" : (ordered ? "ordered" : "racing"), delayMS, first,
-                    clip?.pcm.count ?? -1, recorder.lastPeak, recorder.lastRMS))
+                    clip?.count ?? -1, recorder.lastPeak, recorder.lastRMS))
 
     }
 

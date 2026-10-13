@@ -20,8 +20,11 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// default voice, instead of a fixed `kokoro` / `af_heart`; 13 added
     /// `/v1/subscribers` — clients register their own socket for command
     /// dictations and dictation start/end events (see `Subscriber`); 14 added
-    /// `transcription_provider` and `shadow_provider` to `/v1/status`.
-    static let discoveryVersion = 14
+    /// `transcription_provider` and `shadow_provider` to `/v1/status`; 15
+    /// added `incognito` to `/v1/status`, made incognito refusals a 403
+    /// `{"error": "incognito"}`, and fixed `/v1/voices`' provider at `kokoro`
+    /// again (custom TTS servers are gone).
+    static let discoveryVersion = 15
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -42,6 +45,8 @@ final class SpeechHTTPService: @unchecked Sendable {
         /// The provider that pastes, and the one shadowing it (nil for none).
         var provider: TranscriptionProviderID = .wisprFlow
         var shadow: TranscriptionProviderID?
+        /// Incognito mode (see `Incognito`): nothing saved, nothing sent.
+        var incognito = false
 
         var object: [String: Any] {
             var o: [String: Any] =
@@ -54,6 +59,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             if let reason = stream.reason { o["stream_reason"] = reason }
             o["transcription_provider"] = provider.rawValue
             if let shadow { o["shadow_provider"] = shadow.rawValue }
+            o["incognito"] = incognito
             return o
         }
     }
@@ -105,6 +111,10 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// `raw`, when set, is the body as-is with its content type — audio — in place of `object`.
     private struct Response {
         let status: Int; let object: [String: Any]?; var raw: (data: Data, contentType: String)? = nil
+    }
+    /// 403 for anything incognito mode refuses (see `Incognito`).
+    private static func refused(_ blocked: Incognito.Blocked) -> Response {
+        .init(status: 403, object: ["error": "incognito", "detail": blocked.description])
     }
     private static func parse(_ data: Data) -> Request? {
         guard let headEnd = data.range(of: Data("\r\n\r\n".utf8)),
@@ -167,6 +177,8 @@ final class SpeechHTTPService: @unchecked Sendable {
             do {
                 let result = try await WakeWordCheck.check(pcm: r.body, sampleRate: rate, word: word, match: mode)
                 return .init(status: 200, object: ["match": result.match, "heard": result.heard, "elapsed_ms": result.elapsedMs])
+            } catch let blocked as Incognito.Blocked {
+                return Self.refused(blocked)
             } catch WakeWordCheck.Failure.unavailable {
                 return .init(status: 501, object: ["error": "wake_word_unavailable", "detail": "needs macOS 26 (SpeechTranscriber)"])
             } catch {
@@ -175,8 +187,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             }
         }
         if r.method == "GET", r.path == "/v1/voices" {
-            let provider = Config.ttsProvider
-            do { return .init(status: 200, object: ["provider": provider.wireName, "default_voice": provider.defaultVoiceID, "voices": try await KokoroSynthesizer.availableVoiceIDs().map { ["id": $0] }]) }
+            do { return .init(status: 200, object: ["provider": "kokoro", "default_voice": KokoroSynthesizer.defaultVoiceID, "voices": try await KokoroSynthesizer.availableVoiceIDs().map { ["id": $0] }]) }
             catch { return .init(status: 503, object: ["error": "tts_unavailable"]) }
         }
         // Remote synthesis: the audio for one piece of text, handed back rather
@@ -197,10 +208,13 @@ final class SpeechHTTPService: @unchecked Sendable {
         // `character_offset` does for speech played here. `words` is absent
         // when the timings could not be had or aligned; the audio still is.
         if r.method == "POST", r.path == "/v1/synthesize" {
+            // Synthesis is local; the text and the audio are not — they travel
+            // through Spaceterm to the phone.
+            if let blocked = Incognito.refusal(.spaceterm("phone speech")) { return Self.refused(blocked) }
             guard let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any],
                   let text = o["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(status: 400, object: ["error": "text_required"]) }
             guard text.unicodeScalars.count <= 5_000 else { return .init(status: 422, object: ["error": "text_too_long"]) }
-            let voice = o["voice"] as? String ?? Config.ttsProvider.defaultVoiceID
+            let voice = o["voice"] as? String ?? KokoroSynthesizer.defaultVoiceID
             let synthesizer = KokoroSynthesizer()
             let prepared = TTSPreprocess.prepare(text)
             do {
@@ -311,6 +325,8 @@ final class SpeechHTTPService: @unchecked Sendable {
             case .methodNotAllowed:
                 return .init(status: 405, object: ["error": "method_not_allowed"])
             }
+        } catch let blocked as Incognito.Blocked {
+            return Self.refused(blocked)
         } catch let failure as RemoteTranscriptionManager.Failure {
             switch failure {
             case .unknownSession: return .init(status: 404, object: ["error": "unknown_transcription"])
@@ -390,7 +406,7 @@ enum TranscriptionRoute: Equatable {
 ///
 /// A missing voice falls back to `defaultVoice` in either shape.
 enum SpeechRequestBody {
-    static var defaultVoice: String { Config.ttsProvider.defaultVoiceID }
+    static var defaultVoice: String { KokoroSynthesizer.defaultVoiceID }
     /// Applies to the job's whole text — for `parts`, the joined text.
     static let maxScalars = 50_000
 

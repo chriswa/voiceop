@@ -67,7 +67,10 @@ struct HistoryStore {
         }
     }
 
+    /// Refused in incognito mode, whatever the caller: the arbiter files
+    /// nothing while it is on, and this is the backstop if that ever slips.
     func save(_ c: Contents) {
+        guard Incognito.refusal(AudioArbiter.historyActivity) == nil else { return }
         let payload = Payload(version: Self.version, stt: c.stt, commands: c.commands)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         try? data.write(to: fileURL, options: .atomic)

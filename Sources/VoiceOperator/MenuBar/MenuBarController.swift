@@ -11,6 +11,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// Shown only while dictation is on the slow fallback path — see `update(streamHealth:)`.
     private let streamWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
+    private let incognitoItem = NSMenuItem(title: "Incognito Mode", action: #selector(toggleIncognito), keyEquivalent: "")
+    /// What incognito means, under its checkbox while it is on.
+    private let incognitoNote = NSMenuItem(title: "Nothing is saved or leaves this Mac", action: nil, keyEquivalent: "")
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
     private let wordOverlay = NSMenuItem(title: "Word Overlay", action: nil, keyEquivalent: "")
     private let muteSystemAudio = NSMenuItem(title: "Mute System Audio While Dictating", action: #selector(toggleMuteSystemAudio), keyEquivalent: "")
@@ -32,13 +35,11 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onForwardSpeech: (() -> Void)?
     private var canAdjustSpeech = false
     private var canRewindSpeech = false
-    /// The Text to Speech submenu: which server speech goes to, and the local
-    /// Kokoro service's install/restart/uninstall (see `KokoroService`).
+    /// The Text to Speech submenu: the local Kokoro service's status and its
+    /// install/restart/uninstall (see `KokoroService`).
     private let textToSpeech = NSMenuItem(title: "Text to Speech", action: nil, keyEquivalent: "")
     private let ttsStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let ttsMemory = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let ttsLocal = NSMenuItem(title: "Kokoro (This Mac)", action: #selector(selectLocalTTS), keyEquivalent: "")
-    private let ttsCustom = NSMenuItem(title: "Custom Server…", action: #selector(chooseCustomTTS), keyEquivalent: "")
     private let ttsInstall = NSMenuItem(title: "Install Kokoro…", action: #selector(installKokoro), keyEquivalent: "")
     private let ttsUpdate = NSMenuItem(title: "Update Kokoro", action: #selector(updateKokoro), keyEquivalent: "")
     private let ttsRestart = NSMenuItem(title: "Restart Kokoro", action: #selector(restartKokoro), keyEquivalent: "")
@@ -47,8 +48,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var ttsMenuState: (() -> TTSMenuState)?
     /// The menu opened: time to ask the local server how it is.
     var onTTSMenuOpened: (() -> Void)?
-    var onSelectLocalTTS: (() -> Void)?
-    var onChooseCustomTTS: (() -> Void)?
     var onInstallKokoro: (() -> Void)?
     var onCancelKokoroInstall: (() -> Void)?
     var onUpdateKokoro: (() -> Void)?
@@ -57,6 +56,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onShowKokoroLog: (() -> Void)?
     private var ttsActionsEnabled = true
     var onMuteSpeech: ((Bool) -> Void)?
+    /// Reads and flips incognito mode (see `Incognito`). The flip closure
+    /// returns the state afterwards, like the other preference toggles.
+    var incognitoState: (() -> Bool)?
+    var onToggleIncognito: (() -> Bool)?
     var onSpeakClipboard: (() -> Void)?
     var onSummarizeClipboard: (() -> Void)?
     var onRestart: (() -> Void)?
@@ -111,6 +114,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private var currentStatus: OperatorStatus = .idle
     private var currentStyle: TranscriptStyle = .normal
     private var streamHealth: StreamHealth = .unverified
+    private var incognito = false
 
     override init() {
         super.init(); menu.delegate = self; status.isEnabled = false; menu.addItem(status)
@@ -119,7 +123,11 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         streamWarning.isEnabled = false; streamWarning.isHidden = true
         menu.addItem(streamWarning)
         mute.keyEquivalent = "b"; mute.keyEquivalentModifierMask = [.command, .control]
-        mute.target = self; menu.addItem(mute); menu.addItem(.separator())
+        mute.target = self; menu.addItem(mute)
+        incognitoItem.target = self; menu.addItem(incognitoItem)
+        incognitoNote.isEnabled = false; incognitoNote.indentationLevel = 1; incognitoNote.isHidden = true
+        menu.addItem(incognitoNote)
+        menu.addItem(.separator())
         stt.submenu = NSMenu(); commands.submenu = NSMenu(); menu.addItem(stt); menu.addItem(commands)
         transcription.submenu = NSMenu(); menu.addItem(transcription)
         menu.addItem(.separator())
@@ -145,8 +153,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         let tts = NSMenu()
         ttsStatus.isEnabled = false; ttsMemory.isEnabled = false
         tts.addItem(ttsStatus); tts.addItem(ttsMemory); tts.addItem(.separator())
-        for item in [ttsLocal, ttsCustom] { item.target = self; tts.addItem(item) }
-        tts.addItem(.separator())
         for item in [ttsInstall, ttsUpdate, ttsRestart, ttsUninstall, ttsLog] { item.target = self; tts.addItem(item) }
         textToSpeech.submenu = tts; menu.addItem(textToSpeech)
         menu.addItem(.separator())
@@ -236,6 +242,14 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         }
         refreshIcon()
     }
+    /// Incognito swaps the icon's megaphone for sunglasses, in every state, so
+    /// it is never on without showing.
+    func update(incognito on: Bool) {
+        incognito = on
+        incognitoItem.state = on ? .on : .off
+        incognitoNote.isHidden = !on
+        refreshIcon()
+    }
     func refreshHistory() { }
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === self.menu else { return }
@@ -265,9 +279,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         ttsStatus.title = state.status
         ttsMemory.title = state.memory ?? ""
         ttsMemory.isHidden = state.memory == nil
-        ttsLocal.state = state.localSelected ? .on : .off
-        ttsCustom.state = state.localSelected ? .off : .on
-        ttsCustom.title = state.customTitle
         ttsInstall.isHidden = state.install == .hidden
         ttsInstall.title = state.install == .cancel ? "Cancel Install" : "Install Kokoro…"
         ttsUpdate.isHidden = !state.showUpdate
@@ -358,6 +369,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private final class Action: NSObject { let id: UUID; let handler: ((UUID) -> Void)?; init(id: UUID, handler: ((UUID) -> Void)?) { self.id = id; self.handler = handler } }
     @objc private func runRetry(_ sender: NSMenuItem) { (sender.representedObject as? Action)?.handler?((sender.representedObject as! Action).id) }
     @objc private func runCopy(_ sender: NSMenuItem) { (sender.representedObject as? Action)?.handler?((sender.representedObject as! Action).id) }
+    @objc private func toggleIncognito() { update(incognito: onToggleIncognito?() ?? false) }
     @objc private func toggleMute() { muted.toggle(); mute.title = muted ? "Unmute Speech" : "Mute Speech"; refreshIcon(); onMuteSpeech?(muted) }
     /// Toggle narration mute from outside the menu — the global ⌘⌃B chord. Goes
     /// through the menu item's own action so the title, the icon and the mute
@@ -370,8 +382,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func forward() { onForwardSpeech?() }
     @objc private func summarizeClipboard() { onSummarizeClipboard?() }
     @objc private func restart() { onRestart?() }
-    @objc private func selectLocalTTS() { onSelectLocalTTS?() }
-    @objc private func chooseCustomTTS() { onChooseCustomTTS?() }
     @objc private func installKokoro() {
         if ttsInstall.title == "Cancel Install" { onCancelKokoroInstall?() } else { onInstallKokoro?() }
     }
@@ -426,8 +436,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private func refreshIcon() {
         guard let button = statusItem.button else { return }
         button.image = Self.icon(status: currentStatus, muted: muted, style: currentStyle,
-                                 degraded: streamHealth.isDegraded)
+                                 degraded: streamHealth.isDegraded, incognito: incognito)
         button.image?.accessibilityDescription = currentStatus.accessibilityLabel
+            + (incognito ? " (incognito)" : "")
             + (Self.badgesVisible(status: currentStatus, style: currentStyle)
                ? " (\(currentStyle.accessibilityLabel))" : "")
             + (streamHealth.isDegraded ? " — dictation on the slow path" : "")
@@ -435,11 +446,14 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
 
     /// Preserve the original megaphone and its red/magenta/yellow/cyan/green
     /// status palette. Idle remains a template image so macOS adapts it to the
-    /// menu-bar appearance.
+    /// menu-bar appearance. Incognito only changes the base symbol: the tints,
+    /// the mute ring and the badges all draw over it exactly as they do over
+    /// the megaphone, and a discarded dictation's trash can still wins.
     static func icon(status: OperatorStatus, muted: Bool, style: TranscriptStyle = .normal,
-                     degraded: Bool = false) -> NSImage {
+                     degraded: Bool = false, incognito: Bool = false) -> NSImage {
         let showsDiscard = style.discard && (status == .listening || status == .commandListening)
-        let base = NSImage(systemSymbolName: showsDiscard ? "trash.fill" : "megaphone.fill", accessibilityDescription: "Voice Operator")
+        let name = showsDiscard ? "trash.fill" : incognito ? "sunglasses.fill" : "megaphone.fill"
+        let base = NSImage(systemSymbolName: name, accessibilityDescription: "Voice Operator")
         let symbol = base?.withSymbolConfiguration(.init(pointSize: showsDiscard ? 18 : 15,
                                                           weight: showsDiscard ? .bold : .regular))
             ?? NSImage(size: NSSize(width: 18, height: 18))

@@ -117,6 +117,7 @@ actor WisprDictionary: DictionaryContextProviding {
     }
 
     private func fetchEntries(path: String, token: String) async throws -> [Entry] {
+        try Incognito.check(.network("Wispr Flow"))
         var req = URLRequest(url: URL(string: host + path)!)
         req.httpMethod = "GET"
         req.setValue(token, forHTTPHeaderField: "Authorization")   // raw JWT, not "Bearer"

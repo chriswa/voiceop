@@ -73,9 +73,10 @@ after every restart. The key is checked at launch, so a fresh Mac shows all of
 this before the first dictation. If you see any of it, fix the cause (usually
 the key file above) rather than the symptom; "no Baseten key" is never normal.
 
-TTS base URL / Access headers: `$VOICEOP_KOKORO_URL` or
-`~/Library/Application Support/VoiceOperator/config.json` (see `Config.swift`).
-**Never commit** Cloudflare Access secrets.
+**Incognito mode.** Every network call and every write of user content (audio,
+transcripts, spoken text) must go through `Incognito.check`/`refusal` at the
+lowest level it owns, and get a case in `IncognitoTests`. See DESIGN.md
+"Incognito mode".
 
 **Kokoro server (`kokoro/`).** The default TTS backend is a Python service in
 `kokoro/`, installed and managed by Voice Operator (Text to Speech menu). Read

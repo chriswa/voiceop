@@ -9,7 +9,13 @@ final class TTSEngine {
     private let cache: AudioCache
     private let streamFormat: AVAudioFormat
     private var player: StreamingSpeechPlayer?
-    private var inFlight: [String: Task<URL, Error>] = [:]
+    private var inFlight: [String: Task<Clip, Error>] = [:]
+    /// Incognito mode's stand-in for the disk cache: lookahead clips waiting
+    /// for playback, each dropped the moment it is played, and all of them on
+    /// `stop()`. `ephemeralGeneration` stops a synthesis that outlives a stop
+    /// from putting its clip back.
+    private var ephemeral: [String: Data] = [:]
+    private var ephemeralGeneration = 0
     private var timingsCache: [String: [WordTiming]] = [:]
     private var haltCount = 0
     private(set) var playbackRate: Float = 1
@@ -74,25 +80,26 @@ final class TTSEngine {
 
         // Both fully-cached and just-completed lookahead WAVs decode into the
         // same retained source timeline used by live chunks.
-        if let hit = cache.cached(text: u.spokenText, voiceID: u.voiceID) {
+        if let hit = takeCached(key: key, text: u.spokenText, voiceID: u.voiceID) {
             onSynthesized()
-            do { try appendFile(hit, to: player) }
+            do { try append(hit, to: player) }
             catch { Log.log("tts cached audio failed: \(error)"); player.fail() }
             player.endOfStream()
             return await waitForPlayback(player, mark: mark)
         }
         if let existing = inFlight[key] {
-            let url = try? await existing.value
+            let clip = try? await existing.value
+            ephemeral[key] = nil   // a lookahead's incognito copy: this play is it
             onSynthesized()
-            guard haltCount == mark, let url else { return false }
-            do { try appendFile(url, to: player) }
+            guard haltCount == mark, let clip else { return false }
+            do { try append(clip, to: player) }
             catch { Log.log("tts prefetched audio failed: \(error)"); player.fail() }
             player.endOfStream()
             return await waitForPlayback(player, mark: mark)
         }
 
         Log.log("tts play: \(Log.clip(u.spokenText)) streaming")
-        let producer = Task<URL, Error> {
+        let producer = Task<Clip, Error> {
             defer { self.inFlight[key] = nil }
             var acc = Data()
             var reframer = PCMReframer()
@@ -108,9 +115,9 @@ final class TTSEngine {
                 // Cache before finishing the stream so the queue can always
                 // replay a completed sentence without a second provider call.
                 let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: self.synth.sampleRate)
-                let url = try self.cache.store(wav, text: u.spokenText, voiceID: u.voiceID)
+                let clip = try self.keep(wav, text: u.spokenText, voiceID: u.voiceID)
                 if self.haltCount == mark { player.endOfStream() }
-                return url
+                return clip
             } catch {
                 Log.log("tts synthesis failed: \(error)")
                 player.fail()
@@ -120,6 +127,55 @@ final class TTSEngine {
         inFlight[key] = producer
         Task { _ = try? await producer.value; onSynthesized() }
         return await waitForPlayback(player, mark: mark)
+    }
+
+    /// A synthesized clip: a file in the audio cache, or in incognito mode,
+    /// where nothing is written, the WAV bytes themselves.
+    private enum Clip { case file(URL), memory(Data) }
+
+    /// Keep a finished clip so the queue can replay it without another call to
+    /// the synthesizer: in the disk cache, or only in memory in incognito mode.
+    private func keep(_ wav: Data, text: String, voiceID: String) throws -> Clip {
+        guard Incognito.allows(AudioCache.incognitoActivity) else { return .memory(wav) }
+        return .file(try cache.store(wav, text: text, voiceID: voiceID))
+    }
+
+    /// A clip already synthesized for this text+voice. An incognito clip is
+    /// handed over once and forgotten.
+    private func takeCached(key: String, text: String, voiceID: String) -> Clip? {
+        if let wav = ephemeral.removeValue(forKey: key) { return .memory(wav) }
+        return cache.cached(text: text, voiceID: voiceID).map(Clip.file)
+    }
+
+    private func append(_ clip: Clip, to player: StreamingSpeechPlayer) throws {
+        switch clip {
+        case .file(let url): try appendFile(url, to: player)
+        case .memory(let wav): try appendWAV(wav, to: player)
+        }
+    }
+
+    /// The in-memory twin of `appendFile`, for the s16le WAVs `PCMAudio.wav` makes.
+    private func appendWAV(_ data: Data, to player: StreamingSpeechPlayer) throws {
+        let wav = try WAVFile.parse(data)
+        guard Double(wav.sampleRate) == streamFormat.sampleRate else {
+            throw SpeakerError.synthesis("cached audio format does not match the speech timeline")
+        }
+        let frames = wav.samples.count / 2
+        var start = 0
+        while start < frames {
+            let count = min(24_000, frames - start)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: streamFormat, frameCapacity: AVAudioFrameCount(count)),
+                  let dst = buffer.floatChannelData?[0] else {
+                throw SpeakerError.synthesis("audio buffer allocation failed")
+            }
+            wav.samples.withUnsafeBytes { raw in
+                let s16 = raw.bindMemory(to: Int16.self)
+                for i in 0..<count { dst[i] = Float(Int16(littleEndian: s16[start + i])) / 32767 }
+            }
+            buffer.frameLength = AVAudioFrameCount(count)
+            player.schedule(buffer)
+            start += count
+        }
     }
 
     private func appendFile(_ url: URL, to player: StreamingSpeechPlayer) throws {
@@ -198,12 +254,19 @@ final class TTSEngine {
     func audioState(for u: Utterance) -> AudioState {
         let key = cache.key(text: u.spokenText, voiceID: u.voiceID)
         if inFlight[key] != nil { return .synthesizing }
-        return cache.contains(text: u.spokenText, voiceID: u.voiceID) ? .ready : .needsSynthesis
+        return ephemeral[key] != nil || cache.contains(text: u.spokenText, voiceID: u.voiceID) ? .ready : .needsSynthesis
     }
 
     /// Stop whatever is currently audible. The speech-service coordinator uses
-    /// this for a user barge-in and for explicit cancellation.
-    func stop() { halt() }
+    /// this for a user barge-in and for explicit cancellation. Also the end of
+    /// an incognito job's life: its lookahead audio goes with it.
+    func stop() {
+        halt()
+        ephemeral.removeAll()
+        ephemeralGeneration += 1
+        // The timings carry the words; outside incognito they are worth keeping.
+        if Incognito.isOn { timingsCache.removeAll() }
+    }
 
     /// Fill the audio cache without making sound, for sentence lookahead.
     ///
@@ -212,21 +275,23 @@ final class TTSEngine {
     /// speech queue counts what is in flight from that, so returning early
     /// would let it open a third request while two were still running.
     func prefetch(text: String, voiceID: String) async {
-        guard cache.cached(text: text, voiceID: voiceID) == nil else { return }
         let key = cache.key(text: text, voiceID: voiceID)
+        guard ephemeral[key] == nil, cache.cached(text: text, voiceID: voiceID) == nil else { return }
+        let generation = ephemeralGeneration
         // Someone is already synthesizing this exact clip — the originating
         // `play`, or a lookahead that has not been overtaken yet. Wait on it
         // rather than opening a second call for the same audio.
         if let existing = inFlight[key] { _ = try? await existing.value; return }
-        let task = Task<URL, Error> {
+        let task = Task<Clip, Error> {
             do {
                 var acc = Data()
                 for try await pcm in self.synth.synthesizeStream(text: text, voiceID: voiceID) { acc.append(pcm) }
                 guard !acc.isEmpty else { throw SpeakerError.synthesis("no audio") }
                 let wav = PCMAudio.wav(fromFloat32: acc, sampleRate: self.synth.sampleRate)
-                let url = try self.cache.store(wav, text: text, voiceID: voiceID)
+                let clip = try self.keep(wav, text: text, voiceID: voiceID)
+                if case .memory(let wav) = clip, generation == self.ephemeralGeneration { self.ephemeral[key] = wav }
                 self.inFlight[key] = nil
-                return url
+                return clip
             } catch {
                 // Clearing the slot is the point, not the log line. A prefetch
                 // that threw used to leave its dead task in `inFlight` forever,

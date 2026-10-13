@@ -62,7 +62,21 @@ final class FlowChannel: @unchecked Sendable {
         }
     }
 
+    /// Hang up, for incognito mode: the keepalive would otherwise hold a
+    /// connection to Wispr open for as long as the app runs. The next
+    /// `client()` or `warmUp()` dials again, if incognito lets it.
+    func close() {
+        lock.lock()
+        let channel = self.channel
+        self.channel = nil
+        lock.unlock()
+        guard let channel else { return }
+        _ = channel.close()
+        Log.log("flow: closed the gRPC channel to \(Self.host)")
+    }
+
     private func sharedChannel() throws -> GRPCChannel {
+        try Incognito.check(.network("Wispr Flow"))
         lock.lock(); defer { lock.unlock() }
         if let channel { return channel }
 

@@ -79,42 +79,28 @@ grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
 
 ## Text to Speech
 
-Speech goes through a Kokoro TTS server, chosen in the menu's **Text to Speech**
-submenu:
+Speech goes through the Kokoro TTS server Voice Operator runs on this Mac, at
+`http://127.0.0.1:56841`, managed from the menu's **Text to Speech** submenu.
+Nothing to set up: on first launch Voice Operator installs it by itself, with a
+progress window — it copies the server (from `kokoro/` in this repo, shipped inside
+the app) to Application Support, builds its Python environment with
+[`uv`](https://docs.astral.sh/uv/) (downloading uv and Python if the Mac has
+neither; ~900 MB in all), and runs it as a launchd agent. The first start
+downloads the voice model (~325 MB). The submenu shows its status and memory,
+and has **Install**, **Update**, **Restart** and **Uninstall**. See
+[`kokoro/CLAUDE.md`](kokoro/CLAUDE.md).
 
-- **Kokoro (This Mac)** — the default, at `http://127.0.0.1:56841`. Nothing to set
-  up: on first launch Voice Operator installs it by itself, with a progress window —
-  it copies the server (from `kokoro/` in this repo, shipped inside the app) to
-  Application Support, builds its Python environment with
-  [`uv`](https://docs.astral.sh/uv/) (downloading uv and Python if the Mac has
-  neither; ~900 MB in all), and runs it as a launchd agent. The first start
-  downloads the voice model (~325 MB). The submenu shows its status and memory,
-  and has **Install**, **Update**, **Restart** and **Uninstall**. See
-  [`kokoro/CLAUDE.md`](kokoro/CLAUDE.md).
-- **Custom Server…** — any Kokoro-compatible server (`/synthesize`, `/voices`, and
-  optionally `/timestamps` for the word overlay).
+There is no way to send speech to another server: what is spoken never leaves the
+Mac. (A custom-server option existed until 2026-10-13.)
 
-The choice is stored in `~/Library/Application Support/VoiceOperator/config.json`,
-which is also where a custom server's extra headers go (a GUI app launched via
-`open` does **not** inherit the shell environment):
+## Incognito mode
 
-```json
-{
-  "tts": {
-    "provider": "custom",
-    "url": "https://tts.example.com",
-    "headers": {
-      "CF-Access-Client-Id": "…",
-      "CF-Access-Client-Secret": "…"
-    }
-  }
-}
-```
-
-`$VOICEOP_KOKORO_URL` overrides the URL either way. The `headers` block is for
-Cloudflare Access service tokens on a remote TTS host — without them the app would
-follow Access's login redirect and try to play HTML as audio (guarded against, but
-speech still fails).
+**Incognito Mode** in the menu turns the menu-bar megaphone into sunglasses and
+keeps everything you say or hear on this Mac, and off its disk: no history, no
+saved clips, no TTS cache, no words in the log, no Wispr Flow, no clipboard
+summaries, nothing to or from Spaceterm. Dictation works through Parakeet and
+speech through the local Kokoro. It stays on across restarts. See DESIGN.md,
+"Incognito mode".
 
 ## Install
 

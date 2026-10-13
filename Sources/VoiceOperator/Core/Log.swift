@@ -23,8 +23,10 @@ enum Log {
 
     /// Short, log-safe identifier for a clip of speech. Enough of the sentence to
     /// correlate a stall with the answer it belonged to, without spilling whole
-    /// transcripts into a file that lives forever.
+    /// transcripts into a file that lives forever. In incognito mode, the length
+    /// alone: the log is a file, and none of the words may reach it.
     static func clip(_ text: String) -> String {
+        guard Incognito.allows(.persist("words in the log")) else { return "[\(text.count)ch]" }
         let flat = text.replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let head = flat.count <= 48 ? flat : String(flat.prefix(48)) + "…"

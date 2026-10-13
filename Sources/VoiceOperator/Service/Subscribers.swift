@@ -134,8 +134,13 @@ enum SubscriberSocket {
 
     /// Send a command dictation to the command route. `completion(false)` when
     /// nobody registered for commands, or they could not be reached.
+    /// Everything sent to a subscriber. Incognito refuses it at each entry
+    /// point, checked when called rather than when the queue gets round to it.
+    static let incognitoActivity = Incognito.Activity.spaceterm("subscriber sockets")
+
     static func voiceCommand(_ text: String, registry: SubscriberRegistry = .shared,
                              completion: @escaping @Sendable (_ delivered: Bool, _ to: String?) -> Void) {
+        guard Incognito.refusal(incognitoActivity) == nil else { completion(false, nil); return }
         guard let route = registry.commandRoute else { completion(false, nil); return }
         send(["type": "voice-command", "text": text], to: route.socket) { completion($0, route.name) }
     }
@@ -147,12 +152,12 @@ enum SubscriberSocket {
     /// subscriber drops one older than a report it already has.
     static func dictation(active: Bool, registry: SubscriberRegistry = .shared) {
         let targets = registry.subscribers(to: "dictation")
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty, Incognito.allows(incognitoActivity) else { return }
         queue.async {
             dictationSeq += 1
             let message: [String: Any] = ["type": "voice-dictation", "active": active, "launch": launch, "seq": dictationSeq]
             for target in targets {
-                send(message, to: target.socket) { ok in
+                deliver(message, to: target.socket) { ok in
                     if !ok { Log.log("subscribers: could not tell \(target.name) dictation \(active ? "started" : "ended")") }
                 }
             }
@@ -160,6 +165,12 @@ enum SubscriberSocket {
     }
 
     static func send(_ message: [String: Any], to path: String, completion: @escaping @Sendable (Bool) -> Void) {
+        guard Incognito.refusal(incognitoActivity) == nil else { completion(false); return }
+        deliver(message, to: path, completion: completion)
+    }
+
+    /// `send` without the incognito check, for a caller that made it already.
+    private static func deliver(_ message: [String: Any], to path: String, completion: @escaping @Sendable (Bool) -> Void) {
         guard let payload = try? JSONSerialization.data(withJSONObject: message) else { completion(false); return }
         queue.async {
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)

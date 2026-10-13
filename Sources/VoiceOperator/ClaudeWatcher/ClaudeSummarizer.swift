@@ -11,6 +11,8 @@ import Foundation
 /// how it finds `claude`.
 struct ClaudeSummarizer {
     private static let timeout: Duration = .seconds(30)
+    /// Claude is a service off this Mac, so incognito mode refuses it.
+    static let incognitoActivity = Incognito.Activity.network("clipboard summaries (Claude)")
 
     private static let clipboardInstruction = """
     You are summarizing a piece of text the user has on their clipboard, given \
@@ -32,6 +34,8 @@ struct ClaudeSummarizer {
     /// Claude Code's startup. The instruction rides in the prompt for that reason.
     /// Returns the trimmed reply, or nil on failure.
     private static func askHaiku(_ prompt: String, runner: CommandRunner) async -> String? {
+        // Before the prompt file: in incognito mode the text is neither sent nor written.
+        guard Incognito.refusal(incognitoActivity) == nil else { return nil }
         guard let path = await userShellPATH(runner: runner) else { return nil }
 
         // `ask` reads the prompt from a file or stdin; the runner gives no stdin.

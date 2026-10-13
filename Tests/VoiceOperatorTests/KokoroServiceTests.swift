@@ -183,18 +183,10 @@ final class KokoroServiceTests: XCTestCase {
 
     func testAutoStartInstallsWhenNothingIsInstalled() async throws {
         let service = makeService()
-        service.autoStart(provider: .kokoroLocal)
+        service.autoStart()
         await service.waitForJob()
         XCTAssertTrue(service.isInstalled)
         XCTAssertEqual(service.action, .install)
-    }
-
-    func testAutoStartLeavesACustomServerAlone() async throws {
-        let service = makeService()
-        service.autoStart(provider: .custom(url: "https://tts.example.com"))
-        await service.waitForJob()
-        XCTAssertFalse(service.isInstalled)
-        XCTAssertTrue(runner.commands.isEmpty)
     }
 
     func testAutoStartRespectsAnUninstall() async throws {
@@ -204,7 +196,7 @@ final class KokoroServiceTests: XCTestCase {
         service.uninstall()
         await service.waitForJob()
         runner.commands.removeAll()
-        service.autoStart(provider: .kokoroLocal)
+        service.autoStart()
         await service.waitForJob()
         XCTAssertTrue(runner.commands.isEmpty, "an uninstall isn't undone at the next launch")
 
@@ -219,7 +211,7 @@ final class KokoroServiceTests: XCTestCase {
         await service.waitForJob()
         try "server v2".write(to: paths.bundled!.appendingPathComponent("kokoro_server.py"), atomically: true, encoding: .utf8)
         runner.commands.removeAll()
-        service.autoStart(provider: .kokoroLocal)
+        service.autoStart()
         await service.waitForJob()
         XCTAssertEqual(service.action, .update)
         XCTAssertEqual(try String(contentsOf: paths.server, encoding: .utf8), "server v2")

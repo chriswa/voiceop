@@ -1,29 +1,30 @@
 import Foundation
 import CryptoKit
 
-/// On-disk cache of synthesized TTS WAVs, keyed by (text, voice, provider). Lets us
+/// On-disk cache of synthesized TTS WAVs, keyed by (text, voice). Lets us
 /// replay any past utterance for free and re-cue instantly after a dictation
 /// barge-in (DESIGN.md). Entries older than `ttl` are reaped.
 struct AudioCache {
+    /// Speech audio is what was said, so incognito mode keeps it off the disk.
+    static let incognitoActivity = Incognito.Activity.persist("speech audio")
+
     let directory: URL
     let ttl: TimeInterval
-    /// Which server's audio a key names — read per lookup, so switching servers
-    /// in the menu takes effect on the next clip. See `TTSProvider.cacheNamespace`.
-    let namespace: @Sendable () -> String
+    /// Folded into every key. The name the cache has always used, so entries
+    /// made before custom servers were removed stay valid.
+    private static let namespace = "kokoro-82m"
 
-    init(ttl: TimeInterval = 24 * 60 * 60,
-         namespace: @escaping @Sendable () -> String = { Config.ttsProvider.cacheNamespace }) {
+    init(ttl: TimeInterval = 24 * 60 * 60) {
         self.ttl = ttl
-        self.namespace = namespace
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         directory = base.appendingPathComponent("VoiceOperator/tts", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
-    /// Stable cache key for a text+voice pair from the current provider (also
+    /// Stable cache key for a text+voice pair (also
     /// the WAV filename stem).
     func key(text: String, voiceID: String) -> String {
-        let digest = SHA256.hash(data: Data("\(namespace())|\(voiceID)|\(text)".utf8))
+        let digest = SHA256.hash(data: Data("\(Self.namespace)|\(voiceID)|\(text)".utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -49,6 +50,7 @@ struct AudioCache {
     /// Store WAV bytes and return the file URL.
     @discardableResult
     func store(_ data: Data, text: String, voiceID: String) throws -> URL {
+        try Incognito.check(Self.incognitoActivity)
         let u = url(text: text, voiceID: voiceID)
         try data.write(to: u, options: .atomic)
         return u

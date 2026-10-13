@@ -196,11 +196,11 @@ final class KokoroService {
 
     // MARK: - Actions
 
-    /// At launch: install when speech should go to the local Kokoro and none is
-    /// installed (unless the user uninstalled it), or apply a newer bundled
-    /// server. No prompt — the setup window shows what is happening.
-    func autoStart(provider: TTSProvider) {
-        guard provider == .kokoroLocal, paths.bundled != nil, !isWorking else { return }
+    /// At launch: install when none is installed (unless the user uninstalled
+    /// it), or apply a newer bundled server. No prompt — the setup window shows
+    /// what is happening.
+    func autoStart() {
+        guard paths.bundled != nil, !isWorking else { return }
         if !isInstalled {
             guard !defaults.bool(forKey: Self.declinedKey) else {
                 Log.log("kokoro service: not installed, and the user uninstalled it — not reinstalling")

@@ -26,6 +26,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching — \(BuildInfo.summary)")
+        // No HTTP cache on disk for anything still on `URLSession.shared` (Wispr):
+        // it would keep request and response bodies in ~/Library/Caches.
+        URLCache.shared = URLCache(memoryCapacity: 0, diskCapacity: 0)
         TerminationSignal.routeSIGTERMToGracefulQuit()
         LaunchAtLogin.enableByDefaultOnce()
         AVCaptureDevice.requestAccess(for: .audio) { granted in Log.log("mic access request → granted=\(granted)") }
@@ -49,7 +52,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                   speaking: arbiter.isSpeaking, restart: restart.state,
                   stream: arbiter.streamHealth,
                   remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active,
-                  provider: TranscriptionPreferences.primary, shadow: TranscriptionPreferences.shadow)
+                  provider: TranscriptionPreferences.primary, shadow: TranscriptionPreferences.shadow,
+                  incognito: Incognito.isOn)
         }
         // The last remote transcription finishing is a third way to become idle.
         RemoteTranscriptionManager.shared.activity.onIdle = { [weak self] in
@@ -100,6 +104,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             TranscriptionPreferences.shadow = id
             self?.arbiter.providersChanged()
         }
+        menuBar.incognitoState = { Incognito.isOn }
+        menuBar.onToggleIncognito = { [weak self] in
+            self?.setIncognito(!Incognito.isOn)
+            return Incognito.isOn
+        }
+        menuBar.update(incognito: Incognito.isOn)
+        if Incognito.isOn { Log.log("incognito: on — nothing is saved or leaves this Mac") }
         menuBar.onMenuOpenChanged = { [weak self] open in self?.hotkey.chordsSuppressed = open }
         menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
@@ -209,7 +220,20 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         SoundEffect.launched.play()
     }
 
-    /// The Text to Speech submenu: provider choice plus the Kokoro service.
+    /// Turn incognito mode on or off (see `Incognito`). Turning it on tells
+    /// Spaceterm no dictation is running first — its last message before the
+    /// sockets go quiet, so it is never left waiting on a dictation-ended — and
+    /// hangs up the warm connection to Wispr.
+    private func setIncognito(_ on: Bool) {
+        guard on != Incognito.isOn else { return }
+        if on { SubscriberSocket.dictation(active: false) }
+        Incognito.isOn = on
+        Log.log(on ? "incognito: on — nothing is saved or leaves this Mac" : "incognito: off")
+        if on { FlowChannel.shared.close() }
+        arbiter.incognitoChanged()
+    }
+
+    /// The Text to Speech submenu: the local Kokoro service.
     private func wireTextToSpeechMenu() {
         kokoro.onChange = { [weak self] in
             self?.menuBar.refreshTTSMenu()
@@ -219,22 +243,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         kokoroSetup.onShowLog = { [unowned self] in menuBar.onShowKokoroLog?() }
         kokoroSetup.detailProvider = { [unowned self] in kokoro.lastLogLine() }
         menuBar.ttsMenuState = { [unowned self] in
-            TTSMenuState.make(provider: Config.ttsProvider, phase: kokoro.phase,
+            TTSMenuState.make(phase: kokoro.phase,
                               installed: kokoro.isInstalled,
                               updateAvailable: kokoro.updateAvailable, canCancel: kokoro.canCancel,
                               health: kokoro.health)
         }
         menuBar.onTTSMenuOpened = { [unowned self] in
             Task { await kokoro.refreshHealth(); menuBar.refreshTTSMenu() }
-        }
-        menuBar.onSelectLocalTTS = { [unowned self] in
-            setTTSProvider(.kokoroLocal)
-            kokoro.autoStart(provider: .kokoroLocal)
-        }
-        menuBar.onChooseCustomTTS = { [unowned self] in
-            let current: String? = if case .custom(let url) = Config.ttsProvider { url } else { Config.load().tts?.url }
-            guard let url = TTSDialogs.customServerURL(current: current) else { return }
-            setTTSProvider(.custom(url: url))
         }
         menuBar.onInstallKokoro = { [unowned self] in kokoro.install() }
         menuBar.onCancelKokoroInstall = { [unowned self] in kokoro.cancel() }
@@ -253,7 +268,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.open(log)
         }
         // No prompt: install (or update) on its own, with the setup window up.
-        kokoro.autoStart(provider: Config.ttsProvider)
+        kokoro.autoStart()
     }
 
     /// The setup window follows installs only; the menu's status line covers
@@ -270,14 +285,6 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         case .failed(let reason):
             kokoroSetup.show(.failed(reason))
         }
-    }
-
-    private func setTTSProvider(_ provider: TTSProvider) {
-        do { try Config.setTTSProvider(provider) } catch {
-            Log.log("tts: could not save the provider choice: \(error)")
-            TTSDialogs.showError("Couldn't save the Text to Speech choice", detail: "\(Config.fileURL.path): \(error.localizedDescription)")
-        }
-        menuBar.refreshTTSMenu()
     }
 
     /// Whether the microphone should be held open right now: the AirPods rule's
@@ -312,6 +319,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     private func routeCommand(_ text: String, context: DictationContext) {
         Log.log("command: captured frontmost bundleID=\(context.bundleIdentifier ?? "(none)")")
+        // Commands only go to Spaceterm, so in incognito mode they go nowhere.
+        guard Incognito.refusal(SubscriberSocket.incognitoActivity) == nil else {
+            SoundEffect.unrecognized.play(); return
+        }
         SubscriberSocket.voiceCommand(text) { delivered, route in
             Log.log(route.map { "command: \(text.count)-char transcript to \($0) — \(delivered ? "delivered" : "unreachable")" }
                     ?? "command: no subscriber takes commands (PUT /v1/subscribers/<name>)")

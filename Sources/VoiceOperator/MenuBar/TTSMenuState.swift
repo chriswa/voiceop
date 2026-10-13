@@ -9,9 +9,6 @@ struct TTSMenuState: Equatable {
     var status: String
     /// "Memory: 1.8 GB" for the local server once it has reported; nil hides it.
     var memory: String?
-    var localSelected: Bool
-    /// "Custom Server…" or "Custom Server (host)…".
-    var customTitle: String
     var install: InstallItem
     var showUpdate: Bool
     var showRestart: Bool
@@ -21,13 +18,11 @@ struct TTSMenuState: Equatable {
 
     var isWarning: Bool { status.hasPrefix("⚠︎") }
 
-    static func make(provider: TTSProvider,
-                     phase: KokoroService.Phase,
+    static func make(phase: KokoroService.Phase,
                      installed: Bool,
                      updateAvailable: Bool,
                      canCancel: Bool,
                      health: KokoroService.Health?) -> TTSMenuState {
-        let local = provider == .kokoroLocal
         let working: Bool
         let status: String
         switch phase {
@@ -39,22 +34,16 @@ struct TTSMenuState: Equatable {
             status = "⚠︎ Kokoro: \(reason)"
         case .idle:
             working = false
-            if !local {
-                status = "Speaking through \(provider.summary)"
-            } else if health != nil {
+            if health != nil {
                 status = installed ? "Kokoro: running" : "Kokoro: running (not installed by Voice Operator)"
             } else {
                 status = installed ? "⚠︎ Kokoro: not responding" : "⚠︎ Kokoro: not installed — speech is off"
             }
         }
-        var customTitle = "Custom Server…"
-        if case .custom(let url) = provider { customTitle = "Custom Server (\(URL(string: url)?.host ?? url))…" }
         let install: InstallItem = canCancel ? .cancel : (installed ? .hidden : .install)
         return TTSMenuState(
             status: status,
-            memory: local ? health?.memoryMB.map { "Memory: \(formatMemory($0))" } : nil,
-            localSelected: local,
-            customTitle: customTitle,
+            memory: health?.memoryMB.map { "Memory: \(formatMemory($0))" },
             install: install,
             showUpdate: installed && updateAvailable,
             showRestart: installed,

@@ -63,6 +63,8 @@ enum WakeWordCheck {
 
     /// Check 16-bit little-endian mono PCM at `sampleRate`.
     static func check(pcm: Data, sampleRate: Int, word: String, match mode: Match = .only) async throws -> Result {
+        // On-device, but the clip comes from Spaceterm's phone client.
+        try Incognito.check(.spaceterm("wake-word checks"))
         guard #available(macOS 26.0, *) else { throw Failure.unavailable }
         let started = Date()
         let heard = try await transcribe(pcm: pcm, sampleRate: sampleRate)

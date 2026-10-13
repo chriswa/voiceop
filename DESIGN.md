@@ -614,12 +614,11 @@ it from git history if ever needed). It's a plain, self-documented HTTP service 
 no reverse-engineering. The server itself lives in this repo under `kokoro/` (merged from the
 old `tts` repo with its history, 2026-10-07; see `kokoro/CLAUDE.md`).
 
-**Provider and service (2026-10-07).** The menu's **Text to Speech** submenu picks a
-`TTSProvider`: `.kokoroLocal` (default, `127.0.0.1:56841`) or `.custom(url)` — any
-Kokoro-compatible server; another engine would join as a new case with its own
-`SpeechSynthesizer`. The choice is `config.json` `tts.provider` (a file with only `tts.url`
-still means that server), and `AudioCache` keys carry the provider so a switch never replays
-the other server's audio. The local server is installed and run by `KokoroService`: the
+**Service (2026-10-07; local only since 2026-10-13).** Speech always goes to the local
+Kokoro at `KokoroSynthesizer.baseURL` (`127.0.0.1:56841`). The custom-server option
+(`TTSProvider.custom`, `config.json` `tts.url`/`tts.headers`, `$VOICEOP_KOKORO_URL`) was
+removed with incognito mode so that what is spoken cannot leave the Mac; recover it from
+git history if a remote server is ever needed again. The local server is installed and run by `KokoroService`: the
 server files ship in `Contents/Resources/kokoro`, Install builds a venv on a private
 uv-managed Python 3.13 in Application Support (using the Mac's `uv`, or a pinned, checksummed
 download) and bootstraps one launchd agent (`com.chriswa.voiceoperator.kokoro`, `KeepAlive`,
@@ -632,7 +631,7 @@ waits until nothing is dictated or spoken. `/health` reports the server's physic
 
 - `POST {base}/synthesize`, `Content-Type: application/json`,
   body `{ "text": <string ≤5000>, "voice": <voice id>, "speed": <0.5–2.0, default 1.2> }`.
-  Base URL defaults to `http://127.0.0.1:56841`, overridable via `$VOICEOP_KOKORO_URL`.
+  Base URL is always `http://127.0.0.1:56841`.
 - Response is one streaming `audio/wav` body: a **44-byte PCM WAV header** (with placeholder
   `0xffffffff` RIFF/data sizes, since length isn't known up front) followed by raw
   **s16le PCM, mono, 24000 Hz**, flushed as generated so playback starts on the first chunk.
@@ -729,6 +728,35 @@ as the existing global shortcuts. `PlaybackTimelineTests` silently exercise the 
 graph in offline rendering mode, including live rate changes and cross-sentence seeks.
 
 ---
+
+## Incognito mode (2026-10-13)
+
+A menu checkbox (`Incognito`, persisted in `UserDefaults` as `vo.incognito`, so a restart
+cannot drop it) under which nothing the user says or hears leaves the Mac or is written to
+disk. The menu-bar icon's base symbol becomes `sunglasses.fill`; every tint, ring and badge
+draws over it unchanged, and the discard trash can still wins. `/v1/status` reports
+`"incognito"`.
+
+**Where it is enforced.** Not at one switch near the UI: every network client and every
+content-bearing writer calls `Incognito.check`/`refusal` itself, at the lowest level it owns,
+so a new caller cannot get round it by forgetting. Higher-level checks exist only for a clean
+error. `IncognitoTests` asks each gate directly.
+
+| Refused | Gate |
+|---|---|
+| Wispr Flow (gRPC stream, `/llm/asr`, token refresh, dictionary sync) | `FlowChannel.sharedChannel`, `WisprTranscriber`, `WisprToken.refresh`, `WisprDictionary.fetchEntries`; `WisprFlowProvider` fails first so the error names Wispr. As primary that is a loud `StreamHealth` ("Dictation is off … choose Parakeet"); a Wispr shadow is skipped (a shadow's only product is a history entry). Turning incognito on also closes the keepalive'd channel. |
+| Clipboard summaries (Claude via `claude-print-daemon`) | `ClaudeSummarizer.askHaiku`, before the prompt file is written |
+| Dictation history and clips | `AudioArbiter.record`/`persist`, `HistoryStore.save`. Nothing is filed, not even in memory, and re-paste forgets the last transcript. The recorder no longer writes a temp WAV at all (in either mode): the clip stays in memory and is only written when history keeps it. |
+| TTS audio cache | `AudioCache.store`. `TTSEngine` keeps lookahead clips in memory instead, each dropped once played and all of them (and the word timings) on `stop()` |
+| Words in the log | `Log.clip` logs only the length |
+| HTTP cache (`~/Library/Caches/com.chriswa.voiceoperator`) | Not incognito-specific: Kokoro requests use an ephemeral `URLSession` and `URLCache.shared` has no disk capacity, in every mode. `URLSession.shared` had been caching TTS request text, `/timestamps` words and the audio itself — the first incognito test found a sentence there. |
+| Spaceterm: `/v1/transcriptions`, `/v1/synthesize`, `/v1/wake-word`, subscriber sockets (commands and dictation events) | `RemoteTranscriptionManager`, `WakeWordCheck.check`, the `/v1/synthesize` handler, `SubscriberSocket`; HTTP refusals are 403 `{"error":"incognito"}`. Spaceterm is local, so this is policy rather than necessity: it has its own switch, `Incognito.blocksSpaceterm`. |
+
+Still allowed: Parakeet (on device; FluidAudio only touches the network to download model
+weights), the local Kokoro, `/v1/speech` (text coming *in* to be spoken here), and reading
+the existing caches. The clipboard paste marks its item `org.nspasteboard.TransientType` and
+`ConcealedType` (in both modes) so clipboard managers skip it; Universal Clipboard is not
+known to honour those, so Handoff should be off in System Settings for incognito to hold.
 
 ## Voice commands (command mode)
 

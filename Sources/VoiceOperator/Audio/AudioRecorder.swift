@@ -4,8 +4,8 @@ import AVFoundation
 /// ASR expects. Audio is converted *live* in the tap (AVAudioConverter from the
 /// hardware format) and accumulated in memory, so callers can read partial audio
 /// mid-recording: that is what lets the arbiter upload packets while the user is
-/// still talking, the way Wispr Flow does. `stop()` writes the accumulated
-/// samples out as a WAV for history/retry.
+/// still talking, the way Wispr Flow does. `stop()` hands back the accumulated
+/// samples; the arbiter decides whether they are kept for history/retry.
 ///
 /// `onFirstAudio` fires the moment the first buffer with real frames arrives.
 /// That instant — not `start()` returning — is when the microphone is genuinely
@@ -640,10 +640,11 @@ final class AudioRecorder: @unchecked Sendable {
         }
     }
 
-    /// Stops recording and returns the finished clip: a 16 kHz mono WAV URL (the
-    /// caller owns the file) plus the raw PCM, so callers needing the samples do
-    /// not have to race a subsequent `start()` for them.
-    func stop() throws -> (url: URL, pcm: Data) {
+    /// Stops recording and returns the finished clip as 16 kHz mono PCM16, so
+    /// callers needing the samples do not have to race a subsequent `start()`
+    /// for them. Nothing is written to disk: keeping the clip is the caller's
+    /// decision (and in incognito mode, never made).
+    func stop() throws -> Data {
         guard isRecording else { throw RecorderError.notRecording }
         isRecording = false
 
@@ -683,10 +684,7 @@ final class AudioRecorder: @unchecked Sendable {
                        lastDurationSeconds, lastPeak, lastRMS,
                        Double(meteringStart / 2) / Double(Self.asrSampleRate)))
 
-        let wavURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vo-rec-\(UUID().uuidString).wav")
-        try WAVFile(sampleRate: Self.asrSampleRate, samples: samples).data.write(to: wavURL)
-        return (wavURL, samples)
+        return samples
     }
 
     /// RMS of the opening `bins × binMS` of a clip, one value per bin (0…1).

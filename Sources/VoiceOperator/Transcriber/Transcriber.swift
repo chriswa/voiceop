@@ -181,6 +181,7 @@ extension TranscriberError {
     static func userMessage(for error: Error) -> String {
         switch error {
         case let e as TranscriberError: return e.userMessage
+        case let e as Incognito.Blocked: return e.description
         case let e as URLError where e.code == .timedOut: return "network timeout"
         case let e as URLError where e.code == .notConnectedToInternet: return "no internet connection"
         case is WAVFile.WAVError: return "unreadable audio file"

@@ -10,14 +10,25 @@ import Foundation
 ///     Content-Type: application/json
 ///     { "text": <string>, "voice": <voice id>, "speed": <0.5–2.0> }
 ///
-/// Base URL precedence: `$VOICEOP_KOKORO_URL` → `config.json` `tts.url` →
-/// `http://127.0.0.1:56841`. Optional `tts.headers` (e.g. Cloudflare Access
-/// service-token pair) are attached to every request — see `Config`.
+/// Always the Kokoro server Voice Operator runs on this Mac (`KokoroService`),
+/// at `baseURL`. There is deliberately no way to point it anywhere else: what
+/// is spoken never leaves the machine.
 ///
 /// To fit the app's f32le streaming pipeline (`TTSEngine`/`PCMReframer`), this
 /// strips the WAV header and converts the s16le samples to `pcm_f32le` before
 /// yielding them. Unlike Cartesia there is no API key and no volume control.
 struct KokoroSynthesizer: SpeechSynthesizer {
+    /// The local Kokoro. An IPv4 literal, not `localhost`: the server binds
+    /// 127.0.0.1 only, and `localhost` would try `::1` first.
+    static let baseURL = "http://127.0.0.1:56841"
+    /// Kokoro's own default voice, used when a caller names none.
+    static let defaultVoiceID = "af_heart"
+    /// Ephemeral: nothing about a request reaches the disk. The shared session
+    /// keeps an HTTP cache in ~/Library/Caches, which stored every request's text,
+    /// the word timings and the audio itself — found leaking an incognito
+    /// sentence, and never wanted in any mode (`AudioCache` is the TTS cache).
+    static let session = URLSession(configuration: .ephemeral)
+
     /// Kokoro's native output rate (s16le, mono). See `TTSEngine.streamFormat`.
     let sampleRate = 24_000
 
@@ -45,8 +56,7 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         var req = URLRequest(url: endpoint("voices"))
         req.httpMethod = "GET"
         req.timeoutInterval = 30
-        applyTTSHeaders(to: &req)
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await Self.session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw SpeakerError.synthesis("voice list unavailable")
         }
@@ -141,7 +151,7 @@ struct KokoroSynthesizer: SpeechSynthesizer {
                             progress: StreamProgress, startedAt: Date,
                             into continuation: AsyncThrowingStream<Data, Error>.Continuation) async throws {
         progress.enter("awaiting response")
-        let (bytes, resp) = try await URLSession.shared.bytes(for: makeRequest(text: text, voiceID: voiceID))
+        let (bytes, resp) = try await Self.session.bytes(for: makeRequest(text: text, voiceID: voiceID))
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
             throw SpeakerError.http(status: (resp as? HTTPURLResponse)?.statusCode ?? -1, body: "")
         }
@@ -179,7 +189,7 @@ struct KokoroSynthesizer: SpeechSynthesizer {
     // MARK: - One-shot WAV (fallback)
 
     func synthesizeWAV(text: String, voiceID: String) async throws -> Data {
-        let (data, resp) = try await URLSession.shared.data(for: makeRequest(text: text, voiceID: voiceID))
+        let (data, resp) = try await Self.session.data(for: makeRequest(text: text, voiceID: voiceID))
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             throw SpeakerError.http(status: status, body: String(decoding: data.prefix(300), as: UTF8.self))
@@ -208,11 +218,10 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 30
-        Self.applyTTSHeaders(to: &req)
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "text": text, "voice": voiceID, "speed": speed,
         ])
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await Self.session.data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
             throw SpeakerError.http(status: (resp as? HTTPURLResponse)?.statusCode ?? -1, body: "")
         }
@@ -227,7 +236,6 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 30
-        Self.applyTTSHeaders(to: &req)
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "text": text,
             "voice": voiceID,
@@ -236,27 +244,9 @@ struct KokoroSynthesizer: SpeechSynthesizer {
         return req
     }
 
-    /// Join `path` onto the configured base URL. `config.json` is hand-edited, so
-    /// a malformed or scheme-less value is expected rather than exceptional —
-    /// fall back to the local default instead of trapping on a nil `URL`.
     static func endpoint(_ path: String) -> URL {
-        func join(_ base: String) -> URL? {
-            let root = base.hasSuffix("/") ? String(base.dropLast()) : base
-            guard let url = URL(string: "\(root)/\(path)"),
-                  url.scheme != nil, url.host != nil else { return nil }
-            return url
-        }
-        let base = Config.ttsBaseURL
-        if let url = join(base) { return url }
-        Log.log("tts: unusable base URL \(base.isEmpty ? "(empty)" : base) — falling back to \(Config.defaultTTSBaseURL)")
-        // Safe to force-unwrap: a known-good compile-time constant.
-        return join(Config.defaultTTSBaseURL)!
-    }
-
-    private static func applyTTSHeaders(to request: inout URLRequest) {
-        for (name, value) in Config.ttsHeaders {
-            request.setValue(value, forHTTPHeaderField: name)
-        }
+        // Safe to force-unwrap: a compile-time constant and a fixed path.
+        URL(string: "\(baseURL)/\(path)")!
     }
 
     /// Reject Cloudflare Access (and similar) HTML login pages that arrive as

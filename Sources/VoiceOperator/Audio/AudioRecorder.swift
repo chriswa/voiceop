@@ -19,7 +19,17 @@ final class AudioRecorder: @unchecked Sendable {
     /// The ASR wire format: 16 kHz mono 16-bit PCM (2 bytes per sample).
     static let asrSampleRate = 16_000
 
-    private let engine = AVAudioEngine()
+    /// Replaced, never mutated in place, when another engine in this process
+    /// has played audio since it was built — see `replaceEngineIfStale`.
+    /// Written only on `engineQueue`, under `lock`; read without the lock only
+    /// on `engineQueue`.
+    private var engine = AVAudioEngine()
+
+    /// Bumped by `noteOutputEngineStarted()`; compared against
+    /// `engineBuiltAtOutputStart` to tell whether `engine` has gone stale.
+    private static let outputStartsLock = NSLock()
+    nonisolated(unsafe) private static var outputStarts = 0
+    private var engineBuiltAtOutputStart = 0
 
     /// Every touch of the engine graph — tap install/removal, start, stop — runs
     /// here, and nowhere else. Three reasons, and the last two are the important
@@ -111,9 +121,76 @@ final class AudioRecorder: @unchecked Sendable {
     private(set) var isRecording = false
 
     init() {
+        engineBuiltAtOutputStart = Self.outputStartCount
         NotificationCenter.default.addObserver(
             self, selector: #selector(configurationChanged),
             name: .AVAudioEngineConfigurationChange, object: engine)
+    }
+
+    // MARK: - Engines that go stale
+
+    /// Another `AVAudioEngine` in this process has started playing — the speech
+    /// player. Called by it, from any thread.
+    ///
+    /// **A capture engine built before that can no longer open AirPods.**
+    /// Measured (2026-10-13, macOS 26, AirPods, a standalone probe with no Voice
+    /// Operator code in it): an engine's input runs through Core Audio's
+    /// `CADefaultDeviceAggregate` at 48 kHz and leaves the headset in its music
+    /// profile, dictation after dictation. Once a second engine has played
+    /// anything to the AirPods, starting that *same* capture engine instead drops
+    /// the headset into its 24 kHz call profile; the engine then dies in a
+    /// configuration change and can never start again at 24 kHz (-10868,
+    /// `InitializeActiveNodesInInputChain`). Every rebuild re-opens the device,
+    /// re-triggers the switch and dies again: the microphone indicator flickers,
+    /// nothing is captured, and every dictation fails until the app restarts. A
+    /// brand-new engine built after the playback opens the AirPods normally.
+    static func noteOutputEngineStarted() {
+        outputStartsLock.lock(); outputStarts += 1; outputStartsLock.unlock()
+    }
+
+    private static var outputStartCount: Int {
+        outputStartsLock.lock(); defer { outputStartsLock.unlock() }; return outputStarts
+    }
+
+    /// Build the replacement engine now, off the dictation's critical path,
+    /// rather than inside the next dictation's start. Constructing one costs
+    /// about a second (measured 0.9–1.1 s, almost all of it in the first
+    /// `inputNode` access) — a second the user would otherwise spend waiting
+    /// for the "safe to talk" cue. Call it once the speech player is gone.
+    func replaceEngineIfStale() {
+        engineQueue.async { [weak self] in self?.replaceEngineIfStaleOnQueue() }
+    }
+
+    /// Swap in a fresh engine if `engine` has gone stale (see
+    /// `noteOutputEngineStarted`) and the output is a Bluetooth headset — the
+    /// only place the stale engine is known to fail. Elsewhere the old engine
+    /// keeps working and costs nothing to keep, and it is still marked stale
+    /// should a headset become the output later. Only with the microphone shut:
+    /// a running tap is never pulled out from under a recording.
+    /// **engineQueue only.**
+    private func replaceEngineIfStaleOnQueue() {
+        let starts = Self.outputStartCount
+        lock.lock()
+        let open = micIsOpen
+        lock.unlock()
+        guard !open, starts != engineBuiltAtOutputStart, OutputDevice.isWireless else { return }
+
+        let began = Date()
+        let fresh = AVAudioEngine()
+        // The slow part. Done before the swap so `start()`, which reads the input
+        // format on the caller's thread, never meets an engine that has not paid it.
+        _ = fresh.inputNode
+        let old = engine
+        NotificationCenter.default.removeObserver(self, name: .AVAudioEngineConfigurationChange, object: old)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(configurationChanged),
+            name: .AVAudioEngineConfigurationChange, object: fresh)
+        lock.lock()
+        engine = fresh
+        engineBuiltAtOutputStart = starts
+        lock.unlock()
+        Log.log(String(format: "recorder: rebuilt the capture engine after speech playback (%.0f ms) — %@",
+                       Date().timeIntervalSince(began) * 1000, OutputDevice.summary))
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }
@@ -201,10 +278,13 @@ final class AudioRecorder: @unchecked Sendable {
         }
         lock.lock()
         let openFormat = micIsOpen ? tapFormat : nil
+        let engine = self.engine
         lock.unlock()
         // With the microphone already held open, the running tap's format is the
         // one buffers will actually arrive in — ask the node again and a device
         // that has since changed underneath it answers for the wrong hardware.
+        // (If `openMic` swaps in a fresh engine, this may describe the old one;
+        // `rebuildConverterIfNeededLocked` corrects it on the first buffer.)
         let format = openFormat ?? engine.inputNode.inputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             Log.log("recorder: ERROR invalid input format — no microphone input available")
@@ -380,6 +460,7 @@ final class AudioRecorder: @unchecked Sendable {
     /// `removeTap` first so a second install is impossible even if `micIsOpen`
     /// were ever wrong. **engineQueue only.**
     private func openMic(trace: DictationTrace?) -> String? {
+        replaceEngineIfStaleOnQueue()
         let input = engine.inputNode
         lock.lock()
         let alreadyInstalled = micIsOpen

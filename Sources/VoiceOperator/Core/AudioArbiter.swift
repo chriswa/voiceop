@@ -914,6 +914,7 @@ final class AudioArbiter {
         playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
         queueSpeechActive = false
         tts.stop()
+        recorder.replaceEngineIfStale()
         stopTTSWaitCue()
         wordOverlay.stop()
         refreshSpeechActivity()
@@ -962,6 +963,9 @@ final class AudioArbiter {
             self.speechSessionID = nil
             self.playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
             self.tts.stop()
+            // The speech engine is gone; get the capture engine it left unable
+            // to open AirPods replaced before the next dictation needs it.
+            self.recorder.replaceEngineIfStale()
             self.wordOverlay.stop()
             self.onPlaybackControlsChanged?()
         }

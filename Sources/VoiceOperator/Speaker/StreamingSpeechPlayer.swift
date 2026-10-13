@@ -81,6 +81,7 @@ final class StreamingSpeechPlayer {
             }
         }
         try engine.start()
+        if !manualRendering { AudioRecorder.noteOutputEngineStarted() }
     }
 
     /// The output device or its format changed under us — AirPods connecting, a

@@ -187,6 +187,8 @@ final class SpeechHTTPService: @unchecked Sendable {
         //
         // The text goes through `TTSPreprocess` first, as speech played here
         // does, so a path or a camelCase name sounds the same on the phone.
+        // So does `SpeechLoudness`: the phone plays this WAV as is, so the gain
+        // and limiter speech gets here are applied before it leaves.
         //
         // With `"word_timings": true` the answer is JSON instead: the WAV as
         // base64 `audio`, and `words`, each word's `start`/`end` in seconds and
@@ -203,12 +205,12 @@ final class SpeechHTTPService: @unchecked Sendable {
             let prepared = TTSPreprocess.prepare(text)
             do {
                 guard o["word_timings"] as? Bool == true else {
-                    let wav = try await synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice)
+                    let wav = try await Self.loud(synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice))
                     Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice)")
                     return .init(status: 200, object: nil, raw: (wav, "audio/wav"))
                 }
                 async let timings = try? synthesizer.wordTimings(text: prepared.ttsText, voiceID: voice)
-                let wav = try await synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice)
+                let wav = try await Self.loud(synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice))
                 let words = await timings.flatMap { Self.wordObjects(prepared: prepared, timings: $0) }
                 Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice), \(words.map { "\($0.count) timed words" } ?? "untimed")")
                 var answer: [String: Any] = ["audio": wav.base64EncodedString()]
@@ -245,6 +247,12 @@ final class SpeechHTTPService: @unchecked Sendable {
             return .init(status: status(result), object: object(result))
         }
         return .init(status: 405, object: ["error": "method_not_allowed"])
+    }
+    /// `SpeechLoudness.boosted` for a synthesized WAV blob. A clip that will not
+    /// boost is sent at its original level rather than not at all.
+    private static func loud(_ wav: Data) -> Data {
+        do { return try SpeechLoudness.boosted(WAVFile.parse(wav)).data }
+        catch { Log.log("remote synthesis: loudness skipped: \(error)"); return wav }
     }
     private func handleSubscribers(_ r: Request) -> Response {
         let registry = SubscriberRegistry.shared

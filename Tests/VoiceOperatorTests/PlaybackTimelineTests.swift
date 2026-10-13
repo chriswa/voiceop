@@ -107,6 +107,36 @@ final class PlaybackTimelineTests: XCTestCase {
         XCTAssertTrue(player.atEnd)
     }
 
+    /// Speech is lifted by `makeupGainDB`, and a sentence that already peaks
+    /// near full scale is held under it rather than clipped.
+    @MainActor
+    func testOfflineGraphAddsMakeupGainWithoutClipping() async throws {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000,
+                                   channels: 1, interleaved: false)!
+        func peak(amplitude: Float) async throws -> Float {
+            let player = StreamingSpeechPlayer()
+            try player.start(format: format, manualRendering: true)
+            defer { player.halt() }
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 24_000)!
+            buffer.frameLength = 24_000
+            for i in 0..<24_000 { buffer.floatChannelData![0][i] = amplitude * sin(Float(i) * 0.1) }
+            player.beginSentence(onStart: {})
+            player.schedule(buffer)
+            player.endOfStream()
+            let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512)!
+            var loudest: Float = 0
+            for _ in 0..<40 {
+                try await render(player, into: output, count: 1)
+                for i in 0..<Int(output.frameLength) { loudest = max(loudest, abs(output.floatChannelData![0][i])) }
+            }
+            return loudest
+        }
+        let quiet = try await peak(amplitude: 0.03)
+        XCTAssertEqual(20 * log10(quiet / 0.03), SpeechLoudness.makeupGainDB, accuracy: 0.5)
+        let hot = try await peak(amplitude: 0.98)
+        XCTAssertLessThan(hot, 1.0)
+    }
+
     @MainActor
     func testRewindWhileProducerIsOpenPreservesCompletionAndAcceptsMoreAudio() async throws {
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000,

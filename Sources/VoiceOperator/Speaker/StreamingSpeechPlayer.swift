@@ -8,6 +8,8 @@ final class StreamingSpeechPlayer {
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private let timePitch = AVAudioUnitTimePitch()
+    /// Lifts speech to music level; see `SpeechLoudness`.
+    private let limiter = SpeechLoudness.makeLimiter()
     private var format: AVAudioFormat!
     private struct Chunk { let start: Int64; let buffer: AVAudioPCMBuffer }
     private var chunks: [Chunk] = []
@@ -65,8 +67,11 @@ final class StreamingSpeechPlayer {
         self.manualRendering = manualRendering
         engine.attach(node)
         engine.attach(timePitch)
+        engine.attach(limiter)
         engine.connect(node, to: timePitch, format: format)
-        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        engine.connect(timePitch, to: limiter, format: format)
+        engine.connect(limiter, to: engine.mainMixerNode, format: format)
+        engine.mainMixerNode.outputVolume = SpeechLoudness.ceilingTrim
         if manualRendering {
             try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
         } else {

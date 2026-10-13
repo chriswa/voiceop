@@ -919,6 +919,11 @@ final class AudioArbiter {
         return .finished
     }
 
+    /// Where the voice is in the sentence playing now, without stopping it.
+    func spokenPosition() -> SpokenPosition? {
+        wordOverlay.narration.spokenPrefix(at: tts.position)
+    }
+
     /// Stop speaking, and report how far the voice actually got.
     ///
     /// The position is read first because stopping is what throws it away: the
@@ -933,11 +938,6 @@ final class AudioArbiter {
     /// one found, so which of the two a caller happens to be does not decide
     /// whether the interruption has a position.
     @discardableResult
-    /// Where the voice is in the sentence playing now, without stopping it.
-    func spokenPosition() -> SpokenPosition? {
-        wordOverlay.narration.spokenPrefix(at: tts.position)
-    }
-
     func haltSpeech() -> SpokenPosition? {
         let stoppedAt = wordOverlay.narration.spokenPrefix(at: tts.position) ?? lastStoppedAt
         lastStoppedAt = stoppedAt

@@ -21,7 +21,12 @@ struct HistoryStore {
         return dir
     }
 
-    private var fileURL: URL { Self.supportDir.appendingPathComponent("history.json") }
+    private let fileURL: URL
+
+    /// `fileURL` is a test seam: the default is the real history.
+    init(fileURL: URL = HistoryStore.supportDir.appendingPathComponent("history.json")) {
+        self.fileURL = fileURL
+    }
 
     struct Contents {
         var stt: [STTHistoryEntry] = []

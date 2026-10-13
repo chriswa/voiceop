@@ -81,6 +81,18 @@ final class IncognitoTests: XCTestCase {
         }
     }
 
+    func testHistoryIsNotSaved() {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("vo-history-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let entry = STTHistoryEntry(id: UUID(), date: Date(), duration: 1, transcript: "secret words",
+                                    error: nil, wavURL: nil, shadow: nil)
+        HistoryStore(fileURL: file).save(.init(stt: [entry], commands: []))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        Incognito.isOn = false
+        HistoryStore(fileURL: file).save(.init(stt: [entry], commands: []))
+        XCTAssertEqual(HistoryStore(fileURL: file).load().stt.first?.transcript, "secret words")
+    }
+
     /// URLSession.shared's disk cache kept TTS text, timings and audio.
     func testKokoroRequestsLeaveNoHTTPCacheOnDisk() {
         XCTAssertEqual(KokoroSynthesizer.session.configuration.urlCache?.diskCapacity ?? 0, 0)

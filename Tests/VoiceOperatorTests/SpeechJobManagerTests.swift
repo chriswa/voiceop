@@ -27,6 +27,27 @@ final class SpeechJobManagerTests: XCTestCase {
         await gate.finishNext()
     }
 
+    /// Each sentence is synthesized on its own, so a split inside a number is
+    /// heard: "zero", a sentence's pause, "eighteen".
+    func testDecimalsAreNotSentenceBoundaries() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let requests = PlaybackRequests()
+        await manager.configure(
+            play: { request, onStart, _ in
+                await requests.append(request)
+                return await gate.play(onStart: onStart)
+            }, prefetch: { _, _ in }, halt: { nil })
+        _ = await manager.enqueue(
+            text: "It costs 0.18 ms. Version 1.4.1 is 3.5x faster. Pi is 3.14.", voice: "af_heart")!
+        for n in 1...3 {
+            await gate.waitForStarts(n)
+            await gate.finishNext()
+        }
+        let seen = await requests.values.map { $0.text.trimmingCharacters(in: .whitespaces) }
+        XCTAssertEqual(seen, ["It costs 0.18 ms.", "Version 1.4.1 is 3.5x faster.", "Pi is 3.14."])
+    }
+
     func testLiveResultReportsTheWordBeingSpokenMidSentence() async {
         let manager = SpeechJobManager()
         let gate = PlaybackGate()

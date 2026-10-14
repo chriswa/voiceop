@@ -7,6 +7,10 @@ wrapped as a SwiftPM `systemLibrary` target so `OpusEncoder` can produce the
 
 - `include/` — opus public headers (from opus 1.5.2)
 - `lib/libopus.a` — prebuilt universal static archive (`arm64` + `x86_64`)
+- `COPYING` — libopus's BSD-3-Clause license + patent notice, verbatim from the
+  1.5.2 tarball. The binary license requires it to ship with the app, so
+  `make-app.sh` / `make-release.sh` copy it to
+  `Contents/Resources/libopus-COPYING.txt`. Replace it when you upgrade opus.
 - `module.modulemap` + `shim.h` — expose `opus.h` to Swift as `import COpus`
 - Linked via `-LSources/COpus/lib -lopus` in `Package.swift`.
 

@@ -61,6 +61,8 @@ cp "$BIN" "$APP/Contents/MacOS/VoiceOperator"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
+# libopus is statically linked; its BSD license requires the notice ship with the binary.
+cp Sources/COpus/COPYING "$APP/Contents/Resources/libopus-COPYING.txt"
 copy_kokoro_resources "$APP"
 stamp_build_identity "$APP" "$VERSION" "$BUILD_NUMBER"
 

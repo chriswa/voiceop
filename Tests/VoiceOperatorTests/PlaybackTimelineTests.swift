@@ -25,6 +25,24 @@ final class PlaybackTimelineTests: XCTestCase {
         XCTAssertTrue(timeline.acknowledge(end: 240_000, generation: timeline.generation))
     }
 
+    /// The node's clock stands still between sentences, so looking back counts
+    /// only the time it was playing, and never past its last reset.
+    func testPlayingClockCountsBackOnlyWhileThePlayerPlayed() {
+        var clock = PlayingClock()
+        clock.started(at: 10)
+        clock.paused(at: 12)
+        clock.started(at: 15)
+        // At 16: one second of the second run, two of the first; the pause between counts nothing.
+        XCTAssertEqual(clock.playingSeconds(since: 15.5, now: 16), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(clock.playingSeconds(since: 13, now: 16), 1, accuracy: 1e-9)
+        XCTAssertEqual(clock.playingSeconds(since: 11, now: 16), 2, accuracy: 1e-9)
+        // Starting again while playing changes nothing.
+        clock.started(at: 15.8)
+        XCTAssertEqual(clock.playingSeconds(since: 0, now: 16), 3, accuracy: 1e-9)
+        clock.reset()
+        XCTAssertEqual(clock.playingSeconds(since: 0, now: 16), 0)
+    }
+
     func testRateStepsLimitsAndNewSessionReset() {
         var controls = PlaybackControls()
         controls.adjust(by: 0.2)
@@ -196,6 +214,34 @@ final class PlaybackTimelineTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(10))
         XCTAssertTrue(player.atEnd, "released audio plays through in full")
         XCTAssertEqual(player.position, 1, accuracy: 0.01)
+    }
+
+    /// Looking back half a second of playing from the real graph lands half a
+    /// second of source audio earlier — past audio the node has already
+    /// acknowledged as played, which `position` itself never goes behind.
+    @MainActor
+    func testOfflineGraphPositionLooksBackOverTimeSpentPlaying() async throws {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000,
+                                   channels: 1, interleaved: false)!
+        let player = StreamingSpeechPlayer()
+        try player.start(format: format, manualRendering: true)
+        defer { player.halt() }
+        let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000)!
+        buffer.frameLength = 48_000
+        for i in 0..<48_000 { buffer.floatChannelData![0][i] = 0.1 * sin(Float(i) * 0.1) }
+        let playedFrom = ProcessInfo.processInfo.systemUptime
+        player.beginSentence(onStart: {})
+        player.schedule(buffer)
+        player.endOfStream()
+        // 70 × 512 frames: about one and a half seconds of the two-second sentence.
+        try await render(player, into: output, count: 70)
+        let now = player.position
+        XCTAssertGreaterThan(now, 1)
+        // Offline rendering runs faster than the clock, so the moments are given rather than waited for.
+        let later = playedFrom + 100
+        XCTAssertEqual(player.position(at: later - 0.5, now: later), now - 0.5, accuracy: 0.05)
+        XCTAssertEqual(player.position(at: later, now: later), now, accuracy: 1e-9)
     }
 
     @MainActor

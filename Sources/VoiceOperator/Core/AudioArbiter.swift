@@ -919,6 +919,9 @@ final class AudioArbiter {
         return .finished
     }
 
+    /// The furthest back `haltSpeech(heardUntil:)` will date a stop.
+    static let maxHeardUntilSeconds: TimeInterval = 10
+
     /// Where the voice is in the sentence playing now, without stopping it.
     func spokenPosition() -> SpokenPosition? {
         wordOverlay.narration.spokenPrefix(at: tts.position)
@@ -937,9 +940,24 @@ final class AudioArbiter {
     /// is nothing left to measure. The second call answers with what the first
     /// one found, so which of the two a caller happens to be does not decide
     /// whether the interruption has a position.
+    ///
+    /// `heardUntil`: the listener stopped hearing the voice then, before this
+    /// call — they began talking over it, and the stop was decided later (a
+    /// phone's hands-free mode checks the speech was words first). The
+    /// position is read as it was at that moment. At most
+    /// `maxHeardUntilSeconds` back.
     @discardableResult
-    func haltSpeech() -> SpokenPosition? {
-        let stoppedAt = wordOverlay.narration.spokenPrefix(at: tts.position) ?? lastStoppedAt
+    func haltSpeech(heardUntil: Date? = nil) -> SpokenPosition? {
+        let back = heardUntil.map { min(Self.maxHeardUntilSeconds, max(0, Date().timeIntervalSince($0))) } ?? 0
+        let position = back > 0 ? tts.position(at: ProcessInfo.processInfo.systemUptime - back) : tts.position
+        let measured = wordOverlay.narration.spokenPrefix(at: position)
+        if let measured {
+            // The output latency is what decides whether a headset's words count: say what it was.
+            Log.log(String(format: "tts halt: heard to %.2fs (%@output latency %.0f ms, %@) — %d chars into sentence %d",
+                           position, back > 0 ? String(format: "dated %.0f ms back, ", back * 1000) : "",
+                           tts.outputLatency * 1000, OutputDevice.summary, measured.characterOffset, measured.sentence + 1))
+        }
+        let stoppedAt = measured ?? lastStoppedAt
         lastStoppedAt = stoppedAt
         speechExpiry?.cancel(); speechExpiry = nil
         speechSessionID = nil

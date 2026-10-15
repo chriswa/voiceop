@@ -11,7 +11,7 @@ final class SpeechJobManagerTests: XCTestCase {
             play: { request, onStart, _ in
                 await requests.append(request)
                 return await gate.play(onStart: onStart)
-            }, prefetch: { _, _ in }, halt: { nil })
+            }, prefetch: { _, _ in }, halt: { _ in nil })
         let first = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         let second = await manager.enqueue(text: "Another job.", voice: "af_heart")!
         await gate.waitForStarts(1)
@@ -37,7 +37,7 @@ final class SpeechJobManagerTests: XCTestCase {
             play: { request, onStart, _ in
                 await requests.append(request)
                 return await gate.play(onStart: onStart)
-            }, prefetch: { _, _ in }, halt: { nil })
+            }, prefetch: { _, _ in }, halt: { _ in nil })
         _ = await manager.enqueue(
             text: "It costs 0.18 ms. Version 1.4.1 is 3.5x faster. Pi is 3.14.", voice: "af_heart")!
         for n in 1...3 {
@@ -53,7 +53,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let gate = PlaybackGate()
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
-            prefetch: { _, _ in }, halt: { nil },
+            prefetch: { _, _ in }, halt: { _ in nil },
             // Five characters into the second sentence: "Then " heard.
             spokenPosition: { SpokenPosition(sentence: 1, characterOffset: 5) })
         let job = await manager.enqueue(text: "First one. Then the second.", voice: "af_heart")!
@@ -76,7 +76,7 @@ final class SpeechJobManagerTests: XCTestCase {
         let gate = PlaybackGate()
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
-            prefetch: { _, _ in }, halt: { nil },
+            prefetch: { _, _ in }, halt: { _ in nil },
             // Rewound into the first sentence, after it finished: "First " heard.
             spokenPosition: { SpokenPosition(sentence: 0, characterOffset: 6) })
         let job = await manager.enqueue(text: "First one. Then the second.", voice: "af_heart")!
@@ -109,7 +109,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { await halts.increment(); return nil })
+            halt: { _ in await halts.increment(); return nil })
 
         let first = await manager.enqueue(text: "First sentence.", voice: "af_heart")!
         let second = await manager.enqueue(text: "Second sentence.", voice: "af_heart")!
@@ -136,7 +136,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { nil })
+            halt: { _ in nil })
 
         let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         XCTAssertEqual(accepted.state, .inProgress)
@@ -182,7 +182,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { nil })
+            halt: { _ in nil })
 
         let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         await gate.waitForStarts(1)
@@ -211,7 +211,7 @@ final class SpeechJobManagerTests: XCTestCase {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { nil })
+            halt: { _ in nil })
 
         let accepted = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         await gate.waitForStarts(1)
@@ -340,7 +340,7 @@ private func startWindowHarness(sentences: Int) async -> WindowHarness {
             await gate.play(onStart: onStart, onSynthesized: onSynthesized)
         },
         prefetch: { text, _ in await synth.synthesize(text) },
-        halt: { nil })
+        halt: { _ in nil })
     let accepted = await manager.enqueue(
         text: words.prefix(sentences).joined(separator: " "), voice: "af_heart")!
     await gate.waitForStarts(1)
@@ -384,6 +384,12 @@ private actor Counter {
     func increment() { value += 1 }
 }
 
+private actor Box<Value: Sendable> {
+    private(set) var value: Value
+    init(_ value: Value) { self.value = value }
+    func set(_ value: Value) { self.value = value }
+}
+
 private actor PlaybackRequests {
     private(set) var values: [SpeechJobManager.SentencePlayback] = []
     func append(_ request: SpeechJobManager.SentencePlayback) { values.append(request) }
@@ -407,7 +413,7 @@ extension SpeechJobManagerTests {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { stoppedAt })
+            halt: { _ in stoppedAt })
         let job = await manager.enqueue(parts: parts)!
         for n in 0..<played {
             await gate.waitForStarts(n + 1)
@@ -421,6 +427,34 @@ extension SpeechJobManagerTests {
         let after = await manager.result(id: job.id)!
         XCTAssertEqual(after.state, .interruptedByUser)
         return (after.characterOffset, boundary)
+    }
+
+    /// A client that stops a job after the listener began talking over it says
+    /// when that was; the halt reads the voice's position as of then, which
+    /// can be back in a sentence the queue has since left.
+    func testACancelDatedEarlierAsksTheHaltForThatMomentAndReportsItsPosition() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let asked = Box<Date?>(nil)
+        await manager.configure(
+            play: { _, onStart, _ in await gate.play(onStart: onStart) },
+            prefetch: { _, _ in },
+            halt: { heardUntil in
+                await asked.set(heardUntil)
+                return SpokenPosition(sentence: 0, characterOffset: 5)
+            })
+        let job = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
+        await gate.waitForStarts(1)
+        await gate.startNext()
+        await gate.finishNext()
+        await gate.waitForStarts(2)
+        await gate.startNext()
+        let began = Date(timeIntervalSinceNow: -1.5)
+        let result = await manager.cancel(id: job.id, heardUntil: began)!
+        let passed = await asked.value
+        XCTAssertEqual(passed, began)
+        XCTAssertEqual(result.state, .cancelledByClient)
+        XCTAssertEqual(result.characterOffset, 5, "heard only \"First\", though the first sentence had finished by the stop")
     }
 
     func testInterruptionReportsTheWordTheVoiceReached() async {
@@ -491,7 +525,7 @@ extension SpeechJobManagerTests {
                 return await gate.play(onStart: onStart, onSynthesized: onSynthesized)
             },
             prefetch: { text, voice in await prefetched.append(text, voice) },
-            halt: { nil })
+            halt: { _ in nil })
         let job = await manager.enqueue(parts: Self.reply)!
         await gate.waitForStarts(1)
 
@@ -530,7 +564,7 @@ extension SpeechJobManagerTests {
             play: { request, onStart, _ in
                 await requests.append(request)
                 return await gate.play(onStart: onStart)
-            }, prefetch: { _, _ in }, halt: { nil })
+            }, prefetch: { _, _ in }, halt: { _ in nil })
         _ = await manager.enqueue(parts: [.init(text: "Kevin says", voice: "af_heart"),
                                           .init(text: "done", voice: "am_michael")])!
         for n in 1...2 {
@@ -633,7 +667,7 @@ extension SpeechJobManagerTests {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { nil })
+            halt: { _ in nil })
         let job = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         await gate.waitForStarts(1)
         await gate.startNext()
@@ -670,7 +704,7 @@ extension SpeechJobManagerTests {
         await manager.configure(
             play: { _, onStart, _ in await gate.play(onStart: onStart) },
             prefetch: { _, _ in },
-            halt: { SpokenPosition(sentence: 0, characterOffset: 11) })
+            halt: { _ in SpokenPosition(sentence: 0, characterOffset: 11) })
         let job = await manager.enqueue(text: "First sentence. Second sentence.", voice: "af_heart")!
         await gate.waitForStarts(1)
         await gate.startNext()

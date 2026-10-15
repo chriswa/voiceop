@@ -110,7 +110,13 @@ anything. A job a listener *interrupted* reports where the voice actually
 stopped, to the word: the reading overlay's timings (`SpokenNarration`) locate
 the word being spoken at the moment of the halt, and its end is added to the
 start of the sentence it was in. A word counts as heard once it has started, so
-the offset matches what the overlay had lit up. Without word timings — they
+the offset matches what the overlay had lit up. A client that stops a job
+after the listener began talking over it can say when that was, `DELETE
+…?heard_until=<epoch ms>` (Spaceterm and this app share the Mac's clock): the
+position is read as it was then, counting back only time the player was
+actually playing, at most ten seconds. Every position allows for the output
+latency Core Audio reports, which is what a Bluetooth headset's delay comes
+down to, and each halt logs it (`tts halt:`). Without word timings — they
 resolve asynchronously, and a sentence can be interrupted before its own
 arrive — the offset falls back to the last completed sentence. The current
 sentence plus the next two are synthesized/

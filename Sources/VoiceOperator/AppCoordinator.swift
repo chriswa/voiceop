@@ -69,7 +69,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                                                      onStart: onStart, onSynthesized: onSynthesized) ?? .failed
                 },
                 prefetch: { [weak self] text, voice in await self?.arbiter.prefetchSentence(text: text, voiceID: voice) },
-                halt: { [weak self] in await MainActor.run { self?.arbiter.haltSpeech() } },
+                halt: { [weak self] heardUntil in await MainActor.run { self?.arbiter.haltSpeech(heardUntil: heardUntil) } },
                 spokenPosition: { [weak self] in await MainActor.run { self?.arbiter.spokenPosition() } },
                 onSpeechActivity: { [weak self] active in
                     Task { @MainActor in

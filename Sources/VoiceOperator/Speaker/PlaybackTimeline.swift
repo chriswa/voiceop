@@ -47,6 +47,39 @@ struct PlaybackTimeline {
     }
 }
 
+/// When the player node has been playing, by the monotonic clock
+/// (`ProcessInfo.systemUptime`), since its clock last started from zero: so
+/// that a moment in the past can be turned back into the node frame it was
+/// playing then. The node's own clock stands still while it is paused between
+/// sentences, so wall-clock time alone would count those pauses as speech.
+struct PlayingClock {
+    private struct Run { let start: TimeInterval; var end: TimeInterval? }
+    private var runs: [Run] = []
+    /// Runs that ended longer ago than this are dropped: nothing looks back further.
+    static let horizon: TimeInterval = 30
+
+    mutating func started(at now: TimeInterval) {
+        guard runs.last.map({ $0.end != nil }) ?? true else { return }
+        runs.removeAll { ($0.end ?? now) < now - Self.horizon }
+        runs.append(Run(start: now))
+    }
+
+    mutating func paused(at now: TimeInterval) {
+        guard let last = runs.indices.last, runs[last].end == nil else { return }
+        runs[last].end = now
+    }
+
+    /// The node's clock went back to zero (`AVAudioPlayerNode.stop()`): nothing before now can be looked back at.
+    mutating func reset() { runs.removeAll() }
+
+    /// How long the node has been playing between `since` and `now`.
+    func playingSeconds(since: TimeInterval, now: TimeInterval) -> TimeInterval {
+        runs.reduce(0) { total, run in
+            total + max(0, min(run.end ?? now, now) - max(run.start, since))
+        }
+    }
+}
+
 /// Session lifecycle uses a monotonic clock. The caller supplies the saved rate
 /// when starting a session and persists adjustments separately.
 struct PlaybackControls {

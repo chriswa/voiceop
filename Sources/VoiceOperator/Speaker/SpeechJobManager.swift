@@ -93,12 +93,13 @@ actor SpeechJobManager {
     private var play: (@Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> SentenceOutcome)?
     /// Synthesize a clip without playing it, returning when it has settled.
     private var prefetch: (@Sendable (String, String) async -> Void)?
-    /// Stop the audio, and say how far into the current sentence it had got.
+    /// Stop the audio, and say how far into the current sentence it had got —
+    /// as of the `Date` given, when the listener stopped hearing it before now.
     ///
     /// One closure rather than a reader and a separate stopper, because
     /// stopping is what destroys the word timings: splitting them leaves two
     /// calls whose order is load-bearing and nothing to enforce it.
-    private var halt: (@Sendable () async -> SpokenPosition?)?
+    private var halt: (@Sendable (Date?) async -> SpokenPosition?)?
     /// How far into the current sentence the voice has got, read without
     /// stopping it: the same word timings `halt` reads, for a client asking
     /// mid-speech (`liveResult`).
@@ -148,7 +149,7 @@ actor SpeechJobManager {
 
     func configure(play: @escaping @Sendable (SentencePlayback, @escaping @Sendable () -> Void, @escaping @Sendable () -> Void) async -> SentenceOutcome,
                    prefetch: @escaping @Sendable (String, String) async -> Void,
-                   halt: @escaping @Sendable () async -> SpokenPosition?,
+                   halt: @escaping @Sendable (Date?) async -> SpokenPosition?,
                    spokenPosition: @escaping @Sendable () async -> SpokenPosition? = { nil },
                    onSpeechActivity: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.play = play; self.prefetch = prefetch; self.halt = halt; self.spokenPosition = spokenPosition
@@ -290,10 +291,13 @@ actor SpeechJobManager {
 
     func beginDictation() async { dictating = true; await interruptCurrent(state: .interruptedByUser) }
     func endDictation() { dictating = false; pump() }
-    func cancel(id: String) async -> Result? {
+    /// `heardUntil`: the listener stopped hearing it then, before this — they
+    /// began talking over it, and the client decided to stop it only later.
+    /// What was heard is counted up to then.
+    func cancel(id: String, heardUntil: Date? = nil) async -> Result? {
         guard let job = jobs[id] else { return nil }
         guard !terminal(job.state) else { return result(job) }
-        if current == id { await interruptCurrent(state: .cancelledByClient) }
+        if current == id { await interruptCurrent(state: .cancelledByClient, heardUntil: heardUntil) }
         else { update(id) { $0.state = .cancelledByClient; $0.playbackState = nil }; order.removeAll { $0 == id } }
         return jobs[id].map(result)
     }
@@ -465,7 +469,7 @@ actor SpeechJobManager {
             pump()
         }
     }
-    private func interruptCurrent(state: State) async {
+    private func interruptCurrent(state: State, heardUntil: Date? = nil) async {
         defer { refreshActivity() }
         guard let id = current, let job = jobs[id], !terminal(job.state) else { return }
         Log.log("speech job \(id): \(state.rawValue) at sentence \(job.next + 1)/\(job.segments.count)")
@@ -474,7 +478,7 @@ actor SpeechJobManager {
         // Awaited now that halting also reports where it stopped: the offset has
         // to be in hand before the terminal state that carries it is published.
         order.removeAll { $0 == id }; current = nil
-        let stoppedAt = await halt?()
+        let stoppedAt = await halt?(heardUntil)
         if let stoppedAt {
             Log.log("speech job \(id): voice stopped \(stoppedAt.characterOffset) chars into sentence \(stoppedAt.sentence + 1)")
         }

@@ -21,6 +21,10 @@ final class TTSEngine {
     private(set) var playbackRate: Float = 1
     var onDrain: (() -> Void)?
     var position: Double { player?.position ?? 0 }
+    /// `position` as it read at `uptime`, earlier than now: see `StreamingSpeechPlayer.position(at:)`.
+    func position(at uptime: TimeInterval) -> Double { player?.position(at: uptime) ?? 0 }
+    /// How far the output is behind the player, as `position` allows for it.
+    var outputLatency: Double { player?.outputLatency ?? 0 }
     var duration: Double { player?.duration ?? 0 }
     var atEnd: Bool { player?.atEnd ?? true }
 

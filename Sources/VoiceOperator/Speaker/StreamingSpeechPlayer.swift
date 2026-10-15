@@ -14,6 +14,8 @@ final class StreamingSpeechPlayer {
     private struct Chunk { let start: Int64; let buffer: AVAudioPCMBuffer }
     private var chunks: [Chunk] = []
     private var timeline = PlaybackTimeline()
+    /// When the node played, for `position(at:)`.
+    private var clock = PlayingClock()
     private(set) var frameCount: Int64 = 0
     private var streamEnded = false
     private var halted = false
@@ -57,6 +59,26 @@ final class StreamingSpeechPlayer {
         // rate itself comes from the node, not from elapsed wall-clock time.
         let delay = Int64(max(0, node.outputPresentationLatency) * format.sampleRate * Double(rate))
         let frame = max(timeline.acknowledged, timeline.position(nodeFrame: max(0, nodeFrame - delay)))
+        return Double(min(frameCount, frame)) / format.sampleRate
+    }
+
+    /// The output latency `position` allows for, in seconds: how far the
+    /// loudspeaker — or a Bluetooth headset — is behind the node, as Core Audio
+    /// reports it.
+    var outputLatency: Double { max(0, node.outputPresentationLatency) }
+
+    /// `position` as it would have read at `uptime` (`ProcessInfo.systemUptime`),
+    /// earlier than now: where a listener was when they began talking over the
+    /// voice, though the stop came later. Counts back only the time the node
+    /// was actually playing, and no further than its clock last started from
+    /// zero (a seek, a new session); not clamped to what has been acknowledged
+    /// as played, since the point is to land before some of it.
+    func position(at uptime: TimeInterval, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Double {
+        guard let format else { return 0 }
+        let back = clock.playingSeconds(since: uptime, now: now)
+        guard back > 0 else { return position }
+        let delay = Int64((outputLatency + back) * format.sampleRate * Double(rate))
+        let frame = timeline.position(nodeFrame: max(0, nodeFrame - delay))
         return Double(min(frameCount, frame)) / format.sampleRate
     }
 
@@ -112,7 +134,7 @@ final class StreamingSpeechPlayer {
     func release() {
         guard held else { return }
         held = false
-        if !halted, !running, timeline.nodeEnd > 0 { node.play(); running = true }
+        if !halted, !running, timeline.nodeEnd > 0 { play() }
     }
 
     func beginSentence(onStart: @escaping () -> Void) {
@@ -156,7 +178,13 @@ final class StreamingSpeechPlayer {
                 self.checkDone()
             }
         }
-        if !running && !held { node.play(); running = true }
+        if !running && !held { play() }
+    }
+
+    private func play() {
+        node.play()
+        clock.started(at: ProcessInfo.processInfo.systemUptime)
+        running = true
     }
 
     func endOfStream() { streamEnded = true; checkDone() }
@@ -183,6 +211,7 @@ final class StreamingSpeechPlayer {
         preSeekRenderTime = node.lastRenderTime
         timeline.reset(at: min(frame, frameCount)) // invalidate callbacks BEFORE stop emits them
         node.stop()
+        clock.reset()
         timePitch.auAudioUnit.reset()
         running = false
         completed = false
@@ -221,6 +250,7 @@ final class StreamingSpeechPlayer {
         configurationObserver = nil
         timeline.reset(at: 0)
         node.stop()
+        clock.reset()
         engine.stop()
         chunks.removeAll()
         if let continuation { self.continuation = nil; continuation.resume(returning: false) }
@@ -231,6 +261,7 @@ final class StreamingSpeechPlayer {
         guard !halted, !completed, streamEnded, timeline.acknowledged >= frameCount else { return }
         completed = true
         node.pause()
+        clock.paused(at: ProcessInfo.processInfo.systemUptime)
         running = false
         // Keep the graph warm and PCM retained until the job's two-second grace
         // expires (or a replacement job/dictation/cancellation invalidates it).

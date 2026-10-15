@@ -249,7 +249,10 @@ final class SpeechHTTPService: @unchecked Sendable {
         guard components.count == 3, components[1] == "speech" else { return .init(status: 404, object: ["error": "not_found"]) }
         let id = String(components[2])
         if r.method == "DELETE" {
-            guard let result = await SpeechJobManager.shared.cancel(id: id) else { return .init(status: 404, object: ["error": "unknown_job"]) }
+            // `heard_until` (epoch ms): the listener began talking over it then, before this
+            // arrived — the client and this app share the Mac's clock. See `SpeechJobManager.cancel`.
+            let heardUntil = r.query["heard_until"].flatMap { Double($0) }.map { Date(timeIntervalSince1970: $0 / 1000) }
+            guard let result = await SpeechJobManager.shared.cancel(id: id, heardUntil: heardUntil) else { return .init(status: 404, object: ["error": "unknown_job"]) }
             return .init(status: status(result), object: object(result))
         }
         if r.method == "GET" {

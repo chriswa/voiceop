@@ -78,6 +78,8 @@ if CommandLine.arguments.contains("--tts-test") {
     exit(0)
 }
 
+ApplicationsRelocator.relocateIfNeeded()
+
 // Voice Operator runs as a menu bar accessory: no dock icon, no main window.
 // (Equivalent to LSUIElement, set programmatically so no Info.plist is needed
 // for `swift run` during development.)

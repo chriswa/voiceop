@@ -7,7 +7,7 @@ import AppKit
 enum Relauncher {
     static func restartAfterTermination() {
         let pid = ProcessInfo.processInfo.processIdentifier
-        let bundle = Bundle.main.bundleURL
+        let bundle = ApplicationsRelocator.relaunchBundleURL
         // Relaunch the .app via LaunchServices when bundled; otherwise re-exec the
         // bare binary (dev `swift run`).
         let relaunch = bundle.pathExtension == "app"

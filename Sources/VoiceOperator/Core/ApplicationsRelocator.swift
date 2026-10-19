@@ -32,6 +32,8 @@ enum ApplicationsRelocator {
         let dest = URL(fileURLWithPath: "/Applications").appendingPathComponent(source.lastPathComponent)
         guard source.path != dest.path else { return }
 
+        // Quit first, even if the copy then fails (no write access to /Applications
+        // without admin rights): a fresh build should replace the old copy either way.
         quitOtherInstances()
         do {
             try install(source, at: dest)

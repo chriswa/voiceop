@@ -25,12 +25,17 @@ enum ApplicationsRelocator {
         return Bundle.main.bundleURL
     }
 
-    static func relocateIfNeeded() {
+    /// `name` is the bundle's name in /Applications, if not the build's own.
+    static func relocateIfNeeded(as name: String? = nil) {
         #if DEBUG
         let source = Bundle.main.bundleURL.resolvingSymlinksInPath()
         guard source.pathExtension == "app" else { return }  // bare `swift run`
-        let dest = URL(fileURLWithPath: "/Applications").appendingPathComponent(source.lastPathComponent)
+        let dest = URL(fileURLWithPath: "/Applications").appendingPathComponent(name ?? source.lastPathComponent)
         guard source.path != dest.path else { return }
+        if let existing = Bundle(url: dest)?.bundleIdentifier, existing != Bundle.main.bundleIdentifier {
+            Log.log("relocate: \(dest.path) is another app (\(existing)), running from \(source.path)")
+            return
+        }
 
         // Quit first, even if the copy then fails (no write access to /Applications
         // without admin rights): a fresh build should replace the old copy either way.

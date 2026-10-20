@@ -36,6 +36,22 @@ if let i = CommandLine.arguments.firstIndex(of: "--provider-test") {
                                    ?? "Claude and kubectl and Coda are proper nouns.")
     exit(0)
 }
+// The same through Parakeet and the on-device clean-up pass, setting up the
+// clean-up server first (downloading it on first use): `--cleanup-test [text]`.
+if let i = CommandLine.arguments.firstIndex(of: "--cleanup-test") {
+    let server = CleanupServer(isBusy: { false })
+    server.enable()
+    await server.waitForJob()
+    let phase = server.phase
+    guard phase == .idle else {
+        FileHandle.standardError.write(Data("cleanup-test: server not ready: \(phase)\n".utf8))
+        exit(1)
+    }
+    await DebugCLI.runProviderTest(provider: .parakeet,
+                                   text: CommandLine.arguments.dropFirst(i + 1).first
+                                       ?? "um so send the the invoice to Sam by friday no wait thursday", cleanUp: true)
+    exit(0)
+}
 // Transcribe `say`-synthesized speech through the gRPC flow path
 // (WisprFlowProvider) — the formatted Wispr-parity path. Needs
 // VOICEOP_BASETEN_KEY; otherwise exercises the /llm/asr fallback.

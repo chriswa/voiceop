@@ -42,6 +42,12 @@ only). The arbiter and phone dictation know only `TranscriptionProvider` /
 DESIGN.md, "Transcription providers (2026-10-11)". Live-test any provider's live
 path with `--provider-test <wispr-flow|parakeet> [text]`.
 
+**Clean Up Transcripts** (same submenu) runs the primary's text through Fluid-1 Mini on a
+local llama.cpp launchd agent (`CleanedUpProvider`, `CleanupServer`); a failure pastes the
+raw text. See DESIGN.md "Dictation clean-up". The prompt
+(`Resources/dictation-cleanup.md`) is clean-room: **never paste FluidVoice's own prompt
+text into this public repo.** Live-test with `--cleanup-test [text]`.
+
 `WisprFlowProvider` transcribes over Wispr's primary **gRPC** path
 (`flow_api.v1.TranscriptionService` on Baseten), which returns **formatted** text
 with the user's dictionary — see DESIGN.md Milestone C and `proto/flow_api_v1.proto`.

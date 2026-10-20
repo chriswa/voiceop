@@ -98,6 +98,11 @@ final class IncognitoTests: XCTestCase {
         XCTAssertEqual(KokoroSynthesizer.session.configuration.urlCache?.diskCapacity ?? 0, 0)
     }
 
+    /// The clean-up request carries the transcript; loopback, but still no disk cache.
+    func testCleanupRequestsLeaveNoHTTPCacheOnDisk() {
+        XCTAssertEqual(DictationCleaner.session.configuration.urlCache?.diskCapacity ?? 0, 0)
+    }
+
     func testTheLogGetsLengthsNotWords() {
         XCTAssertEqual(Log.clip("secret words"), "[12ch]")
         Incognito.isOn = false

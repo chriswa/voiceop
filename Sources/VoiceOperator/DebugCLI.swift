@@ -63,7 +63,7 @@ enum DebugCLI {
     /// Synthesize `text` with `say` and dictate it through a provider's *live*
     /// path — a `TranscriptionLeg` fed 100 ms slices in real time, then finished,
     /// exactly as a held key does. The `trace …` line shows the timing.
-    static func runProviderTest(provider id: TranscriptionProviderID, text: String) async {
+    static func runProviderTest(provider id: TranscriptionProviderID, text: String, cleanUp: Bool = false) async {
         do {
             let tmp = FileManager.default.temporaryDirectory
             let aiff = tmp.appendingPathComponent("vo-say-\(UUID().uuidString).aiff")
@@ -78,7 +78,8 @@ enum DebugCLI {
             let clip = try Data(contentsOf: wavURL)
             let wav = try WAVFile.parse(clip)
 
-            let provider = TranscriptionProviders.provider(id)
+            let base = TranscriptionProviders.provider(id)
+            let provider: any TranscriptionProvider = cleanUp ? CleanedUpProvider(base: base) : base
             if let problem = await provider.prewarm() {
                 FileHandle.standardError.write(Data("provider-test: \(id.rawValue) not ready: \(problem)\n".utf8))
             }

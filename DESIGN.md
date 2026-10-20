@@ -313,6 +313,33 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   comparison. The shadow never pastes, never delays anything, and never touches
   `StreamHealth`, which follows the primary only. Remote dictation uses the primary, without
   a shadow (it has no history entry to file one on).
+- **Dictation clean-up (2026-10-20).** "Clean Up Transcripts" in the Transcription submenu
+  (`TranscriptionPreferences.cleanup`) wraps the primary in `CleanedUpProvider`
+  (`Cleanup/`), so dictation, history retries and phone dictation all paste cleaned text and
+  the arbiter is unchanged. The pass is Fluid-1 Mini (a ~2B Qwen fine-tune for dictation
+  clean-up by FluidVoice; personal, non-commercial licence) on a local llama.cpp server.
+  - **Server.** `CleanupServer` downloads a pinned llama.cpp release build and the pinned
+    Q6_K GGUF (both SHA-256-checked) into `Application Support/VoiceOperator/cleanup`,
+    deleting anything else there, and runs `llama-server` as the launchd agent
+    `com.chriswa.voiceoperator.cleanup` on `127.0.0.1:56842` (one slot, 4096 context, all
+    layers on the GPU). It exists only while the checkbox is on; off unloads it (freeing
+    about 2 GB) and "Delete Clean-Up Model" removes the files. `enable` leaves an agent that
+    already runs this build's plist alone, so launch and repeated toggles don't drop the warm
+    prompt cache. Its log is `~/Library/Logs/VoiceOperator-cleanup.log` (timings only).
+  - **Request** (`DictationCleaner`), shaped like FluidVoice's own, which the model was tuned
+    on: `Resources/dictation-cleanup.md` as the system turn, the bare transcript as the user
+    turn (no app context), ChatML, greedy decoding, `cache_prompt`, and an output budget of
+    `max(256, ⌈1.15 × estimate⌉ + 64)` tokens. One difference: the assistant turn is
+    pre-filled with an empty `<think></think>`; without it the model sometimes reasons in the
+    open and the reasoning would be pasted. The output has any think block stripped, and a
+    spoken question the model *answered* is put back as the question.
+  - **Prompt.** `dictation-cleanup.md` is our own, written clean-room from a behavioural spec
+    because FluidVoice's prompt is unlicensed; a reviewer compared the two and judged them
+    similar quality. On the same inputs it matched the original's outputs and ran faster.
+  - **Failure** never costs the words: any error (server down, timeout, empty output) pastes
+    the raw transcript, marks `cleanup-failed` in the dictation's `trace` line and logs why;
+    the submenu's status line warns while the server is not answering. Warm, a clean-up adds
+    about 0.4–0.6 s after Parakeet's result. Live-test with `--cleanup-test [text]`.
 - **Streaming dictation (2026-08-04).** The trigger key going down starts three things at
   once: the microphone, the duplex gRPC stream, and a 100 ms upload pump
   (`AudioArbiter.pumpAudio`) that hands each new slice of captured PCM to the provider's
@@ -759,7 +786,8 @@ error. `IncognitoTests` asks each gate directly.
 | Spaceterm: `/v1/transcriptions`, `/v1/synthesize`, `/v1/wake-word`, subscriber sockets (commands and dictation events) | `RemoteTranscriptionManager`, `WakeWordCheck.check`, the `/v1/synthesize` handler, `SubscriberSocket`; HTTP refusals are 403 `{"error":"incognito"}`. Spaceterm is local, so this is policy rather than necessity: it has its own switch, `Incognito.blocksSpaceterm`. |
 
 Still allowed: Parakeet (on device; FluidAudio only touches the network to download model
-weights), the local Kokoro, `/v1/speech` (text coming *in* to be spoken here), and reading
+weights), the local Kokoro, dictation clean-up (loopback llama.cpp; its `URLSession` is
+ephemeral and its log carries no text), `/v1/speech` (text coming *in* to be spoken here), and reading
 the existing caches. The clipboard paste marks its item `org.nspasteboard.TransientType` and
 `ConcealedType` (in both modes) so clipboard managers skip it; Universal Clipboard is not
 known to honour those, so Handoff should be off in System Settings for incognito to hold.

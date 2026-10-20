@@ -19,6 +19,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private lazy var kokoro = KokoroService(
         isBusy: { [unowned self] in self.arbiter.isDictating || self.arbiter.isSpeaking })
     private let kokoroSetup = KokoroSetupWindow()
+    /// The llama.cpp server behind "Clean Up Transcripts".
+    private lazy var cleanupServer = CleanupServer(
+        isBusy: { [unowned self] in self.arbiter.isDictating || self.arbiter.isSpeaking })
     /// What the setup window last showed, so a later health change doesn't
     /// re-open a window the user closed.
     private var kokoroSetupShown: KokoroService.Phase?
@@ -111,7 +114,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         menuBar.update(incognito: Incognito.isOn)
         if Incognito.isOn { Log.log("incognito: on — nothing is saved or leaves this Mac") }
-        menuBar.onMenuOpenChanged = { [weak self] open in self?.hotkey.chordsSuppressed = open }
+        menuBar.onMenuOpenChanged = { [weak self] open in
+            self?.hotkey.chordsSuppressed = open
+            if open, TranscriptionPreferences.cleanup, let server = self?.cleanupServer {
+                Task { await server.refreshHealth() }
+            }
+        }
         menuBar.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         menuBar.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }
         menuBar.onMuteSpeech = { [weak self] muted in
@@ -121,6 +129,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         arbiter.onSpeechIdle = { [weak self] in self?.restart.attempt() }
         menuBar.onRestart = { [unowned self] in restart.request(source: .menu) }
         wireTextToSpeechMenu()
+        wireCleanup()
         menuBar.launchAtLoginState = { LaunchAtLogin.isEnabled }
         menuBar.onToggleLaunchAtLogin = { LaunchAtLogin.toggle() }
         arbiter.wordOverlay.placement = OverlayPreferences.placement
@@ -269,6 +278,27 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         // No prompt: install (or update) on its own, with the setup window up.
         kokoro.autoStart()
+    }
+
+    /// "Clean Up Transcripts" in the Transcription submenu, and its server.
+    private func wireCleanup() {
+        cleanupServer.onChange = { [weak self] in self?.menuBar.refreshTranscriptionMenu() }
+        menuBar.cleanupMenuState = { [unowned self] in
+            CleanupMenuState.make(enabled: TranscriptionPreferences.cleanup, phase: cleanupServer.phase,
+                                  downloaded: cleanupServer.isDownloaded, healthy: cleanupServer.healthy)
+        }
+        menuBar.onToggleCleanup = { [unowned self] in
+            TranscriptionPreferences.cleanup.toggle()
+            let on = TranscriptionPreferences.cleanup
+            Log.log("transcription: clean-up \(on ? "on" : "off")")
+            if on { cleanupServer.enable() } else { cleanupServer.disable() }
+            menuBar.refreshTranscriptionMenu()
+        }
+        menuBar.onDeleteCleanupModel = { [unowned self] in cleanupServer.delete() }
+        // The agent exists exactly while the checkbox is on, whatever left it
+        // behind (`--cleanup-test`, a crash between the two).
+        if TranscriptionPreferences.cleanup { cleanupServer.enable() }
+        else if cleanupServer.isEnabled { cleanupServer.disable() }
     }
 
     /// The setup window follows installs only; the menu's status line covers

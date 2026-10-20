@@ -20,6 +20,7 @@ enum TranscriptionProviderID: String, CaseIterable, Codable, Sendable {
 enum TranscriptionPreferences {
     private static let primaryKey = "vo.transcriptionProvider"
     private static let shadowKey = "vo.shadowTranscriptionProvider"
+    private static let cleanupKey = "vo.dictationCleanup"
 
     /// What dictation uses until the menu says otherwise: always Parakeet, even
     /// on a Mac signed in to Wispr Flow. Wispr is only ever a deliberate choice.
@@ -48,6 +49,13 @@ enum TranscriptionPreferences {
             return id == primary ? nil : id
         }
         set { UserDefaults.standard.set(newValue?.rawValue, forKey: shadowKey) }
+    }
+
+    /// Whether the primary's transcripts go through the on-device clean-up pass
+    /// (`CleanedUpProvider`) before they are pasted. Off until chosen.
+    static var cleanup: Bool {
+        get { UserDefaults.standard.bool(forKey: cleanupKey) }
+        set { UserDefaults.standard.set(newValue, forKey: cleanupKey) }
     }
 }
 
@@ -105,8 +113,12 @@ enum TranscriptionProviders {
         }
     }
 
-    /// The provider whose transcript gets pasted.
-    static var primary: any TranscriptionProvider { provider(TranscriptionPreferences.primary) }
+    /// The provider whose transcript gets pasted, with the clean-up pass behind
+    /// it when that is on.
+    static var primary: any TranscriptionProvider {
+        let base = provider(TranscriptionPreferences.primary)
+        return TranscriptionPreferences.cleanup ? CleanedUpProvider(base: base) : base
+    }
 
     /// The provider shadowing it, if one is chosen.
     static var shadow: (any TranscriptionProvider)? { TranscriptionPreferences.shadow.map(provider) }

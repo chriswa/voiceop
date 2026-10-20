@@ -106,6 +106,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onCopyLastShadow: (() -> Void)?
     var onCopyShadowSTT: ((UUID) -> Void)?
     var onCopyShadowCommand: ((UUID) -> Void)?
+    /// The on-device clean-up pass: its checkbox, status line and delete item.
+    var cleanupMenuState: (() -> CleanupMenuState)?
+    var onToggleCleanup: (() -> Void)?
+    var onDeleteCleanupModel: (() -> Void)?
     /// The menu opened (true) or closed (false). Its items carry the same ⌘⌃
     /// shortcuts the global tap watches for, and AppKit fires them itself while
     /// the menu is open, so the tap must stand down for exactly that window.
@@ -343,6 +347,8 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        addCleanupItems(to: menu)
+        menu.addItem(.separator())
         let last = lastShadow?()
         let copyLast = NSMenuItem(title: "Copy Last Shadow Transcript", action: #selector(copyLastShadow), keyEquivalent: "")
         copyLast.target = self
@@ -353,6 +359,27 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             menu.addItem(preview)
         }
     }
+    private func addCleanupItems(to menu: NSMenu) {
+        guard let state = cleanupMenuState?() else { return }
+        let toggle = NSMenuItem(title: "Clean Up Transcripts (Fluid-1 Mini, on this Mac)",
+                                action: state.actionsEnabled ? #selector(toggleCleanup) : nil, keyEquivalent: "")
+        toggle.target = self; toggle.state = state.enabled ? .on : .off
+        menu.addItem(toggle)
+        if let status = state.status {
+            let line = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+            line.isEnabled = false; line.indentationLevel = 1
+            menu.addItem(line)
+        }
+        if state.showDelete {
+            let delete = NSMenuItem(title: "Delete Clean-Up Model (1.6 GB)", action: #selector(deleteCleanupModel), keyEquivalent: "")
+            delete.target = self; delete.indentationLevel = 1
+            menu.addItem(delete)
+        }
+    }
+    /// Re-read the clean-up section while the menu is open (download progress).
+    func refreshTranscriptionMenu() { rebuildTranscriptionMenu() }
+    @objc private func toggleCleanup() { onToggleCleanup?() }
+    @objc private func deleteCleanupModel() { onDeleteCleanupModel?() }
     @objc private func copyLastShadow() { onCopyLastShadow?() }
     /// A provider this Mac cannot use is listed, but greyed out (see
     /// `validateMenuItem`) and says why.

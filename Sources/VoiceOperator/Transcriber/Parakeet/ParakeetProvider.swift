@@ -1,7 +1,7 @@
 import FluidAudio
 import Foundation
 
-/// NVIDIA Parakeet TDT v3, on this Mac (CoreML on the Neural Engine, via
+/// NVIDIA Parakeet TDT v2 (English only), on this Mac (CoreML on the Neural Engine, via
 /// FluidAudio). Raw recognition with its own punctuation and casing — no clean-up
 /// pass and no custom vocabulary, so names like "kubectl" come out as heard.
 ///
@@ -70,7 +70,12 @@ actor ParakeetSession: TranscriptionSession {
 actor ParakeetEngine {
     static let shared = ParakeetEngine()
 
-    static let version = AsrModelVersion.v3
+    static let version = AsrModelVersion.v2
+
+    /// Every version this app has used. Once `version` loads, the downloads of
+    /// the others are deleted, so switching versions doesn't leave ~470 MB
+    /// behind on each Mac.
+    static let knownVersions: [AsrModelVersion] = [.v2, .v3]
 
     /// How long a dictation waits for a load that is still under way — the app
     /// was just launched, or Parakeet was just chosen. A normal load takes 0.2 s.
@@ -100,6 +105,7 @@ actor ParakeetEngine {
             let manager = AsrManager(config: .default)
             try await manager.loadModels(models)
             Log.log("parakeet: ready in \(started.duration(to: .now).formatted(.units(allowed: [.seconds, .milliseconds])))")
+            Self.removeOtherVersions()
             return manager
         }
         loading = task
@@ -112,6 +118,19 @@ actor ParakeetEngine {
             loading = nil
             Log.log("parakeet: load failed: \(error.localizedDescription)")
             throw error
+        }
+    }
+
+    private static func removeOtherVersions() {
+        for other in knownVersions where other != version {
+            let directory = AsrModels.defaultCacheDirectory(for: other)
+            guard FileManager.default.fileExists(atPath: directory.path) else { continue }
+            do {
+                try FileManager.default.removeItem(at: directory)
+                Log.log("parakeet: removed the unused \(other) model at \(directory.path)")
+            } catch {
+                Log.log("parakeet: couldn't remove the unused \(other) model at \(directory.path): \(error.localizedDescription)")
+            }
         }
     }
 

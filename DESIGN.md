@@ -556,6 +556,16 @@ clean tap: nothing else reads ⌘ while the trigger is held, so there is no ambi
 to resolve, and locking immediately means Fn can be released the moment the user
 thinks of it.
 
+#### Stop tail — 500 ms more after Fn ends a dictation (2026-10-20)
+
+When Fn itself ends a dictation (releasing a push-to-talk hold, or the press that
+ends a hands-free lock), recording continues for `stopTail` (500 ms) before
+`onStop` fires, because users tend to end a fraction early and clip their last
+word. The gesture sits in `.stopping` meanwhile and ignores Fn. Stops that are not
+the user's key — the `lockWindow` timer after a lone quick tap, tap-disable
+recovery, phone or API dictation — stop immediately. The key-up cue and the
+`trace` latency both start at the real stop, after the tail.
+
 #### Transcript style — left Shift while recording (2026-08-14)
 
 Wispr returns a finished *sentence*: first word capitalised, terminal full stop.

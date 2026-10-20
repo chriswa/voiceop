@@ -27,6 +27,12 @@ import IOKit.hid
 ///     mid-dictation: release the trigger whenever you like and keep talking
 ///     until the next press stops it. See `trackCommandLock`.
 ///
+/// Whenever the key itself ends a dictation — the release of a hold, or the
+/// press that ends a lock — recording carries on for `stopTail` before it
+/// stops, because people tend to let go just before their last word is out.
+/// Other ways of ending a dictation (the `lockWindow` timer, a tap that was
+/// disabled mid-gesture, anything outside this class) stop immediately.
+///
 /// `lockWindow` matches Wispr Flow's `DICTATION_DEBOUNCE_DELAY` (500 ms), which
 /// it likewise uses only to recognise a second quick press — never to delay the
 /// start of capture.
@@ -269,6 +275,9 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// How long after key-down a second press still counts as "lock this on".
     /// Wispr Flow's `DICTATION_DEBOUNCE_DELAY`.
     private let lockWindow: TimeInterval = 0.5
+    /// How long recording keeps going after the key asks it to stop, so the last
+    /// word is not clipped by a release or press that lands a little early.
+    private let stopTail: TimeInterval = 0.5
 
     private var tap: CFMachPort?
     private var isDown = false
@@ -276,7 +285,8 @@ final class HotkeyMonitor: @unchecked Sendable {
     private var downTimestamp: UInt64 = 0
     /// Fallback anchor, for the rare event that carries no timestamp.
     private var downTime: Date = .distantPast
-    private var lockTimer: Timer?
+    /// Ends the dictation when `.awaitingLock` or `.stopping` runs out.
+    private var stopTimer: Timer?
 
     private var thread: Thread?
 
@@ -286,10 +296,13 @@ final class HotkeyMonitor: @unchecked Sendable {
         /// Recording, key still held — a plain push-to-talk.
         case holding
         /// Recording, key released inside `lockWindow`. Still going, because a
-        /// second press may yet arrive to lock it on; `lockTimer` stops it if not.
+        /// second press may yet arrive to lock it on; `stopTimer` stops it if not.
         case awaitingLock
         /// Recording hands-free. The next key press ends it.
         case locked
+        /// Recording, key has asked to stop; `stopTimer` stops it after
+        /// `stopTail`. Key events are ignored until then.
+        case stopping
     }
     private var gesture: Gesture = .idle
 
@@ -386,7 +399,7 @@ final class HotkeyMonitor: @unchecked Sendable {
             shiftArmed = false   // its release may well have been in the gap
             if gesture != .idle {
                 Log.log("hotkey: dictation was in progress across the gap — stopping it")
-                cancelLockTimer()
+                cancelStopTimer()
                 gesture = .idle
                 isDown = false
                 onMain { [weak self] in
@@ -533,13 +546,14 @@ final class HotkeyMonitor: @unchecked Sendable {
             }
         case .awaitingLock:
             // Second press inside the window: hands-free from here on.
-            cancelLockTimer()
+            cancelStopTimer()
             gesture = .locked
         case .locked:
-            gesture = .idle
-            onMain { [weak self] in self?.onStop?() }
+            stop(after: stopTail, from: .stopping)
         case .holding:
             break   // duplicate down; the isDown guard normally filters these
+        case .stopping:
+            break   // already on its way out
         }
     }
 
@@ -568,37 +582,42 @@ final class HotkeyMonitor: @unchecked Sendable {
             let held = heldDuration(upTimestamp: timestamp)
             guard held < lockWindow else {
                 // A real hold — this is push-to-talk, so stop on release.
-                gesture = .idle
-                onMain { [weak self] in self?.onStop?() }
+                stop(after: stopTail, from: .stopping)
                 return
             }
             // Too quick to tell apart from the first half of a double-tap. Keep
             // recording (and keep uploading) until the window closes; if no
             // second press lands, stop then. The extra audio is free — worst case
             // it is a few hundred ms of room tone at the end of the clip.
-            gesture = .awaitingLock
-            lockTimer?.invalidate()
-            let timer = Timer(timeInterval: max(0, lockWindow - held), repeats: false) { [weak self] _ in
-                guard let self, self.gesture == .awaitingLock else { return }
-                self.lockTimer = nil
-                self.gesture = .idle
-                self.onMain { [weak self] in self?.onStop?() }
-            }
-            // Scheduled on *this* thread's run loop, alongside the tap, so the
-            // second press of a double-tap and the timer that would otherwise end
-            // the dictation are ordered against each other by the same loop.
-            // .common because menu tracking (and any other mode switch) parks a
-            // default-mode timer, and the dictation it is supposed to end never
-            // stops: mic open, audio uploading, system output muted, indefinitely.
-            RunLoop.current.add(timer, forMode: .common)
-            lockTimer = timer
-        case .awaitingLock, .locked, .idle:
+            stop(after: lockWindow - held, from: .awaitingLock)
+        case .awaitingLock, .locked, .stopping, .idle:
             break   // release of the locking press, or of a press that already stopped
         }
     }
 
-    private func cancelLockTimer() {
-        lockTimer?.invalidate()
-        lockTimer = nil
+    /// Enter `state` and stop the dictation `delay` from now, unless something
+    /// moves the gesture out of `state` first (a second press locking it on).
+    private func stop(after delay: TimeInterval, from state: Gesture) {
+        gesture = state
+        stopTimer?.invalidate()
+        let timer = Timer(timeInterval: max(0, delay), repeats: false) { [weak self] _ in
+            guard let self, self.gesture == state else { return }
+            self.stopTimer = nil
+            self.gesture = .idle
+            self.onMain { [weak self] in self?.onStop?() }
+        }
+        // Scheduled on *this* thread's run loop, alongside the tap, so the
+        // second press of a double-tap and the timer that would otherwise end
+        // the dictation are ordered against each other by the same loop.
+        // .common because menu tracking (and any other mode switch) parks a
+        // default-mode timer, and the dictation it is supposed to end never
+        // stops: mic open, audio uploading, system output muted, indefinitely.
+        RunLoop.current.add(timer, forMode: .common)
+        stopTimer = timer
+    }
+
+    private func cancelStopTimer() {
+        stopTimer?.invalidate()
+        stopTimer = nil
     }
 }

@@ -110,6 +110,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var cleanupMenuState: (() -> CleanupMenuState)?
     var onToggleCleanup: (() -> Void)?
     var onDeleteCleanupModel: (() -> Void)?
+    var onShowCleanupInstructions: (() -> Void)?
     /// The menu opened (true) or closed (false). Its items carry the same ⌘⌃
     /// shortcuts the global tap watches for, and AppKit fires them itself while
     /// the menu is open, so the tap must stand down for exactly that window.
@@ -375,11 +376,16 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             delete.target = self; delete.indentationLevel = 1
             menu.addItem(delete)
         }
+        let instructions = NSMenuItem(title: "Clean-Up Setup Instructions…", action: #selector(showCleanupInstructions),
+                                      keyEquivalent: "")
+        instructions.target = self; instructions.indentationLevel = 1
+        menu.addItem(instructions)
     }
     /// Re-read the clean-up section while the menu is open (download progress).
     func refreshTranscriptionMenu() { rebuildTranscriptionMenu() }
     @objc private func toggleCleanup() { onToggleCleanup?() }
     @objc private func deleteCleanupModel() { onDeleteCleanupModel?() }
+    @objc private func showCleanupInstructions() { onShowCleanupInstructions?() }
     @objc private func copyLastShadow() { onCopyLastShadow?() }
     /// A provider this Mac cannot use is listed, but greyed out (see
     /// `validateMenuItem`) and says why.

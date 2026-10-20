@@ -295,6 +295,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             menuBar.refreshTranscriptionMenu()
         }
         menuBar.onDeleteCleanupModel = { [unowned self] in cleanupServer.delete() }
+        menuBar.onShowCleanupInstructions = { NSWorkspace.shared.open(CleanupServer.instructions) }
         // The agent exists exactly while the checkbox is on, whatever left it
         // behind (`--cleanup-test`, a crash between the two).
         if TranscriptionPreferences.cleanup { cleanupServer.enable() }

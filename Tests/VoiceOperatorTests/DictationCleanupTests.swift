@@ -168,6 +168,13 @@ final class CleanupServerTests: XCTestCase {
                                     log: root.appendingPathComponent("Logs/VoiceOperator-cleanup.log"))
         runner = Runner(server: paths.server)
         fetched = Fetched()
+        try placeModel("the model")
+    }
+
+    /// What the user downloads by hand.
+    private func placeModel(_ contents: String) throws {
+        try FileManager.default.createDirectory(at: paths.installDir, withIntermediateDirectories: true)
+        try Data(contents.utf8).write(to: paths.model)
     }
 
     override func tearDown() async throws {
@@ -182,10 +189,11 @@ final class CleanupServerTests: XCTestCase {
                                  FileManager.default.createFile(atPath: destination.path, contents: Data("x".utf8))
                                  fetched.add(download.url.lastPathComponent)
                              },
-                             pollInterval: .milliseconds(5), startTimeout: .milliseconds(50))
+                             pollInterval: .milliseconds(5), startTimeout: .milliseconds(50),
+                             modelSHA256: "36cc7e3d6f6200756c81e18470827e9dac1c602fcd87761cbb0b8f015611c098")
     }
 
-    func testEnableDownloadsBothFilesAndStartsTheAgent() async throws {
+    func testEnableDownloadsLlamaAndStartsTheAgent() async throws {
         let server = makeServer()
         server.enable()
         await server.waitForJob()
@@ -194,7 +202,7 @@ final class CleanupServerTests: XCTestCase {
         XCTAssertTrue(server.healthy)
         XCTAssertTrue(server.isDownloaded)
         XCTAssertTrue(server.isEnabled)
-        XCTAssertEqual(fetched.names, ["llama-b11669-bin-macos-arm64.tar.gz", CleanupServer.modelFile])
+        XCTAssertEqual(fetched.names, ["llama-b11669-bin-macos-arm64.tar.gz"])
         XCTAssertTrue(runner.lines.contains { $0.hasPrefix("/bin/launchctl bootstrap") })
     }
 
@@ -210,19 +218,42 @@ final class CleanupServerTests: XCTestCase {
         XCTAssertFalse(runner.lines.contains { $0.hasPrefix("/bin/launchctl bootout") })
     }
 
-    func testEnableDeletesOtherDownloads() async throws {
+    func testEnableDeletesOtherBuildsButNotTheUsersFiles() async throws {
         let stale = paths.installDir.appendingPathComponent("llama-b10000", isDirectory: true)
         try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
-        let oldModel = paths.installDir.appendingPathComponent("fluid-1-mini-q4_k.gguf")
-        FileManager.default.createFile(atPath: oldModel.path, contents: Data())
+        let partial = paths.installDir.appendingPathComponent("llama-b11669.tar.gz.partial")
+        FileManager.default.createFile(atPath: partial.path, contents: Data())
+        let usersOwn = paths.installDir.appendingPathComponent("fluid-1-mini-q4_k.gguf")
+        FileManager.default.createFile(atPath: usersOwn.path, contents: Data())
 
         let server = makeServer()
         server.enable()
         await server.waitForJob()
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: oldModel.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: usersOwn.path))
         XCTAssertTrue(server.isDownloaded)
+    }
+
+    func testNoModelMeansNoServerAndSaysWhere() async throws {
+        try FileManager.default.removeItem(at: paths.model)
+        let server = makeServer()
+        server.enable()
+        await server.waitForJob()
+
+        XCTAssertEqual(server.phase, .failed(CleanupServer.Failure.modelMissing.localizedDescription))
+        XCTAssertFalse(server.isEnabled)
+    }
+
+    func testTheWrongModelFileIsRefused() async throws {
+        try placeModel("something else")
+        let server = makeServer()
+        server.enable()
+        await server.waitForJob()
+
+        XCTAssertEqual(server.phase, .failed(CleanupServer.Failure.modelMismatch.localizedDescription))
+        XCTAssertFalse(server.isEnabled)
     }
 
     func testAServerThatNeverAnswersFails() async throws {

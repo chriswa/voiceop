@@ -317,10 +317,13 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   (`TranscriptionPreferences.cleanup`) wraps the primary in `CleanedUpProvider`
   (`Cleanup/`), so dictation, history retries and phone dictation all paste cleaned text and
   the arbiter is unchanged. The pass is Fluid-1 Mini (a ~2B Qwen fine-tune for dictation
-  clean-up by FluidVoice; personal, non-commercial licence) on a local llama.cpp server.
-  - **Server.** `CleanupServer` downloads a pinned llama.cpp release build and the pinned
-    Q6_K GGUF (both SHA-256-checked) into `Application Support/VoiceOperator/cleanup`,
-    deleting anything else there, and runs `llama-server` as the launchd agent
+  clean-up by FluidVoice) on a local llama.cpp server. Its licence is personal and
+  non-commercial, so the app never downloads the model: the user does, from the README's
+  "Transcript clean-up" section, which the submenu links to; without it, enabling fails
+  and says so.
+  - **Server.** `CleanupServer` downloads a pinned llama.cpp release build into
+    `Application Support/VoiceOperator/cleanup` (deleting any other build it left there), checks
+    the pinned Q6_K GGUF beside it against its SHA-256, and runs `llama-server` as the launchd agent
     `com.chriswa.voiceoperator.cleanup` on `127.0.0.1:56842` (one slot, 4096 context, all
     layers on the GPU). It exists only while the checkbox is on; off unloads it (freeing
     about 2 GB) and "Delete Clean-Up Model" removes the files. `enable` leaves an agent that

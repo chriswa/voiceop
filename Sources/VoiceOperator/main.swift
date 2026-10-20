@@ -37,7 +37,8 @@ if let i = CommandLine.arguments.firstIndex(of: "--provider-test") {
     exit(0)
 }
 // The same through Parakeet and the on-device clean-up pass, setting up the
-// clean-up server first (downloading it on first use): `--cleanup-test [text]`.
+// clean-up server first (the model must already be downloaded; see README):
+// `--cleanup-test [text]`.
 if let i = CommandLine.arguments.firstIndex(of: "--cleanup-test") {
     let server = CleanupServer(isBusy: { false })
     server.enable()

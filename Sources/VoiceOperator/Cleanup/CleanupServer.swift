@@ -5,11 +5,14 @@ import Foundation
 /// per-user launchd agent serving Fluid-1 Mini on a loopback port. See DESIGN.md,
 /// "Dictation clean-up".
 ///
-/// Both downloads are pinned and checked against their SHA-256 before use: a
-/// llama.cpp release build (`llama-server` and its dylibs) and the model file
-/// from Hugging Face. They live in `Application Support/VoiceOperator/cleanup`;
-/// anything else found there (an older pinned build or model) is deleted when
-/// the server is set up, so an upgrade never leaves the previous download behind.
+/// Two files, both pinned and checked against their SHA-256 before use, in
+/// `Application Support/VoiceOperator/cleanup`:
+/// - a llama.cpp release build (`llama-server` and its dylibs, MIT), which this
+///   downloads itself, deleting any other build it finds there so an upgrade
+///   never leaves the previous one behind;
+/// - the model, which the user downloads, because its licence is theirs to
+///   accept (README, "Transcript clean-up"). Without it, enabling fails and
+///   says where to put it.
 ///
 /// The agent only exists while "Clean Up Transcripts" is on. Turning it off
 /// unloads it, which frees the model's memory (about 2 GB) but keeps the files;
@@ -35,13 +38,16 @@ final class CleanupServer {
         url: URL(string: "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz")!,
         sha256: "dbed55493d72bc1ba2babc8770d669c2289b5bc4ee9fb2a4dfc158d45b7d13fd",
         bytes: 12_191_582)
-    /// Fluid-1 Mini, Q6_K, at a fixed revision of `altic-dev/fluid-1-mini`.
-    /// Licensed for personal, non-commercial use only.
+    /// Fluid-1 Mini, Q6_K, at a fixed revision of `altic-dev/fluid-1-mini`
+    /// (personal, non-commercial licence). Downloaded by the user; the README's
+    /// instructions use this URL.
     nonisolated static let modelFile = "fluid-1-mini-q6_k.gguf"
     nonisolated static let model = Download(
         url: URL(string: "https://huggingface.co/altic-dev/fluid-1-mini/resolve/af4b6e10a3631c346f77ca8c1018b59743433aa5/fluid-1-mini-q6_k.gguf")!,
         sha256: "1c83ac7acaed9efbdd278a0cc56f15ffb59f85cf7684da817e8357cdcc915147",
         bytes: 1_606_323_744)
+    /// Where the README explains how to get the model.
+    nonisolated static let instructions = URL(string: "https://github.com/chriswa/voiceop#transcript-clean-up")!
 
     struct Paths: Sendable {
         /// `~/Library/Application Support/VoiceOperator/cleanup`
@@ -70,7 +76,7 @@ final class CleanupServer {
     /// What the server is doing, for the Transcription submenu's status line.
     enum Phase: Equatable, Sendable {
         case idle
-        /// A step is running; the text names it ("downloading the model, 40%").
+        /// A step is running; the text names it ("downloading llama.cpp").
         case working(String)
         /// The last action failed; the text says why. Cleared by the next action.
         case failed(String)
@@ -78,6 +84,8 @@ final class CleanupServer {
 
     enum Failure: LocalizedError, Equatable {
         case download(String, String)
+        case modelMissing
+        case modelMismatch
         case portInUse(String)
         case command(String, String)
         case didNotStart
@@ -85,6 +93,8 @@ final class CleanupServer {
         var errorDescription: String? {
             switch self {
             case .download(let what, let why): return "couldn't download \(what): \(why)"
+            case .modelMissing: return "the model isn't downloaded — see Clean-Up Setup Instructions"
+            case .modelMismatch: return "the model file isn't the expected download — see Clean-Up Setup Instructions"
             case .portInUse(let who): return "port \(CleanupServer.port) is in use by \(who)"
             case .command(let step, let detail): return "\(step) failed: \(detail)"
             case .didNotStart: return "the server did not come up"
@@ -103,6 +113,8 @@ final class CleanupServer {
     private let probe: @Sendable () async -> Bool
     private let fetch: @Sendable (Download, URL, @escaping @Sendable (Double) -> Void) async throws -> Void
     private let pollInterval: Duration
+    /// What the model file must hash to (a parameter for tests).
+    private let modelSHA256: String
     /// How long the model may take to load once the agent starts.
     private let startTimeout: Duration
     private var job: Task<Void, Never>?
@@ -113,7 +125,8 @@ final class CleanupServer {
          probe: @escaping @Sendable () async -> Bool = { await CleanupServer.probeHealth() },
          fetch: (@Sendable (Download, URL, @escaping @Sendable (Double) -> Void) async throws -> Void)? = nil,
          pollInterval: Duration = .seconds(1),
-         startTimeout: Duration = .seconds(120)) {
+         startTimeout: Duration = .seconds(120),
+         modelSHA256: String = CleanupServer.model.sha256) {
         self.paths = paths
         self.runner = runner
         self.isBusy = isBusy
@@ -123,11 +136,12 @@ final class CleanupServer {
         }
         self.pollInterval = pollInterval
         self.startTimeout = startTimeout
+        self.modelSHA256 = modelSHA256
     }
 
     // MARK: - State
 
-    /// Both downloads are in place.
+    /// Both files are in place.
     var isDownloaded: Bool {
         let fm = FileManager.default
         return fm.isExecutableFile(atPath: paths.server.path) && fm.fileExists(atPath: paths.model.path)
@@ -187,12 +201,14 @@ final class CleanupServer {
             phase = .working("downloading llama.cpp")
             try await downloadLlama()
         }
-        if !FileManager.default.fileExists(atPath: paths.model.path) {
-            try await downloadModel()
-        }
+        guard FileManager.default.fileExists(atPath: paths.model.path) else { throw Failure.modelMissing }
         let current = (try? Data(contentsOf: paths.plist)) == (try? Self.plistData(paths: paths))
         let running = current ? await isLoaded() : false
         if !running {
+            phase = .working("checking the model")
+            let model = paths.model
+            let digest = try await Task.detached { try FileDownloader.digest(model) }.value
+            guard digest == modelSHA256 else { throw Failure.modelMismatch }
             try await waitUntilIdle()
             try await unload()
             if let holder = try await portHolder() { throw Failure.portInUse(holder) }
@@ -226,29 +242,12 @@ final class CleanupServer {
         }
     }
 
-    private func downloadModel() async throws {
-        let partial = paths.model.appendingPathExtension("partial")
-        defer { try? FileManager.default.removeItem(at: partial) }
-        let size = ByteCountFormatter.string(fromByteCount: Self.model.bytes, countStyle: .file)
-        phase = .working("downloading the model (\(size))")
-        Log.log("cleanup server: downloading \(Self.model.url.absoluteString)")
-        do {
-            try await fetch(Self.model, partial) { [weak self] fraction in
-                Task { @MainActor in
-                    guard let self, self.isWorking else { return }
-                    self.phase = .working("downloading the model, \(Int(fraction * 100))% of \(size)")
-                }
-            }
-        } catch { throw Failure.download("the model", error.localizedDescription) }
-        try FileManager.default.moveItem(at: partial, to: paths.model)
-    }
-
-    /// Delete any other build or model in the install directory: the leftovers
-    /// of a previous pin, or a download that was interrupted.
+    /// Delete what this downloaded and no longer uses: another pinned llama.cpp
+    /// build, or an interrupted download. The user's own files are left alone.
     private func removeOtherDownloads() throws {
         let fm = FileManager.default
-        let keep: Set = [paths.llamaDir.lastPathComponent, paths.model.lastPathComponent]
-        for name in try fm.contentsOfDirectory(atPath: paths.installDir.path) where !keep.contains(name) {
+        for name in try fm.contentsOfDirectory(atPath: paths.installDir.path)
+        where (name.hasPrefix("llama-b") && name != paths.llamaDir.lastPathComponent) || name.hasSuffix(".partial") {
             try fm.removeItem(at: paths.installDir.appendingPathComponent(name))
             Log.log("cleanup server: removed \(name), which this build no longer uses")
         }

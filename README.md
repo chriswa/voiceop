@@ -47,7 +47,7 @@ Dictation goes through a **transcription provider**, chosen from the menu bar's
 - **Wispr Flow** — described below. Used only when chosen in the menu; greyed
   out on a Mac without a Wispr sign-in.
 - **Parakeet (on this Mac)** — the default, on every Mac. NVIDIA Parakeet TDT
-  v3 via FluidAudio, entirely on device. Raw recognition with its own punctuation and casing: no clean-up
+  v2 (English) via FluidAudio, entirely on device. Raw recognition with its own punctuation and casing: no clean-up
   and no custom vocabulary. The model (a few hundred MB) downloads from Hugging
   Face the first time it is chosen and loads at every launch. If it fails, the
   dictation fails — it never falls back to Wispr.
@@ -76,6 +76,32 @@ grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
 
 `flow: gRPC ok — N chars` is the formatted path. `flow: no Baseten key` or
 `flow: gRPC failed (…)` means you're on the raw fallback.
+
+## Transcript clean-up
+
+**Clean Up Transcripts** in the Transcription submenu runs each transcript
+through [Fluid-1 Mini](https://huggingface.co/altic-dev/fluid-1-mini), a small
+model tuned for cleaning up dictation, on this Mac before it is pasted: it drops
+fillers, applies "scratch that"-style corrections, formats numbers, and follows
+spoken commands like "new paragraph". It adds about half a second. If it fails,
+the raw transcript is pasted.
+
+The model's licence allows **personal, non-commercial use only**, so Voice
+Operator does not download it for you. Read the licence on its Hugging Face
+page, then download it to where the app looks for it (1.6 GB):
+
+```bash
+mkdir -p ~/Library/Application\ Support/VoiceOperator/cleanup
+curl -L --fail -o ~/Library/Application\ Support/VoiceOperator/cleanup/fluid-1-mini-q6_k.gguf \
+  https://huggingface.co/altic-dev/fluid-1-mini/resolve/af4b6e10a3631c346f77ca8c1018b59743433aa5/fluid-1-mini-q6_k.gguf
+```
+
+Then tick the checkbox. The app checks the file against the expected SHA-256,
+downloads [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT) beside it,
+and runs it as a background service while the checkbox is on. Turning the
+checkbox off stops the service and frees its memory (about 2 GB). **Delete
+Clean-Up Model** removes the whole folder. The submenu's **Clean-Up Setup
+Instructions…** opens this section.
 
 ## Text to Speech
 

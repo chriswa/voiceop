@@ -14,6 +14,9 @@ struct STTHistoryEntry: Identifiable, Sendable, Codable {
     let wavURL: URL?
     /// What the shadow provider made of the same audio, if one was on.
     var shadow: ShadowTranscript? = nil
+    /// What recognition produced before the clean-up pass rewrote it into
+    /// `transcript`; nil when no clean-up ran.
+    var raw: String? = nil
 
     var menuTitle: String {
         let secs = String(format: "%.1fs", duration)
@@ -37,6 +40,9 @@ struct CommandHistoryEntry: Identifiable, Sendable, Codable {
     let wavURL: URL?
     /// What the shadow provider made of the same audio, if one was on.
     var shadow: ShadowTranscript? = nil
+    /// What recognition produced before the clean-up pass rewrote it into
+    /// `transcript`; nil when no clean-up ran.
+    var raw: String? = nil
 
     var menuTitle: String {
         let secs = String(format: "%.1fs", duration)

@@ -110,6 +110,8 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onCopyLastShadow: (() -> Void)?
     var onCopyShadowSTT: ((UUID) -> Void)?
     var onCopyShadowCommand: ((UUID) -> Void)?
+    var onCopyRawSTT: ((UUID) -> Void)?
+    var onCopyRawCommand: ((UUID) -> Void)?
     /// The on-device clean-up pass: its checkbox, status line and delete item.
     var cleanupMenuState: (() -> CleanupMenuState)?
     var onToggleCleanup: (() -> Void)?
@@ -279,9 +281,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
         keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT,
-                copyShadow: onCopyShadowSTT)
+                copyRaw: onCopyRawSTT, copyShadow: onCopyShadowSTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand,
-                copyShadow: onCopyShadowCommand)
+                copyRaw: onCopyRawCommand, copyShadow: onCopyShadowCommand)
         rebuildTranscriptionMenu()
         refreshCleanupMenu()
         refreshTTSMenu()
@@ -307,19 +309,24 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         onMenuOpenChanged?(false)
     }
     private func rebuild<T>(_ menu: NSMenu, entries: [T], retry: ((UUID) -> Void)?, copy: ((UUID) -> Void)?,
-                            copyShadow: ((UUID) -> Void)?) {
+                            copyRaw: ((UUID) -> Void)?, copyShadow: ((UUID) -> Void)?) {
         menu.removeAllItems()
         if entries.isEmpty { menu.addItem(NSMenuItem(title: "None yet", action: nil, keyEquivalent: "")); return }
         for e in entries.prefix(10) {
-            let id: UUID; let title: String; let shadow: ShadowTranscript?
-            if let x = e as? STTHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow }
-            else if let x = e as? CommandHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow }
+            let id: UUID; let title: String; let shadow: ShadowTranscript?; let raw: String?
+            if let x = e as? STTHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow; raw = x.raw }
+            else if let x = e as? CommandHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow; raw = x.raw }
             else { continue }
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             let sub = NSMenu(); let retryItem = NSMenuItem(title: "Retry", action: #selector(runRetry(_:)), keyEquivalent: "")
             retryItem.target = self; retryItem.representedObject = Action(id: id, handler: retry); sub.addItem(retryItem)
             let copyItem = NSMenuItem(title: "Copy transcription", action: #selector(runCopy(_:)), keyEquivalent: "")
             copyItem.target = self; copyItem.representedObject = Action(id: id, handler: copy); sub.addItem(copyItem)
+            if raw != nil {
+                let copyRawItem = NSMenuItem(title: "Copy raw transcription (before clean-up)", action: #selector(runCopy(_:)), keyEquivalent: "")
+                copyRawItem.target = self; copyRawItem.representedObject = Action(id: id, handler: copyRaw)
+                sub.addItem(copyRawItem)
+            }
             if let shadow {
                 sub.addItem(.separator())
                 let line = NSMenuItem(title: "Shadow — \(shadow.menuTitle)", action: nil, keyEquivalent: "")

@@ -59,6 +59,15 @@ enum TranscriptionPreferences {
     }
 }
 
+/// What a provider made of one dictation.
+struct Transcript: Sendable, Equatable {
+    /// What gets pasted.
+    var text: String
+    /// What recognition produced before a clean-up pass rewrote it into `text`;
+    /// nil when no clean-up ran (or it failed, and `text` is the raw text).
+    var raw: String? = nil
+}
+
 /// Everything from the user's audio to the text that gets pasted — recognition
 /// and any clean-up pass behind it are one provider, not two stages the arbiter
 /// stitches together. `AudioArbiter` and `RemoteTranscriptionManager` only ever
@@ -72,12 +81,12 @@ protocol TranscriptionProvider: Sendable {
 
     /// Transcribe a complete stored clip (16 kHz mono PCM WAV): history retries,
     /// the debug CLI, and dictations whose live session never opened.
-    func transcribe(wavData: Data) async throws -> String
+    func transcribe(wavData: Data) async throws -> Transcript
 
     /// Transcribe a clip whose live session has just failed, *without* opening
     /// another one: a fresh session would spend its whole hang guard again, so one
     /// bad network moment would cost two timeouts back to back.
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> String
+    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript
 
     /// What `transcribeAfterLiveFailure` is called in traces ("raw /llm/asr").
     var fallbackLabel: String { get }
@@ -96,7 +105,7 @@ protocol TranscriptionProvider: Sendable {
 extension TranscriptionProvider {
     var retriesAfterLiveFailure: Bool { true }
 
-    func transcribe(wavURL: URL) async throws -> String {
+    func transcribe(wavURL: URL) async throws -> Transcript {
         try await transcribe(wavData: Data(contentsOf: wavURL))
     }
 }
@@ -132,7 +141,7 @@ protocol TranscriptionSession: Sendable {
     func send(pcm: Data) async
     /// The last of the audio, then the final text. Bounded by the provider's own
     /// hang guard, after which it throws.
-    func commit(pcm: Data) async throws -> String
+    func commit(pcm: Data) async throws -> Transcript
     /// Abandon the session. Safe to call more than once.
     func cancel() async
 }

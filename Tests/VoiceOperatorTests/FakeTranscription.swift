@@ -27,8 +27,8 @@ struct FakeProvider: TranscriptionProvider {
         if let openError { throw openError }
         return session ?? FakeSession(result: .success(""))
     }
-    func transcribe(wavData: Data) async throws -> String { try await fallback(wavData) }
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> String { try await fallback(wavData) }
+    func transcribe(wavData: Data) async throws -> Transcript { Transcript(text: try await fallback(wavData)) }
+    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript { Transcript(text: try await fallback(wavData)) }
     func prewarm() async -> String? { nil }
 }
 
@@ -49,10 +49,10 @@ actor FakeSession: TranscriptionSession {
         sent += pcm.count
         received.append(pcm)
     }
-    func commit(pcm: Data) throws -> String {
+    func commit(pcm: Data) throws -> Transcript {
         committed = pcm.count
         received.append(pcm)
-        return try result.get()
+        return Transcript(text: try result.get())
     }
     func cancel() {
         cancelled = true

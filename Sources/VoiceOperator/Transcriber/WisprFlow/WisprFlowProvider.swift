@@ -97,9 +97,9 @@ struct WisprFlowProvider: TranscriptionProvider {
             trace: trace)
     }
 
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> String {
+    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript {
         try Incognito.check(Self.incognitoActivity)
-        return try await fallback.transcribe(wavData: wavData, language: "en")
+        return Transcript(text: try await fallback.transcribe(wavData: wavData, language: "en"))
     }
 
     // MARK: - Stored clips
@@ -107,20 +107,20 @@ struct WisprFlowProvider: TranscriptionProvider {
     /// The reverse-engineered gRPC proto has an unresolved `Language` enum, so the
     /// flow request sends no language and lets the server detect it. This app is
     /// English-only, so detection is reliable and the formatted result is worth it.
-    func transcribe(wavData: Data) async throws -> String {
+    func transcribe(wavData: Data) async throws -> Transcript {
         try Incognito.check(Self.incognitoActivity)
         let wav = try WAVFile.parse(wavData)
         guard WisprBasetenKey.value != nil else {
             Log.log("flow: no Baseten key — using raw /llm/asr")
-            return try await fallback.transcribe(wavData: wavData, language: "en")
+            return Transcript(text: try await fallback.transcribe(wavData: wavData, language: "en"))
         }
         do {
             let text = try await replay(wav)
             Log.log("flow: stream ok — \(text.count) chars")
-            return text
+            return Transcript(text: text)
         } catch {
             Log.log("flow: stream failed (\(TranscriberError.userMessage(for: error))) — falling back to /llm/asr")
-            return try await fallback.transcribe(wavData: wavData, language: "en")
+            return Transcript(text: try await fallback.transcribe(wavData: wavData, language: "en"))
         }
     }
 
@@ -185,7 +185,7 @@ actor WisprFlowSession: TranscriptionSession {
         await flow.send(packets: packets)
     }
 
-    func commit(pcm: Data) async throws -> String {
+    func commit(pcm: Data) async throws -> Transcript {
         if let encodeFailure {
             await flow.cancel()
             throw encodeFailure
@@ -193,7 +193,7 @@ actor WisprFlowSession: TranscriptionSession {
         var tail: [Data] = []
         do { tail = try packetizer.finish(pcm) }
         catch { Log.log("dictation: final opus encode failed: \(error)") }
-        return try await flow.commit(packets: tail, timeout: FlowSession.defaultCommitTimeout)
+        return Transcript(text: try await flow.commit(packets: tail, timeout: FlowSession.defaultCommitTimeout))
     }
 
     func cancel() async { await flow.cancel() }

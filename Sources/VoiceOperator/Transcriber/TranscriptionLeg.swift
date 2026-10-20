@@ -13,7 +13,8 @@ import Foundation
 /// order is load-bearing and two tasks racing into the session could reorder them.
 final class TranscriptionLeg: @unchecked Sendable {
     struct Outcome: Sendable {
-        let text: String
+        let transcript: Transcript
+        var text: String { transcript.text }
         /// Why the live session is not what produced `text` — nil when it is. The
         /// arbiter turns this into `StreamHealth`.
         let liveFailure: String?
@@ -101,9 +102,9 @@ final class TranscriptionLeg: @unchecked Sendable {
         if let session = ready.session, ready.failure == nil {
             _ = await ready.chain?.value   // preserve ordering ahead of the commit
             do {
-                let text = try await session.commit(pcm: ready.unsent + tail)
+                let transcript = try await session.commit(pcm: ready.unsent + tail)
                 releaseCommitted()
-                return Outcome(text: text, liveFailure: nil)
+                return Outcome(transcript: transcript, liveFailure: nil)
             } catch {
                 if isAbandoned { throw CancellationError() }
                 guard provider.retriesAfterLiveFailure else {
@@ -120,8 +121,8 @@ final class TranscriptionLeg: @unchecked Sendable {
         // leaving it and its tasks alive.
         cancel()
         trace.note("fell back to \(provider.fallbackLabel)")
-        let text = try await provider.transcribeAfterLiveFailure(wavData: try clip())
-        return Outcome(text: text, liveFailure: liveFailure ?? "stream unavailable")
+        let transcript = try await provider.transcribeAfterLiveFailure(wavData: try clip())
+        return Outcome(transcript: transcript, liveFailure: liveFailure ?? "stream unavailable")
     }
 
     /// Abandon the leg. Idempotent, and safe whether or not the session ever opened.

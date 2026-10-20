@@ -7,6 +7,15 @@ final class ShadowTranscriptTests: XCTestCase {
         let entry = try JSONDecoder().decode(STTHistoryEntry.self, from: Data(json.utf8))
         XCTAssertEqual(entry.transcript, "hi")
         XCTAssertNil(entry.shadow)
+        XCTAssertNil(entry.raw)
+    }
+
+    func testTheRawTranscriptRoundTripsWithItsEntry() throws {
+        var entry = CommandHistoryEntry(date: Date(timeIntervalSince1970: 0), duration: 2, transcript: "Send it.",
+                                        recognized: false, wavURL: nil)
+        entry.raw = "um send it"
+        let decoded = try JSONDecoder().decode(CommandHistoryEntry.self, from: JSONEncoder().encode(entry))
+        XCTAssertEqual(decoded.raw, "um send it")
     }
 
     func testAShadowRoundTripsWithItsEntry() throws {

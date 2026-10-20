@@ -53,7 +53,7 @@ enum DebugCLI {
             let haveKey = WisprBasetenKey.value != nil
             FileHandle.standardError.write(Data("flow-grpc-test: said \(text.count) chars; baseten key \(haveKey ? "present" : "ABSENT → /llm fallback")\n".utf8))
             let transcript = try await WisprFlowProvider().transcribe(wavURL: wav)
-            print("transcript: \(transcript)")
+            print("transcript: \(transcript.text)")
         } catch {
             FileHandle.standardError.write(Data("flow-grpc-test failed: \(error)\n".utf8))
             exit(1)
@@ -100,6 +100,7 @@ enum DebugCLI {
             if let failure = outcome.liveFailure {
                 FileHandle.standardError.write(Data("provider-test: live path failed (\(failure)), fell back\n".utf8))
             }
+            if let raw = outcome.transcript.raw { print("raw:        \(raw)") }
             print("transcript: \(outcome.text)")
         } catch {
             FileHandle.standardError.write(Data("provider-test failed: \(error)\n".utf8))

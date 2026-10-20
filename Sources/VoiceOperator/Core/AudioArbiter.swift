@@ -555,16 +555,16 @@ final class AudioArbiter {
             guard let self else { return }
             defer { live?.trace.flush() }
             do {
-                let raw = try await self.transcribe(live, clip: clip)
+                let transcript = try await self.transcribe(live, clip: clip)
                 self.stopTranscriptionProgressCue()
                 // A command is spoken to the router, not written into a document,
                 // so the fragment-shaping the style does would only confuse it.
-                let text = isCommand ? raw : style.apply(to: raw)
-                self.record(clip: clip, duration: duration, transcript: text, command: isCommand, error: nil,
-                            id: entryID)
+                let text = isCommand ? transcript.text : style.apply(to: transcript.text)
+                self.record(clip: clip, duration: duration, transcript: text, raw: transcript.raw,
+                            command: isCommand, error: nil, id: entryID)
                 // Emptiness is judged on the transcript, not on the styled text:
                 // the style adds spaces, and " " must not paste as if it were speech.
-                if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if transcript.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // Nothing was said — nothing to paste or route.
                 } else if isCommand {
                     if let routingContext { self.onCommand?(text, routingContext) }
@@ -590,7 +590,7 @@ final class AudioArbiter {
     /// whole-clip path if the session never opened or failed. The fallback is a
     /// genuine failure path — routine appearances in the log mean the streaming
     /// path is broken, not that this is normal.
-    private func transcribe(_ live: LiveDictation?, clip: Data) async throws -> String {
+    private func transcribe(_ live: LiveDictation?, clip: Data) async throws -> Transcript {
         guard let live, let leg = live.leg else {
             return try await currentProvider().transcribe(wavData: clip)
         }
@@ -599,7 +599,7 @@ final class AudioArbiter {
         let outcome = try await leg.finish(tail: tail, openGrace: Self.streamOpenGrace,
                                            clip: { clip })
         noteStreamHealth(outcome.liveFailure.map { .degraded(reason: $0, provider: leg.provider.id) } ?? .streaming)
-        return outcome.text
+        return outcome.transcript
     }
 
     /// Finish the shadow leg on its own, and file what it said beside the history
@@ -726,6 +726,8 @@ final class AudioArbiter {
     func retryCommand(id: UUID) { guard let e = commandHistory.first(where: { $0.id == id }), let url = e.wavURL else { return }; retry(url, id: id, command: true) }
     func copySTT(id: UUID) { if let e = sttHistory.first(where: { $0.id == id }) { copy(e.transcript) } }
     func copyCommand(id: UUID) { if let e = commandHistory.first(where: { $0.id == id }) { copy(e.transcript) } }
+    func copyRawSTT(id: UUID) { if let t = sttHistory.first(where: { $0.id == id })?.raw { copy(t) } }
+    func copyRawCommand(id: UUID) { if let t = commandHistory.first(where: { $0.id == id })?.raw { copy(t) } }
 
     private func retry(_ url: URL, id: UUID, command: Bool) {
         onStatus?(.transcribing)
@@ -734,7 +736,8 @@ final class AudioArbiter {
             guard let self else { return }
             defer { self.onStatus?(.idle) }
             do {
-                let text = try await self.currentProvider().transcribe(wavURL: url)
+                let transcript = try await self.currentProvider().transcribe(wavURL: url)
+                let text = transcript.text
                 self.stopTranscriptionProgressCue()
                 // Pasted, but not written into the (persisted) entry it came from.
                 guard Incognito.allows(Self.historyActivity) else {
@@ -742,9 +745,15 @@ final class AudioArbiter {
                     return
                 }
                 if command {
-                    if let i = self.commandHistory.firstIndex(where: { $0.id == id }) { self.commandHistory[i].transcript = text; self.commandHistory[i].error = nil }
+                    if let i = self.commandHistory.firstIndex(where: { $0.id == id }) {
+                        self.commandHistory[i].transcript = text; self.commandHistory[i].raw = transcript.raw
+                        self.commandHistory[i].error = nil
+                    }
                 } else {
-                    if let i = self.sttHistory.firstIndex(where: { $0.id == id }) { self.sttHistory[i].transcript = text; self.sttHistory[i].error = nil }
+                    if let i = self.sttHistory.firstIndex(where: { $0.id == id }) {
+                        self.sttHistory[i].transcript = text; self.sttHistory[i].raw = transcript.raw
+                        self.sttHistory[i].error = nil
+                    }
                     self.pasteAndRemember(text)
                 }
                 self.save()
@@ -853,16 +862,16 @@ final class AudioArbiter {
     ///
     /// In incognito mode nothing is filed at all, not even in memory: the menu's
     /// recent lists would otherwise hold the transcript after the dictation ended.
-    private func record(clip: Data?, duration: TimeInterval, transcript: String, command: Bool, error: String?,
-                        id: UUID = UUID()) {
+    private func record(clip: Data?, duration: TimeInterval, transcript: String, raw: String? = nil,
+                        command: Bool, error: String?, id: UUID = UUID()) {
         guard Incognito.refusal(Self.historyActivity) == nil else {
             pendingShadows.removeValue(forKey: id)
             return
         }
         let stored = clip.flatMap(persist)
         let shadow = pendingShadows.removeValue(forKey: id)
-        if command { commandHistory.insert(CommandHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, recognized: false, error: error, wavURL: stored, shadow: shadow), at: 0) }
-        else { sttHistory.insert(STTHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, error: error, wavURL: stored, shadow: shadow), at: 0) }
+        if command { commandHistory.insert(CommandHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, recognized: false, error: error, wavURL: stored, shadow: shadow, raw: raw), at: 0) }
+        else { sttHistory.insert(STTHistoryEntry(id: id, date: Date(), duration: duration, transcript: transcript, error: error, wavURL: stored, shadow: shadow, raw: raw), at: 0) }
         save()
     }
     private func save() { historyStore.save(.init(stt: sttHistory, commands: commandHistory)); onHistoryChanged?() }

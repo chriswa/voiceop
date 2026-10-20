@@ -96,6 +96,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onCopyLastShadow = { [weak self] in self?.arbiter.copyLastShadow() }
         menuBar.onCopyShadowSTT = { [weak self] in self?.arbiter.copyShadowSTT(id: $0) }
         menuBar.onCopyShadowCommand = { [weak self] in self?.arbiter.copyShadowCommand(id: $0) }
+        menuBar.onCopyRawSTT = { [weak self] in self?.arbiter.copyRawSTT(id: $0) }
+        menuBar.onCopyRawCommand = { [weak self] in self?.arbiter.copyRawCommand(id: $0) }
         menuBar.onSelectProvider = { [weak self] id in
             guard id != TranscriptionPreferences.primary else { return }
             Log.log("transcription: provider set to \(id.displayName)")

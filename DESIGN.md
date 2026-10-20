@@ -339,6 +339,9 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   - **Prompt.** `dictation-cleanup.md` is our own, written clean-room from a behavioural spec
     because FluidVoice's prompt is unlicensed; a reviewer compared the two and judged them
     similar quality. On the same inputs it matched the original's outputs and ran faster.
+  - **Both texts are kept.** Providers return a `Transcript` (the text to paste, plus `raw`:
+    what recognition produced before a clean-up rewrote it), and history files `raw` beside
+    the transcript; each Recent Dictations entry can copy either.
   - **Failure** never costs the words: any error (server down, timeout, empty output) pastes
     the raw transcript, marks `cleanup-failed` in the dictation's `trace` line and logs why;
     a status line under the checkbox warns while the server is not answering. Warm, a clean-up adds

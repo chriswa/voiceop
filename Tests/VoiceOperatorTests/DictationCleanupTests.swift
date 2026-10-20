@@ -79,14 +79,14 @@ final class CleanedUpProviderTests: XCTestCase {
         func openSession(target: DictationTarget, trace: DictationTrace?) async throws -> any TranscriptionSession {
             Session(text: text)
         }
-        func transcribe(wavData: Data) async throws -> String { text }
-        func transcribeAfterLiveFailure(wavData: Data) async throws -> String { text }
+        func transcribe(wavData: Data) async throws -> Transcript { Transcript(text: text) }
+        func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript { Transcript(text: text) }
         func prewarm() async -> String? { nil }
 
         struct Session: TranscriptionSession {
             let text: String
             func send(pcm: Data) async {}
-            func commit(pcm: Data) async throws -> String { text }
+            func commit(pcm: Data) async throws -> Transcript { Transcript(text: text) }
             func cancel() async {}
         }
     }
@@ -96,23 +96,33 @@ final class CleanedUpProviderTests: XCTestCase {
         CleanedUpProvider(base: Fixed(text: text)) {
             var cleaner = DictationCleaner(systemPrompt: "Clean it.")
             cleaner.endpoint = URL(string: "http://127.0.0.1:9/completion")!
-            return cleaner
+            return try await cleaner.clean($0)
         }
+    }
+
+    func testACleanedTranscriptKeepsTheRawTextBesideIt() async throws {
+        let provider = CleanedUpProvider(base: Fixed(text: "um send it Wednesday")) { _ in "Send it Wednesday." }
+        let expected = Transcript(text: "Send it Wednesday.", raw: "um send it Wednesday")
+        let viaClip = try await provider.transcribe(wavData: Data())
+        XCTAssertEqual(viaClip, expected)
+        let session = try await provider.openSession(target: DictationTarget(), trace: nil)
+        let viaSession = try await session.commit(pcm: Data())
+        XCTAssertEqual(viaSession, expected)
     }
 
     func testAFailedCleanUpPastesTheRawTranscript() async throws {
         let provider = unreachable("um send it Wednesday")
         let viaClip = try await provider.transcribe(wavData: Data())
-        XCTAssertEqual(viaClip, "um send it Wednesday")
+        XCTAssertEqual(viaClip, Transcript(text: "um send it Wednesday"))
         let session = try await provider.openSession(target: DictationTarget(), trace: nil)
         let viaSession = try await session.commit(pcm: Data())
-        XCTAssertEqual(viaSession, "um send it Wednesday")
+        XCTAssertEqual(viaSession, Transcript(text: "um send it Wednesday"))
     }
 
     func testAMissingPromptPastesTheRawTranscript() async throws {
-        let provider = CleanedUpProvider(base: Fixed(text: "um hi")) { throw DictationCleaner.Failure.noPrompt }
-        let text = try await provider.transcribe(wavData: Data())
-        XCTAssertEqual(text, "um hi")
+        let provider = CleanedUpProvider(base: Fixed(text: "um hi")) { _ in throw DictationCleaner.Failure.noPrompt }
+        let transcript = try await provider.transcribe(wavData: Data())
+        XCTAssertEqual(transcript, Transcript(text: "um hi"))
     }
 
     func testItKeepsTheBaseProvidersIdentity() {

@@ -32,11 +32,11 @@ struct ParakeetProvider: TranscriptionProvider {
         return ParakeetSession(trace: trace)
     }
 
-    func transcribe(wavData: Data) async throws -> String {
-        try await ParakeetEngine.shared.transcribe(pcm: WAVFile.parse(wavData).samples)
+    func transcribe(wavData: Data) async throws -> Transcript {
+        Transcript(text: try await ParakeetEngine.shared.transcribe(pcm: WAVFile.parse(wavData).samples))
     }
 
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> String {
+    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript {
         try await transcribe(wavData: wavData)
     }
 }
@@ -50,13 +50,13 @@ actor ParakeetSession: TranscriptionSession {
 
     func send(pcm: Data) { self.pcm.append(pcm) }
 
-    func commit(pcm: Data) async throws -> String {
+    func commit(pcm: Data) async throws -> Transcript {
         self.pcm.append(pcm)
         trace?.mark("commit")
         let text = try await ParakeetEngine.shared.transcribe(pcm: self.pcm)
         trace?.mark("result")
         trace?.note(String(format: "%.1fs audio on device", Double(self.pcm.count / 2) / 16_000))
-        return text
+        return Transcript(text: text)
     }
 
     func cancel() { pcm = Data() }

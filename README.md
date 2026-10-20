@@ -79,7 +79,7 @@ grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
 
 ## Transcript clean-up
 
-**Clean Up Transcripts** in the Transcription submenu runs each transcript
+**Clean Up Transcripts (Fluid-1 Mini)** in the menu bar menu runs each transcript
 through [Fluid-1 Mini](https://huggingface.co/altic-dev/fluid-1-mini), a small
 model tuned for cleaning up dictation, on this Mac before it is pasted: it drops
 fillers, applies "scratch that"-style corrections, formats numbers, and follows
@@ -100,8 +100,8 @@ Then tick the checkbox. The app checks the file against the expected SHA-256,
 downloads [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT) beside it,
 and runs it as a background service while the checkbox is on. Turning the
 checkbox off stops the service and frees its memory (about 2 GB). **Delete
-Clean-Up Model** removes the whole folder. The submenu's **Clean-Up Setup
-Instructions…** opens this section.
+Clean-Up Model** removes the whole folder. While the model is missing, a **Clean-Up Setup
+Instructions…** item under the checkbox opens this section.
 
 ## Text to Speech
 

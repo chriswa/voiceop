@@ -24,6 +24,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
     /// Which provider transcribes, and which shadows it — rebuilt on every open.
     private let transcription = NSMenuItem(title: "Transcription", action: nil, keyEquivalent: "")
+    private let cleanupToggle = NSMenuItem(title: "Clean Up Transcripts (Fluid-1 Mini)", action: #selector(toggleCleanup), keyEquivalent: "")
+    private let cleanupStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let cleanupInstructions = NSMenuItem(title: "Clean-Up Setup Instructions…", action: #selector(showCleanupInstructions), keyEquivalent: "")
+    private let cleanupDelete = NSMenuItem(title: "Delete Clean-Up Model (1.6 GB)", action: #selector(deleteCleanupModel), keyEquivalent: "")
     private let playbackSpeed = NSMenuItem(title: "Playback Speed: 1.0×", action: nil, keyEquivalent: "")
     private let fasterSpeech = NSMenuItem(title: "Faster Speech", action: #selector(faster), keyEquivalent: ".")
     private let slowerSpeech = NSMenuItem(title: "Slower Speech", action: #selector(slower), keyEquivalent: ",")
@@ -135,6 +139,12 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         menu.addItem(.separator())
         stt.submenu = NSMenu(); commands.submenu = NSMenu(); menu.addItem(stt); menu.addItem(commands)
         transcription.submenu = NSMenu(); menu.addItem(transcription)
+        cleanupToggle.target = self; menu.addItem(cleanupToggle)
+        cleanupStatus.isEnabled = false; cleanupStatus.indentationLevel = 1; menu.addItem(cleanupStatus)
+        for item in [cleanupInstructions, cleanupDelete] {
+            item.target = self; item.indentationLevel = 1; menu.addItem(item)
+        }
+        for item in [cleanupStatus, cleanupInstructions, cleanupDelete] { item.isHidden = true }
         menu.addItem(.separator())
         // Real key equivalents, so each item shows its shortcut right-aligned the
         // way every other menu does. While the menu is open AppKit fires these
@@ -273,6 +283,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand,
                 copyShadow: onCopyShadowCommand)
         rebuildTranscriptionMenu()
+        refreshCleanupMenu()
         refreshTTSMenu()
         onTTSMenuOpened?()
     }
@@ -348,8 +359,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        addCleanupItems(to: menu)
-        menu.addItem(.separator())
         let last = lastShadow?()
         let copyLast = NSMenuItem(title: "Copy Last Shadow Transcript", action: #selector(copyLastShadow), keyEquivalent: "")
         copyLast.target = self
@@ -360,29 +369,16 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             menu.addItem(preview)
         }
     }
-    private func addCleanupItems(to menu: NSMenu) {
+    /// The clean-up checkbox and the lines under it, re-read whenever the menu
+    /// opens and whenever the server's state changes (it may be open).
+    func refreshCleanupMenu() {
         guard let state = cleanupMenuState?() else { return }
-        let toggle = NSMenuItem(title: "Clean Up Transcripts (Fluid-1 Mini, on this Mac)",
-                                action: state.actionsEnabled ? #selector(toggleCleanup) : nil, keyEquivalent: "")
-        toggle.target = self; toggle.state = state.enabled ? .on : .off
-        menu.addItem(toggle)
-        if let status = state.status {
-            let line = NSMenuItem(title: status, action: nil, keyEquivalent: "")
-            line.isEnabled = false; line.indentationLevel = 1
-            menu.addItem(line)
-        }
-        if state.showDelete {
-            let delete = NSMenuItem(title: "Delete Clean-Up Model (1.6 GB)", action: #selector(deleteCleanupModel), keyEquivalent: "")
-            delete.target = self; delete.indentationLevel = 1
-            menu.addItem(delete)
-        }
-        let instructions = NSMenuItem(title: "Clean-Up Setup Instructions…", action: #selector(showCleanupInstructions),
-                                      keyEquivalent: "")
-        instructions.target = self; instructions.indentationLevel = 1
-        menu.addItem(instructions)
+        cleanupToggle.state = state.enabled ? .on : .off
+        cleanupStatus.title = state.status ?? ""
+        cleanupStatus.isHidden = state.status == nil
+        cleanupInstructions.isHidden = !state.showInstructions
+        cleanupDelete.isHidden = !state.showDelete
     }
-    /// Re-read the clean-up section while the menu is open (download progress).
-    func refreshTranscriptionMenu() { rebuildTranscriptionMenu() }
     @objc private func toggleCleanup() { onToggleCleanup?() }
     @objc private func deleteCleanupModel() { onDeleteCleanupModel?() }
     @objc private func showCleanupInstructions() { onShowCleanupInstructions?() }

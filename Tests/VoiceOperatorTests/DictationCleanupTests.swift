@@ -121,31 +121,39 @@ final class CleanedUpProviderTests: XCTestCase {
 }
 
 final class CleanupMenuStateTests: XCTestCase {
-    func testOffAndIdleShowsNoStatus() {
-        let state = CleanupMenuState.make(enabled: false, phase: .idle, downloaded: false, healthy: false)
+    private func make(enabled: Bool, phase: CleanupServer.Phase = .idle, modelPresent: Bool = true,
+                      downloaded: Bool = true, healthy: Bool = true) -> CleanupMenuState {
+        CleanupMenuState.make(enabled: enabled, phase: phase, modelPresent: modelPresent,
+                              downloaded: downloaded, healthy: healthy)
+    }
+
+    func testOffShowsJustTheCheckbox() {
+        let state = make(enabled: false, downloaded: false, healthy: false)
         XCTAssertNil(state.status)
         XCTAssertFalse(state.showDelete)
-        XCTAssertTrue(state.actionsEnabled)
+        XCTAssertFalse(state.showInstructions)
+    }
+
+    func testOnAndWorkingSaysNothingExtra() {
+        XCTAssertNil(make(enabled: true).status)
+    }
+
+    func testInstructionsShowOnlyWhileTheModelIsMissing() {
+        XCTAssertTrue(make(enabled: false, modelPresent: false, downloaded: false).showInstructions)
+        XCTAssertFalse(make(enabled: false).showInstructions)
     }
 
     func testOffWithTheModelDownloadedOffersToDeleteIt() {
-        XCTAssertTrue(CleanupMenuState.make(enabled: false, phase: .idle, downloaded: true, healthy: false).showDelete)
-    }
-
-    func testOnAndHealthyIsReady() {
-        XCTAssertEqual(CleanupMenuState.make(enabled: true, phase: .idle, downloaded: true, healthy: true).status,
-                       "Clean-up: ready")
+        XCTAssertTrue(make(enabled: false, healthy: false).showDelete)
     }
 
     func testOnButNotAnsweringWarns() {
-        let status = CleanupMenuState.make(enabled: true, phase: .idle, downloaded: true, healthy: false).status
-        XCTAssertTrue(status?.hasPrefix("⚠︎") ?? false)
+        XCTAssertTrue(make(enabled: true, healthy: false).status?.hasPrefix("⚠︎") ?? false)
     }
 
-    func testWorkingDisablesTheCheckboxAndHidesDelete() {
-        let state = CleanupMenuState.make(enabled: false, phase: .working("stopping"), downloaded: true, healthy: false)
+    func testWorkingSaysWhatAndHidesDelete() {
+        let state = make(enabled: false, phase: .working("stopping"))
         XCTAssertEqual(state.status, "Clean-up: stopping…")
-        XCTAssertFalse(state.actionsEnabled)
         XCTAssertFalse(state.showDelete)
     }
 }

@@ -117,6 +117,16 @@ start_and_verify() {   # $1 old pid (may be empty)
         return 1
     fi
     echo "restarted: v$version (pid $pid)"
+    # Dev builds relaunch themselves from /Applications (ApplicationsRelocator):
+    # macOS doesn't attribute menu-bar items from anywhere else, so menu-bar
+    # managers like Ice 2 hide the icon. When the copy fails the app keeps
+    # running from build/, and only the log says why.
+    local bundle
+    bundle="$(printf '%s' "$HTTP_BODY" | json_field bundle -)" || bundle=""
+    if [ -n "$bundle" ] && [[ "$bundle" != /Applications/* ]]; then
+        echo "WARNING: running from $bundle, not /Applications — Ice 2 will hide the menu-bar icon" >&2
+        echo "         see: grep 'relocate:' ~/Library/Logs/VoiceOperator.log | tail -1" >&2
+    fi
     # The app checks its transcription provider at launch and reports the path
     # dictation will take. For Wispr Flow without the Baseten key, every
     # dictation uploads *after* key-up to raw /llm/asr — 5–10 s and unformatted —

@@ -313,13 +313,13 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   comparison. The shadow never pastes, never delays anything, and never touches
   `StreamHealth`, which follows the primary only. Remote dictation uses the primary, without
   a shadow (it has no history entry to file one on).
-- **Dictation clean-up (2026-10-20).** "Clean Up Transcripts" in the Transcription submenu
+- **Dictation clean-up (2026-10-20).** "Clean Up Transcripts", a top-level menu checkbox
   (`TranscriptionPreferences.cleanup`) wraps the primary in `CleanedUpProvider`
   (`Cleanup/`), so dictation, history retries and phone dictation all paste cleaned text and
   the arbiter is unchanged. The pass is Fluid-1 Mini (a ~2B Qwen fine-tune for dictation
   clean-up by FluidVoice) on a local llama.cpp server. Its licence is personal and
   non-commercial, so the app never downloads the model: the user does, from the README's
-  "Transcript clean-up" section, which the submenu links to; without it, enabling fails
+  "Transcript clean-up" section, which the menu links to while the model is missing; without it, enabling fails
   and says so.
   - **Server.** `CleanupServer` downloads a pinned llama.cpp release build into
     `Application Support/VoiceOperator/cleanup` (deleting any other build it left there), checks
@@ -341,7 +341,7 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
     similar quality. On the same inputs it matched the original's outputs and ran faster.
   - **Failure** never costs the words: any error (server down, timeout, empty output) pastes
     the raw transcript, marks `cleanup-failed` in the dictation's `trace` line and logs why;
-    the submenu's status line warns while the server is not answering. Warm, a clean-up adds
+    a status line under the checkbox warns while the server is not answering. Warm, a clean-up adds
     about 0.4–0.6 s after Parakeet's result. Live-test with `--cleanup-test [text]`.
 - **Streaming dictation (2026-08-04).** The trigger key going down starts three things at
   once: the microphone, the duplex gRPC stream, and a 100 ms upload pump

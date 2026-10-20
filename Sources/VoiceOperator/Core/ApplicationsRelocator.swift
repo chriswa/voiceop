@@ -37,8 +37,8 @@ enum ApplicationsRelocator {
             return
         }
 
-        // Quit first, even if the copy then fails (no write access to /Applications
-        // without admin rights): a fresh build should replace the old copy either way.
+        // Quit first, even if the copy then fails: a fresh build should replace
+        // the old copy either way.
         quitOtherInstances()
         do {
             try install(source, at: dest)
@@ -81,24 +81,48 @@ enum ApplicationsRelocator {
     }
 
     /// Copies via a sibling temp bundle so a failed copy never leaves a half-written app.
+    ///
+    /// Creating anything in /Applications takes admin rights, which a standard
+    /// account only has while something like Privileges grants them. The bundle
+    /// installed there earlier is the user's own, though, so without those rights
+    /// it is updated in place instead: not atomic, but the next launch repairs an
+    /// interrupted copy. Only the very first install needs admin.
     private static func install(_ source: URL, at dest: URL) throws {
         let fm = FileManager.default
-        let staging = dest.deletingLastPathComponent()
-            .appendingPathComponent(".\(dest.lastPathComponent).\(ProcessInfo.processInfo.processIdentifier)")
-        try? fm.removeItem(at: staging)
-        let ditto = Process()
-        ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        ditto.arguments = [source.path, staging.path]
-        try ditto.run()
-        ditto.waitUntilExit()
-        guard ditto.terminationStatus == 0 else {
-            try? fm.removeItem(at: staging)
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: staging.path])
+        let parent = dest.deletingLastPathComponent()
+        if !fm.isWritableFile(atPath: parent.path), fm.isWritableFile(atPath: dest.path) {
+            try run("/usr/bin/rsync", ["-a", "--delete", source.path + "/", dest.path + "/"])
+            return
         }
+        let staging = parent.appendingPathComponent(".\(dest.lastPathComponent).\(ProcessInfo.processInfo.processIdentifier)")
+        try? fm.removeItem(at: staging)
+        do { try run("/usr/bin/ditto", [source.path, staging.path]) }
+        catch { try? fm.removeItem(at: staging); throw error }
         if fm.fileExists(atPath: dest.path) {
             _ = try fm.replaceItemAt(dest, withItemAt: staging)
         } else {
             try fm.moveItem(at: staging, to: dest)
+        }
+    }
+
+    struct CopyFailed: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    /// Run a copy tool; a non-zero exit throws with what it printed.
+    private static func run(_ tool: String, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw CopyFailed(description: "\(tool) exited \(process.terminationStatus): "
+                             + output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 }

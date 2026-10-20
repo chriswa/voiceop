@@ -282,17 +282,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     /// "Clean Up Transcripts" in the Transcription submenu, and its server.
     private func wireCleanup() {
-        cleanupServer.onChange = { [weak self] in self?.menuBar.refreshTranscriptionMenu() }
+        cleanupServer.onChange = { [weak self] in self?.menuBar.refreshCleanupMenu() }
         menuBar.cleanupMenuState = { [unowned self] in
             CleanupMenuState.make(enabled: TranscriptionPreferences.cleanup, phase: cleanupServer.phase,
-                                  downloaded: cleanupServer.isDownloaded, healthy: cleanupServer.healthy)
+                                  modelPresent: cleanupServer.hasModel, downloaded: cleanupServer.isDownloaded,
+                                  healthy: cleanupServer.healthy)
         }
         menuBar.onToggleCleanup = { [unowned self] in
             TranscriptionPreferences.cleanup.toggle()
             let on = TranscriptionPreferences.cleanup
             Log.log("transcription: clean-up \(on ? "on" : "off")")
             if on { cleanupServer.enable() } else { cleanupServer.disable() }
-            menuBar.refreshTranscriptionMenu()
+            menuBar.refreshCleanupMenu()
         }
         menuBar.onDeleteCleanupModel = { [unowned self] in cleanupServer.delete() }
         menuBar.onShowCleanupInstructions = { NSWorkspace.shared.open(CleanupServer.instructions) }

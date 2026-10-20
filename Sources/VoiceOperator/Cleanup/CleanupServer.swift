@@ -141,6 +141,9 @@ final class CleanupServer {
 
     // MARK: - State
 
+    /// The user has put the model where it belongs (not yet checked).
+    var hasModel: Bool { FileManager.default.fileExists(atPath: paths.model.path) }
+
     /// Both files are in place.
     var isDownloaded: Bool {
         let fm = FileManager.default

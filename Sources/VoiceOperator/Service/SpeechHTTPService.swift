@@ -52,6 +52,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             var o: [String: Any] =
                 ["version": BuildInfo.version, "build": BuildInfo.build, "commit": BuildInfo.commit,
                  "pid": Int(ProcessInfo.processInfo.processIdentifier),
+                 "bundle": Bundle.main.bundlePath,
                  "status": status.rawValue, "dictating": dictating, "speaking": speaking,
                  "restart": restart.wireName,
                  "stream": stream.wireName,

@@ -55,6 +55,17 @@ final class HandsFreePhrasesTests: XCTestCase {
         }
     }
 
+    func testStopListeningWithOrWithoutTheTrigger() {
+        for text in ["Stop listening.", "stop listening", "Control, stop listening.", "STOP LISTENING!", "Control — stop listening"] {
+            XCTAssertTrue(HandsFreePhrases.isStopListening(text, trigger: "control"), text)
+        }
+        for text in ["Stop listening to Kevin.", "Tell Kevin to stop listening.", "Stop.", "Listening", "",
+                     "Control, control, stop listening", "Don't stop listening"] {
+            XCTAssertFalse(HandsFreePhrases.isStopListening(text, trigger: "control"), text)
+        }
+        XCTAssertFalse(HandsFreePhrases.isShutdown("Stop listening.", trigger: "control"))
+    }
+
     func testWakeFreeShutdown() {
         XCTAssertEqual(HandsFreePhrases.wakeFreeShutdown("Let me turn this off."), .whole)
         XCTAssertEqual(HandsFreePhrases.wakeFreeShutdown("Lemme turn this off"), .whole)

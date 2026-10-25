@@ -215,7 +215,11 @@ and asks, and nothing outlives that connection. While it is on:
   fallback. [Smart Turn](https://github.com/pipecat-ai/smart-turn) is asked
   too, once per pause, for comparison only. The transcript goes to the client.
 - After that, a **conversation window** lets you reply without the trigger word
-  until both sides have been quiet for 15 seconds.
+  until both sides have been quiet for 15 seconds. "Stop listening" (or
+  "<trigger>, stop listening") closes it at once, as if the 15 seconds had run
+  out; hands-free stays on.
+- Speech that does not start with the trigger word gets a cue, three times in a
+  row at most, and none after "stop listening", until the trigger word is said.
 - Talking over the client's own voice turns it down, and cuts it off once it is
   clear you meant it, counted to when you began.
 - "Let me turn this off" — or "<trigger>, shutdown" — turns hands-free off.

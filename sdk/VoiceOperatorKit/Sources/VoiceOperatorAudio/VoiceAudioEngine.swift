@@ -574,11 +574,15 @@ public final class VoiceAudioEngine {
          * recorded with whether other audio was playing either side of it, since
          * too many deactivations may be what leaves Spotify paused. Still wide,
          * the start is refused (`WideBluetooth`), and `broughtUp` tries again
-         * shortly. A dictation takes 48 kHz (asking for high-quality recording,
-         * below): nobody is listening to music through one.
+         * shortly. A dictation is re-activated the same way — far quicker
+         * than asking for high-quality recording, whose second category change
+         * took two seconds and swung the route to the earpiece on the way
+         * (October 25, 19:00:55) — and only if it is still at 48 kHz after that
+         * does it take the wide link, asking for high-quality recording (below):
+         * nobody is listening to music through a dictation.
          */
         var rateTries: [[String: Any]] = []
-        if plan.microphone, !plan.dictation, isBluetooth(session.currentRoute.inputs.first) {
+        if plan.microphone, isBluetooth(session.currentRoute.inputs.first) {
             while session.sampleRate > Self.voiceProcessingRate, rateTries.count < Self.quickRateRetries {
                 let rate = session.sampleRate
                 let otherBefore = session.isOtherAudioPlaying
@@ -595,7 +599,7 @@ public final class VoiceAudioEngine {
                     "route": describeRoute(session.currentRoute),
                 ])
             }
-            if session.sampleRate > Self.voiceProcessingRate {
+            if session.sampleRate > Self.voiceProcessingRate, !plan.dictation {
                 throw WideBluetooth(rate: session.sampleRate, tries: rateTries)
             }
         }
@@ -707,7 +711,8 @@ public final class VoiceAudioEngine {
             appliedVoiceDucking = started.voiceProcessing ? plan.voiceDucking : nil
             failedStarts = 0
             if !started.rateTries.isEmpty || wideStarts > 0 {
-                record("native-mic-rate", ["outcome": "24 kHz", "quickTries": started.rateTries, "refusedStartsBefore": wideStarts])
+                record("native-mic-rate", ["outcome": started.sampleRate > Self.voiceProcessingRate ? "48 kHz, high quality (a dictation)" : "24 kHz",
+                                           "dictation": plan.dictation, "quickTries": started.rateTries, "refusedStartsBefore": wideStarts])
             }
             wideStarts = 0
             up = mode

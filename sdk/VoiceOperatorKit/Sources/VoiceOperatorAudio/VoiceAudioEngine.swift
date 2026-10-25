@@ -1495,8 +1495,12 @@ public final class VoiceAudioEngine {
     // MARK: - Playback, for hands-free
 
     /// What the one player is playing, for Voice Operator's `playing`: anything at all (`on`), the
-    /// client's voice (`speech`), and whether the microphone is spared hearing it (`echoCancelled`:
-    /// voice processing, or headphones — what `echoFree` tells the page).
+    /// client's voice (`speech`), and whether the microphone is spared hearing it (`echoCancelled`):
+    /// only when the sound goes into an ear. Voice processing on the phone's own speaker does not
+    /// count: its echo cancellation let the start of Control's replies through ("First question",
+    /// heard as the user cutting in — October 25 2026), so there hands-free does not listen while
+    /// the phone plays, as on the Mac's speakers. The page's `echoFree`, which only decides who
+    /// plays Control's voice, still counts voice processing.
     public struct Playback: Equatable, Sendable {
         public var on: Bool
         public var speech: Bool
@@ -1506,7 +1510,7 @@ public final class VoiceAudioEngine {
     public var playback: Playback {
         Playback(on: !speech.isEmpty || !cuesPlaying.isEmpty || pendingTonePlayer != nil,
                  speech: !speech.isEmpty,
-                 echoCancelled: running && (voiceProcessing || sessionOnHeadphones))
+                 echoCancelled: running && (sessionOnHeadphones || Self.headphones(AVAudioSession.sharedInstance().currentRoute)))
     }
 
     /// Cues scheduled and not yet heard to their end, by number.

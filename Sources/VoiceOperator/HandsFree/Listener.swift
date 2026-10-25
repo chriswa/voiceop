@@ -49,7 +49,10 @@ struct HandsFreeTuning: Sendable, Equatable {
         noSpeechBeforeMs: 700,
         onsetWindowMs: 1000,
         wordMinMs: 250,
-        pauseCheckMs: 200,
+        // Smart Turn is asked once a pause has lasted this long, so it can end a turn no sooner.
+        // Its training data ends turns in about 200 ms of silence (more is fine); at 0.2 s it cut the
+        // user off too quickly (October 25).
+        pauseCheckMs: 500,
         turnThreshold: 0.75,
         wakeWordOnlyMs: 1500,
         // Capped at 4 s, like the silence timeout below (October 25): five felt endless.

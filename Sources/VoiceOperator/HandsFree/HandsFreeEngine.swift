@@ -636,9 +636,9 @@ final class HandsFreeEngine: @unchecked Sendable {
                                            reason: "lost", shutdown: false))
     }
 
-    /// A pause: ask the turn model once, about 0.2 s in (`pauseCheckMs`), as
-    /// Smart Turn's documentation says to — it was trained on turns ending in
-    /// about 200 ms of silence. At or above the threshold the dictation ends
+    /// A pause: ask the turn model once, `pauseCheckMs` in (0.5 s: at the 0.2 s
+    /// its documentation suggests, it cut the user off too quickly). It was
+    /// trained on turns ending in at least 200 ms of silence. At or above the threshold the dictation ends
     /// there; below it, it waits for the silence timeout, or for them to carry
     /// on, when the next pause is asked about afresh. Asking again through the
     /// pause, as this did until October 25, gave answers that jumped about

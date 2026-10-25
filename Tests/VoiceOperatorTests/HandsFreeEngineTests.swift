@@ -299,11 +299,13 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.recorded("pause").last?["outcome"] as? String, "silence")
     }
 
-    func testAsksExactlyOnceAboutAFifthOfASecondIntoEachPause() {
+    func testAsksExactlyOnceHalfASecondIntoEachPause() {
         var p = 0.08
         let h = harness { $0.turn = { p } }
         h.hear(Sound.quiet(1500), Sound.speech(2500), Sound.quiet(300))
-        XCTAssertEqual(h.turnAsks, 1, "asked as the pause began")
+        XCTAssertEqual(h.turnAsks, 0, "not yet: a pause may be ended no sooner than half a second in")
+        h.hear(Sound.quiet(300))
+        XCTAssertEqual(h.turnAsks, 1, "asked half a second in")
         // A later, surer answer would come too late: it is not asked for.
         p = 0.93
         h.hear(Sound.quiet(1500))
@@ -312,7 +314,7 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.transcripts.count, 0)
         XCTAssertEqual(h.lastGauge?.turn, 0.08, "the first answer stays shown")
         // The next pause is asked about afresh.
-        h.hear(Sound.speech(800), Sound.quiet(300))
+        h.hear(Sound.speech(800), Sound.quiet(600))
         XCTAssertEqual(h.turnAsks, 2)
         XCTAssertEqual(h.transcripts.count, 1)
     }

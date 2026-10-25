@@ -139,6 +139,8 @@ public final class VoiceAudioEngine {
     private var currentStall: Converter.Stall?
     /// Microphone starts that failed in a row, for the delay before the next.
     private var failedStarts = 0
+    /// Hands-free starts refused in a row for coming up on the AirPods' 48 kHz link.
+    private var wideStarts = 0
     /// An interruption with no end heard by then is taken to have none coming.
     private static let interruptionGraceSeconds: TimeInterval = 1
 
@@ -523,6 +525,8 @@ public final class VoiceAudioEngine {
         let ms: Int
         /// Whether high-quality recording was asked for, refused, supported by the input, and on.
         var highQuality: [String: Any] = [:]
+        /// Quick re-activations of a start that came up on the AirPods' 48 kHz link, each with what it got.
+        var rateTries: [[String: Any]] = []
     }
 
     /// The blocking part of a bring-up, on `audioQueue`: the old engine stopped, the session set and activated, `engine` started.
@@ -560,27 +564,58 @@ public final class VoiceAudioEngine {
         try? session.setPreferredSampleRate(Self.voiceProcessingRate)
         try session.setActive(true)
         /**
-         * Hands-free on headphones, come up at more than 24 kHz anyway: ask
-         * for iOS 26's AirPods high-quality recording, on the active session.
-         * iOS sometimes brings the AirPods' microphone link up at 48 kHz on
-         * its own, and there it sent only exact zeros unless this had been
-         * asked for — every such start, with voice processing or without
-         * (October 12–13) — while every 48 kHz start that asked for it heard.
-         * At 24 kHz nothing changes: that link heard every time, and was the
-         * one of hands-free's best sessions (01:45, October 13).
-         *
-         * A dictation asks too. It was left out so as to start at once, but
-         * every dictation whose AirPods link came up at 48 kHz without it was
-         * silent — October 13, 15, 23, and nine of fifteen on October 25 —
-         * each costing the two-second wait for sound and a retry before the
-         * user could talk. Asking costs a moment; not asking cost the dictation.
+         * Hands-free never runs on the AirPods' 48 kHz link. Even when it hears
+         * (with high-quality recording asked for), it is a link that knocks out
+         * Spotify, which hands-free plays under; and it comes up on its own
+         * often (October 25: nine of fifteen starts). The 24 kHz link has heard
+         * every time. A start that comes up wide is activated again straight
+         * away — every retry on October 25 that came after one, with the AirPods
+         * already switched over by it, landed on 24 kHz — a few times, each
+         * recorded with whether other audio was playing either side of it, since
+         * too many deactivations may be what leaves Spotify paused. Still wide,
+         * the start is refused (`WideBluetooth`), and `broughtUp` tries again
+         * shortly. A dictation takes 48 kHz (asking for high-quality recording,
+         * below): nobody is listening to music through one.
+         */
+        var rateTries: [[String: Any]] = []
+        if plan.microphone, !plan.dictation, isBluetooth(session.currentRoute.inputs.first) {
+            while session.sampleRate > Self.voiceProcessingRate, rateTries.count < Self.quickRateRetries {
+                let rate = session.sampleRate
+                let otherBefore = session.isOtherAudioPlaying
+                let hintBefore = session.secondaryAudioShouldBeSilencedHint
+                // No `notifyOthersOnDeactivation`: the session is taken straight back, and telling
+                // other apps it was let go is what invites them to stop or resume.
+                try? session.setActive(false)
+                Thread.sleep(forTimeInterval: Self.quickRateRetryPause)
+                try session.setActive(true)
+                rateTries.append([
+                    "try": rateTries.count + 1, "rateBefore": rate, "rateAfter": session.sampleRate,
+                    "otherAudioBefore": otherBefore, "otherAudioAfter": session.isOtherAudioPlaying,
+                    "silenceHintBefore": hintBefore, "silenceHintAfter": session.secondaryAudioShouldBeSilencedHint,
+                    "route": describeRoute(session.currentRoute),
+                ])
+            }
+            if session.sampleRate > Self.voiceProcessingRate {
+                throw WideBluetooth(rate: session.sampleRate, tries: rateTries)
+            }
+        }
+        /**
+         * A dictation come up at more than 24 kHz on AirPods: ask for iOS 26's
+         * AirPods high-quality recording, on the active session. On the 48 kHz
+         * link the microphone sent only exact zeros unless this had been asked
+         * for — every such start (October 12–13; and every dictation on October
+         * 13, 15, 23 and nine of fifteen on October 25, each costing the
+         * two-second wait for sound and a retry) — while every 48 kHz start that
+         * asked for it heard. Hands-free asked too, until it stopped taking that
+         * link at all (above); a dictation takes it, since nobody listens to
+         * music through one.
          */
         var highQuality: [String: Any] = ["asked": false, "rateAtActivation": session.sampleRate]
         if #available(iOS 26.0, *), let port = session.currentRoute.inputs.first, let bluetooth = port.bluetoothMicrophoneExtension {
             highQuality["supportedAtActivation"] = bluetooth.highQualityRecording.isSupported
             highQuality["enabledAtActivation"] = bluetooth.highQualityRecording.isEnabled
         }
-        if plan.headphones || plan.dictation, #available(iOS 26.0, *), session.sampleRate > Self.voiceProcessingRate,
+        if plan.dictation, #available(iOS 26.0, *), session.sampleRate > Self.voiceProcessingRate,
            isBluetooth(session.currentRoute.inputs.first) {
             highQuality["asked"] = true
             highQuality["rateBefore"] = session.sampleRate
@@ -632,8 +667,22 @@ public final class VoiceAudioEngine {
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in capture.handle(buffer) }
         engine.prepare()
         try engine.start()
-        return Started(player: player, voiceProcessing: voiceProcessing, voiceProcessingError: voiceProcessingError, sampleRate: format.sampleRate, ms: ms(), highQuality: highQuality)
+        return Started(player: player, voiceProcessing: voiceProcessing, voiceProcessingError: voiceProcessingError, sampleRate: format.sampleRate, ms: ms(), highQuality: highQuality, rateTries: rateTries)
     }
+
+    /// Hands-free's start came up on the AirPods' 48 kHz link and stayed there through the quick re-activations.
+    private struct WideBluetooth: LocalizedError {
+        let rate: Double
+        let tries: [[String: Any]]
+        var errorDescription: String? { "the AirPods' microphone came up at \(Int(rate)) Hz; hands-free waits for 24 kHz" }
+    }
+
+    /// Quick re-activations of a start that came up wide, and the pause in each.
+    private static let quickRateRetries = 3
+    private static let quickRateRetryPause: TimeInterval = 0.15
+    /// After a start still refused as wide: tried again this soon, then less often, to this.
+    private static let wideRetryFirst: TimeInterval = 0.5
+    private static let wideRetryMax: TimeInterval = 8
 
     /// The player Control's voice goes through, on a new engine.
     nonisolated private static func attachPlayer(to engine: AVAudioEngine) -> AVAudioPlayerNode {
@@ -657,6 +706,10 @@ public final class VoiceAudioEngine {
             sessionOnHeadphones = plan.headphones
             appliedVoiceDucking = started.voiceProcessing ? plan.voiceDucking : nil
             failedStarts = 0
+            if !started.rateTries.isEmpty || wideStarts > 0 {
+                record("native-mic-rate", ["outcome": "24 kHz", "quickTries": started.rateTries, "refusedStartsBefore": wideStarts])
+            }
+            wideStarts = 0
             up = mode
             lastError = nil
             if mode == .microphone {
@@ -675,6 +728,19 @@ public final class VoiceAudioEngine {
             // Asked for while it came up.
             applyVoiceDucking()
             noteOtherAudio()
+        case .failure(let error as WideBluetooth):
+            // Not a failure of the engine: a link hands-free will not take. Again shortly, and again.
+            player = nil
+            voiceProcessing = false
+            sessionOthers = nil
+            sessionOnHeadphones = false
+            wideStarts += 1
+            let delay = min(Self.wideRetryMax, Self.wideRetryFirst * pow(2, Double(wideStarts - 1)))
+            log("\(error.localizedDescription) — trying again in \(delay)s (refused \(wideStarts) so far)")
+            record("native-mic-rate", ["outcome": "refused", "rate": error.rate, "quickTries": error.tries, "refusedStarts": wideStarts,
+                                       "inSeconds": delay, "otherAudioPlaying": session.isOtherAudioPlaying,
+                                       "silenceHint": session.secondaryAudioShouldBeSilencedHint, "why": why])
+            scheduleRestart("the AirPods came up at \(Int(error.rate)) Hz", after: delay)
         case .failure(let error):
             player = nil
             voiceProcessing = false
@@ -748,8 +814,16 @@ public final class VoiceAudioEngine {
         transitioning = false
         switch result {
         case .success(let sampleRate):
-            if up == .microphone { expectAudio(why) }
             record("native-mic-restarted-in-place", ["mode": up.rawValue, "why": why, "sampleRate": sampleRate, "voiceProcessing": voiceProcessing])
+            if up == .microphone, !forDictation, sampleRate > Self.voiceProcessingRate,
+               Self.isBluetooth(AVAudioSession.sharedInstance().currentRoute.inputs.first) {
+                // Moved onto the 48 kHz link under a running engine: a new one, which refuses it.
+                record("native-mic-rate", ["outcome": "wide in place", "rate": sampleRate, "why": why])
+                finishTransition()
+                bringUp(why: "the AirPods moved to \(Int(sampleRate)) Hz")
+                return
+            }
+            if up == .microphone { expectAudio(why) }
             rescheduleSpeech()
             sendState()
             finishTransition()
@@ -1504,7 +1578,7 @@ public final class VoiceAudioEngine {
     }
 
     /// As Spaceterm's NativeEvents describes them, for the record.
-    static func describeRoute(_ route: AVAudioSessionRouteDescription) -> [String: Any] {
+    nonisolated static func describeRoute(_ route: AVAudioSessionRouteDescription) -> [String: Any] {
         [
             "inputs": route.inputs.map { "\($0.portName) (\($0.portType.rawValue))" },
             "outputs": route.outputs.map { "\($0.portName) (\($0.portType.rawValue))" },

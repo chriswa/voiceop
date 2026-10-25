@@ -238,11 +238,42 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.phase, .listening)
     }
 
-    func testEndsAtTheFirstPauseTheTurnModelIsSureOf() {
+    func testSmartTurnIsAskedButNoLongerEndsTheTurn() {
         let h = harness { $0.turn = { 0.93 } }
         h.hear(Sound.quiet(1500), Sound.speech(2500), Sound.quiet(1000))
         XCTAssertEqual(h.turnAsks, 1)
+        XCTAssertEqual(h.transcripts.count, 0)
+        XCTAssertEqual(h.recorded("turn").last?["wouldEnd"] as? Bool, true)
+        h.hear(Sound.quiet(2500))
+        XCTAssertEqual(h.recorded("ended").last?["reason"] as? String, "silence")
+    }
+
+    func testTurnOneMiniEndsTheTurnHalfASecondAfterItCrosses() {
+        let h = harness { $0.turn = { 0.1 } }
+        h.miniFactory = { FakeMini() }
+        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(500))
+        XCTAssertEqual(h.recorded("mini-ending").last?["outcome"] as? String, "crossed")
+        XCTAssertEqual(h.transcripts.count, 0, "crossed, but held")
+        h.hear(Sound.quiet(700))
         XCTAssertEqual(h.transcripts.count, 1)
+        let ended = h.recorded("mini-ending").last
+        XCTAssertEqual(ended?["outcome"] as? String, "ended")
+        XCTAssertGreaterThanOrEqual(ended?["afterMs"] as? Int ?? 0, 500)
+        XCTAssertEqual(h.recorded("ended").last?["reason"] as? String, "mini")
+    }
+
+    func testSpeechInTheHalfSecondCancelsTurnOneMinisEnding() {
+        let h = harness()
+        h.miniFactory = { FakeMini() }
+        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(450))
+        XCTAssertEqual(h.recorded("mini-ending").last?["outcome"] as? String, "crossed")
+        h.hear(Sound.speech(800))
+        XCTAssertEqual(h.recorded("mini-ending").last?["outcome"] as? String, "cancelled")
+        XCTAssertEqual(h.phase, .hearing)
+        XCTAssertEqual(h.transcripts.count, 0)
+        h.hear(Sound.quiet(1500))
+        XCTAssertEqual(h.recorded("ended").last?["reason"] as? String, "mini")
+        XCTAssertEqual(h.recorded("mini-ending").last?["cancelledBefore"] as? Int, 1)
     }
 
     func testWaitsThroughAnUnfinishedPauseUntilPatienceRunsOut() {
@@ -279,39 +310,40 @@ final class HandsFreeEngineTests: XCTestCase {
         }
     }
 
-    func testTurnOneMiniIsShownAndRecordedPerPause_decidingNothing() {
+    func testTurnOneMiniIsShownAndRecordedPerPause() {
         let h = harness { $0.turn = { 0.1 } }
         h.miniFactory = { FakeMini() }
-        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(1500))
+        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(650))
         var gauge: HandsFreeEngine.Gauge?
         for e in h.events.reversed() { if case .gauge(let g) = e.event { gauge = g; break } }
         XCTAssertNotNil(gauge?.mini)
-        XCTAssertGreaterThan(gauge?.miniPeak ?? 0, 0.5, "it climbed through the pause")
+        XCTAssertGreaterThan(gauge?.miniPeak ?? 0, 0.17, "it climbed through the pause")
         XCTAssertEqual(gauge?.miniThreshold, TurnOneMini.threshold)
-        XCTAssertEqual(h.transcripts.count, 0, "turn-1-mini decides nothing: above its threshold, still hearing")
+        XCTAssertEqual(h.transcripts.count, 0, "crossed, and held")
         h.hear(Sound.speech(500))
         let pause = h.recorded("pause").last
         XCTAssertEqual(pause?["outcome"] as? String, "resumed")
         XCTAssertEqual(pause?["smartTurn"] as? Double, 0.1)
-        XCTAssertGreaterThan(pause?["miniPeak"] as? Double ?? 0, 0.5)
+        XCTAssertGreaterThan(pause?["miniPeak"] as? Double ?? 0, 0.17)
         XCTAssertNotNil(pause?["silenceMs"])
         XCTAssertNotNil(pause?["miniCrossedMs"], "when it first reached its threshold")
         XCTAssertLessThan(pause?["miniCrossedMs"] as? Int ?? .max, pause?["miniPeakMs"] as? Int ?? 0)
         h.hear(Sound.quiet(4000))
-        XCTAssertEqual(h.recorded("pause").last?["outcome"] as? String, "silence")
+        XCTAssertEqual(h.recorded("pause").last?["outcome"] as? String, "mini")
     }
 
     func testRecordsWhenEachDictationsSpeechStartedAndEndedAndTheGapBetweenThem() {
-        let h = harness { $0.turn = { 0.9 }; $0.heard = { _ in "Control, more" } }
-        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(800))
+        let h = harness { $0.heard = { _ in "Control, more" } }
+        h.miniFactory = { FakeMini() }
+        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(1200))
         let ended = h.recorded("ended").last
-        XCTAssertEqual(ended?["reason"] as? String, "finished")
+        XCTAssertEqual(ended?["reason"] as? String, "mini")
         XCTAssertEqual(Double(ended?["speechMs"] as? Int ?? 0), 2000, accuracy: 250)
         // Straight on again, in the window: the gap says the last one was ended too early.
-        h.hear(Sound.quiet(1200), Sound.speech(1500), Sound.quiet(800))
+        h.hear(Sound.quiet(1200), Sound.speech(1500), Sound.quiet(1200))
         let started = h.recorded("started").last
-        XCTAssertEqual(started?["previousEndedBy"] as? String, "finished")
-        XCTAssertEqual(Double(started?["gapFromPreviousMs"] as? Int ?? 0), 2000, accuracy: 250, "the 0.8 s pause that ended it, then 1.2 s")
+        XCTAssertEqual(started?["previousEndedBy"] as? String, "mini")
+        XCTAssertEqual(Double(started?["gapFromPreviousMs"] as? Int ?? 0), 2400, accuracy: 300, "the 1.2 s pause that ended it, then 1.2 s")
         XCTAssertNil(h.recorded("started").first?["gapFromPreviousMs"])
     }
 
@@ -332,7 +364,6 @@ final class HandsFreeEngineTests: XCTestCase {
         // The next pause is asked about afresh.
         h.hear(Sound.speech(800), Sound.quiet(600))
         XCTAssertEqual(h.turnAsks, 2)
-        XCTAssertEqual(h.transcripts.count, 1)
     }
 
     func testNotTheTriggerWordStartsNothing() {
@@ -380,10 +411,11 @@ final class HandsFreeEngineTests: XCTestCase {
 
     func testAfterTheTriggerAloneTheTurnModelIsNotAskedAboutThePause() {
         let h = harness { $0.turn = { 0.93 }; $0.transcript = "Control. What is Kevin doing?" }
+        h.miniFactory = { FakeMini() }
         h.hear(Sound.quiet(1500), Sound.speech(600), Sound.quiet(3000))
         XCTAssertEqual(h.turnAsks, 0)
-        XCTAssertEqual(h.phase, .hearing)
-        h.hear(Sound.speech(1500), Sound.quiet(1000))
+        XCTAssertEqual(h.phase, .hearing, "turn-1-mini does not end it after the trigger word alone either")
+        h.hear(Sound.speech(1500), Sound.quiet(1200))
         XCTAssertEqual(h.turnAsks, 1)
         XCTAssertEqual(h.transcripts.count, 1)
     }
@@ -512,13 +544,13 @@ final class HandsFreeEngineTests: XCTestCase {
     }
 
     func testAShortYesIsTheWholeAnswer() {
-        let h = harness { $0.turn = { 0.93 }; $0.heard = { $0 == 0 ? "Control, what" : "Yes." } }
+        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Yes." } }
         inConversation(h)
-        let asked = h.turnAsks
+        h.miniFactory = { FakeMini() }
         h.transcript = "Yes."
-        h.hear(Sound.quiet(1000), Sound.speech(500), Sound.quiet(1000))
-        XCTAssertEqual(h.turnAsks, asked + 1)
+        h.hear(Sound.quiet(1000), Sound.speech(500), Sound.quiet(1200))
         XCTAssertEqual(h.transcripts.last?.text, "Yes.")
+        XCTAssertEqual(h.recorded("ended").last?["reason"] as? String, "mini")
     }
 
     func testWindowClosesOnceBothSidesAreQuietThenNeedsTheTriggerAgain() {

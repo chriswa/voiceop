@@ -190,8 +190,12 @@ Each phase leaves both apps working.
   holding it open on AirPods, the post-TTS stale-engine failure needs a fix
   that works with the mic open. This is pre-work for phase 2.
 - **A hands-free dictation is not an `AudioArbiter` dictation.** That path
-  halts speech, mutes output and interrupts the speech job; the conversation
-  window needs Control to keep talking while VO listens. Hands-free builds its
+  halts speech, mutes output and interrupts the speech job the moment it
+  starts, which is right for a key press. Hands-free still cuts Control off,
+  as today, but only once the check says the speech was for it (the trigger
+  word, or words in the conversation window): Control is ducked while it is
+  decided, cut off afterwards as of when the user began, and carries on if it
+  was nothing. Hands-free builds its
   own session on `TranscriptionLeg`, as `RemoteTranscriptionManager` does: it
   holds cooperative restarts, mutes nothing, fires no `voice-dictation` event.
   VO sends `phase hearing` at its start and the transcript at its end; Spaceterm
@@ -237,12 +241,12 @@ Each phase leaves both apps working.
   the wake check and Smart Turn only — they are 1 s and 8 s snippets, not
   continuous audio.
 
-## Still open (taken with the user one at a time)
-
-- A baseline of continuous hands-free sessions recorded before the port, for
-  replaying start/end-of-speech decisions.
-- Parakeet transcribes only at commit (`ParakeetSession.send` just appends), so
-  a long hands-free utterance waits for one whole-clip transcription at the end.
+- **No recorded baseline.** Start/end-of-speech drift from the port is found
+  and fixed in use, after the fact.
+- **Parakeet's whole-clip transcription is fine.** It transcribes only at
+  commit (`ParakeetSession.send` just appends), but measured on this Mac it
+  takes ~1.5% of the audio's length (78 s → 1.2 s, 25 s → 0.3 s), so even a
+  long hands-free monologue waits a few seconds at most. No streaming needed.
 
 ## Open questions as first written (resolved above)
 

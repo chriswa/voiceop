@@ -317,10 +317,11 @@ final class HandsFreeService: @unchecked Sendable {
 
     private func stopMac(_ client: String, why: String) {
         guard let mac, mac.engine.clients.contains(client) else { return }
+        // The engine's last word (`state` off) goes before the session's end, not after it.
+        if mac.engine.clients.count == 1 { mac.engine.sourceStopped(final: true) }
         clients[client]?.connection.send(["type": "session-ended", "why": why])
         mac.engine.removeClient(client)
         guard mac.engine.clients.isEmpty else { return }
-        mac.engine.sourceStopped(final: true)
         self.mac = nil
         setBusy("mac", false)
         setMicrophoneListener?(nil)
@@ -465,9 +466,9 @@ final class HandsFreeService: @unchecked Sendable {
     private func end(_ session: StreamSession, why: String) {
         guard streams.removeValue(forKey: session.id) != nil else { return }
         session.expiry?.cancel()
+        session.engine.sourceStopped(final: true)
         session.connection?.send(["type": "session-ended", "why": why])
         session.connection?.session = nil
-        session.engine.sourceStopped(final: true)
         setBusy(session.id, false)
         Log.log("hands-free: off on \(session.device) (\(why))")
     }

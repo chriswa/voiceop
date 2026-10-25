@@ -86,6 +86,11 @@ final class AudioArbiter {
         set { recorder.setAlwaysOn(newValue) }
     }
 
+    /// Hands-free's ear on the microphone — see `AudioRecorder.setListener`.
+    nonisolated func setHandsFreeListener(_ handler: (@Sendable (Data) -> Void)?) {
+        recorder.setListener(handler)
+    }
+
     /// Voice-energy thresholds below which a clip counts as "said nothing".
     private static let silencePeak: Float = 0.025
     private static let silenceRMS: Float = 0.005

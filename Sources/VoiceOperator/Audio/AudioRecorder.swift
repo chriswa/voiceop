@@ -109,6 +109,14 @@ final class AudioRecorder: @unchecked Sendable {
     /// in the ear does (via `AppCoordinator.applyMicrophonePolicy`).
     private var holdSuspended = false
 
+    /// Hands-free's ear on the microphone: every tap buffer, recording or not,
+    /// converted to 16 kHz s16le with its own converter and handed over on the
+    /// audio thread. While set, the microphone is held open as if always-on.
+    /// A recording beside it is unaffected — the two never share a converter
+    /// or a buffer. See `setListener`.
+    private var listener: (@Sendable (Data) -> Void)?
+    private var listenerConverter: AVAudioConverter?
+
     /// Duration (seconds) of the most recently stopped clip.
     private(set) var lastDurationSeconds: Double = 0
     /// Peak amplitude and RMS energy of the most recently stopped clip (0…1).
@@ -347,6 +355,25 @@ final class AudioRecorder: @unchecked Sendable {
 
     // MARK: - Holding the microphone open
 
+    /// Hand every buffer the microphone delivers to `handler`, as 16 kHz s16le
+    /// mono, until called with nil. Holds the microphone open meanwhile, whatever
+    /// the always-on preference says, and a dictation records alongside as usual.
+    func setListener(_ handler: (@Sendable (Data) -> Void)?) {
+        lock.lock()
+        let had = listener != nil
+        listener = handler
+        listenerConverter = nil
+        holdSuspended = false
+        rebuildCount = 0
+        rebuildWindowStart = nil
+        let recording = capturing
+        let keep = alwaysOn
+        lock.unlock()
+        guard (handler != nil) != had, !recording else { return }
+        Log.log("recorder: hands-free \(handler != nil ? "holds the microphone open" : "lets the microphone go")")
+        if handler != nil { openMicAfterSettling() } else if !keep { engineQueue.async { [weak self] in self?.closeMic() } }
+    }
+
     /// Whether the microphone is held open between dictations.
     var isAlwaysOn: Bool {
         lock.lock(); defer { lock.unlock() }; return alwaysOn
@@ -369,9 +396,10 @@ final class AudioRecorder: @unchecked Sendable {
         rebuildCount = 0
         rebuildWindowStart = nil
         let recording = capturing
+        let listening = listener != nil
         lock.unlock()
         Log.log("recorder: always-on microphone \(on ? "enabled" : "disabled")")
-        guard !recording else { return }
+        guard !recording, !listening else { return }
         if on { openMicAfterSettling() } else { engineQueue.async { [weak self] in self?.closeMic() } }
     }
 
@@ -419,7 +447,7 @@ final class AudioRecorder: @unchecked Sendable {
     /// the only thing that can hand them a live tap. **engineQueue only.**
     private func openMicNow(attemptsLeft: Int = openAttempts) {
         lock.lock()
-        let wanted = alwaysOn || capturing
+        let wanted = alwaysOn || capturing || listener != nil
         lock.unlock()
         guard wanted else { return }
 
@@ -539,7 +567,7 @@ final class AudioRecorder: @unchecked Sendable {
         let recording = capturing
         // `holdSuspended` says we have stopped chasing the device around for the
         // *hold*. A recording still needs its microphone either way.
-        guard recording || (alwaysOn && !holdSuspended) else { lock.unlock(); return }
+        guard recording || ((alwaysOn || listener != nil) && !holdSuspended) else { lock.unlock(); return }
         lock.unlock()
 
         // **The rebuild must not answer its own notification.** Bringing the
@@ -617,7 +645,12 @@ final class AudioRecorder: @unchecked Sendable {
         // Dropped here: buffers from a tap we have since torn down, and — while
         // the microphone is held open between dictations — every buffer that
         // belongs to no recording at all. Neither reaches the converter.
-        guard tap == tapNumber, capturing else { lock.unlock(); return }
+        guard tap == tapNumber else { lock.unlock(); return }
+        // Handed over outside the lock, after the recording has had the buffer.
+        let listener = self.listener
+        let heard = listener == nil ? Data() : convertForListenerLocked(buffer)
+        defer { if let listener, !heard.isEmpty { listener(heard) } }
+        guard capturing else { lock.unlock(); return }
         let isFirstAudio = !sawFirstAudio && buffer.frameLength > 0
         if isFirstAudio { sawFirstAudio = true }
         let trace = self.trace
@@ -658,7 +691,7 @@ final class AudioRecorder: @unchecked Sendable {
         convertAndStoreLocked(nil)     // flush the converter's resampling tail
         converter = nil
         trace = nil
-        let keepOpen = alwaysOn
+        let keepOpen = alwaysOn || listener != nil
         if !keepOpen { tapFormat = nil }
         let samples = captured
         let meteringStart = meteringStartByte
@@ -746,6 +779,36 @@ final class AudioRecorder: @unchecked Sendable {
                        format.sampleRate, format.channelCount))
         converter = rebuilt
         inputSampleRate = format.sampleRate
+    }
+
+    /// One tap buffer for the listener, through its own converter, rebuilt
+    /// whenever the tap's format changes. **The caller must already hold `lock`.**
+    private func convertForListenerLocked(_ buffer: AVAudioPCMBuffer) -> Data {
+        let format = buffer.format
+        if listenerConverter.map({ $0.inputFormat.sampleRate != format.sampleRate
+                                   || $0.inputFormat.channelCount != format.channelCount }) ?? true {
+            guard let out = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(Self.asrSampleRate),
+                                          channels: 1, interleaved: true) else { return Data() }
+            listenerConverter = AVAudioConverter(from: format, to: out)
+        }
+        guard let converter = listenerConverter else { return Data() }
+        let input = ConverterInput(buffer)
+        var heard = Data()
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * Double(Self.asrSampleRate) / format.sampleRate) + 64
+        while true {
+            guard let out = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: capacity) else { break }
+            var error: NSError?
+            let status = converter.convert(to: out, error: &error) { _, status in
+                if input.fed { status.pointee = .noDataNow; return nil }
+                input.fed = true
+                status.pointee = .haveData
+                return input.buffer
+            }
+            if error != nil { break }
+            if out.frameLength > 0, let ch = out.int16ChannelData { heard.append(Data(bytes: ch[0], count: Int(out.frameLength) * 2)) }
+            if status != .haveData { break }
+        }
+        return heard
     }
 
     /// Convert one captured buffer (or, with nil, drain the converter at end of

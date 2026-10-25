@@ -18,6 +18,12 @@ if let i = CommandLine.arguments.firstIndex(of: "--transcribe-file"),
     await DebugCLI.runTranscribeFile(path: path)
     exit(0)
 }
+// Hands-free end to end against the running app, as a phone would stream it:
+// `--hands-free-test [text]` (see HandsFreeTestClient).
+if let i = CommandLine.arguments.firstIndex(of: "--hands-free-test") {
+    exit(await HandsFreeTestClient.run(text: CommandLine.arguments.dropFirst(i + 1).first
+                                       ?? "what is Kevin working on?"))
+}
 // Fetch the user's Wispr custom dictionary and print the words that would be
 // sent as `dictionary_context`. One network request (personal + team).
 if CommandLine.arguments.contains("--dict-test") {

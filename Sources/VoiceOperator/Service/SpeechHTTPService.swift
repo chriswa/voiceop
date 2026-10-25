@@ -23,8 +23,10 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// `transcription_provider` and `shadow_provider` to `/v1/status`; 15
     /// added `incognito` to `/v1/status`, made incognito refusals a 403
     /// `{"error": "incognito"}`, and fixed `/v1/voices`' provider at `kokoro`
-    /// again (custom TTS servers are gone).
-    static let discoveryVersion = 15
+    /// again (custom TTS servers are gone); 16 added hands-free — the
+    /// `hands_free_socket` here and `hands_free` in `/v1/status` (see
+    /// `HandsFreeService`).
+    static let discoveryVersion = 16
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -85,7 +87,9 @@ final class SpeechHTTPService: @unchecked Sendable {
 
     func stop() { listener?.cancel(); listener = nil; try? FileManager.default.removeItem(at: Self.discoveryURL) }
     private func publish(port: NWEndpoint.Port) {
-        let payload: [String: Any] = ["version": Self.discoveryVersion, "port": Int(port.rawValue), "pid": ProcessInfo.processInfo.processIdentifier]
+        let payload: [String: Any] = ["version": Self.discoveryVersion, "port": Int(port.rawValue),
+                                      "pid": ProcessInfo.processInfo.processIdentifier,
+                                      "hands_free_socket": HandsFreeService.socketURL.path]
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
         try? data.write(to: Self.discoveryURL, options: .atomic)
         Log.log("speech HTTP listening on loopback port \(port.rawValue)")
@@ -134,7 +138,9 @@ final class SpeechHTTPService: @unchecked Sendable {
     private func handle(_ r: Request) async -> Response {
         if r.method == "GET", r.path == "/v1/status" {
             guard let snapshot else { return .init(status: 503, object: ["error": "status_unavailable"]) }
-            return .init(status: 200, object: await snapshot().object)
+            var object = await snapshot().object
+            object["hands_free"] = HandsFreeService.shared.snapshot()
+            return .init(status: 200, object: object)
         }
         // Ask the app to restart itself. Immediate when idle (200); deferred until
         // the dictation in flight has been pasted, or the speech the user is

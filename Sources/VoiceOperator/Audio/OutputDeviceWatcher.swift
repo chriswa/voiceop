@@ -31,6 +31,22 @@ enum OutputDevice {
         return transport(device) == kAudioDeviceTransportTypeBuiltIn
     }
 
+    /// Whether the default output is the Mac's own speakers — where what Voice
+    /// Operator says reaches the microphone. The headphone jack is the same
+    /// built-in device with a different data source ('hdpn').
+    static var isSpeakers: Bool {
+        guard let device = defaultOutput(), transport(device) == kAudioDeviceTransportTypeBuiltIn else { return false }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDataSource,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectHasProperty(device, &addr),
+              AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr else { return true }
+        return fourCC(value) != "hdpn"
+    }
+
     /// `name (transport)` for the log — the one line that explains why the
     /// microphone just opened or closed on its own.
     static var summary: String {

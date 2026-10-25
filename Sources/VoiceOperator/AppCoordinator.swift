@@ -13,6 +13,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         isBusy: { [unowned self] in
             self.arbiter.isDictating || self.arbiter.isSpeaking
                 || RemoteTranscriptionManager.shared.activity.active > 0
+                || HandsFreeService.shared.isBusy
         })
     /// The local Kokoro server's launchd agent. Like a restart, anything that
     /// stops the server waits until nothing is being dictated or spoken.
@@ -41,10 +42,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         arbiter.onHistoryChanged = { [weak self] in self?.menuBar.refreshHistory() }
         SubscriberSocket.dictation(active: false)
         arbiter.onDictationBegan = {
+            HandsFreeService.shared.host.fnDictating = true
             SubscriberSocket.dictation(active: true)
             Task { await SpeechJobManager.shared.beginDictation() }
         }
         arbiter.onDictationEnded = { [weak self] in
+            HandsFreeService.shared.host.fnDictating = false
             SubscriberSocket.dictation(active: false)
             Task { await SpeechJobManager.shared.endDictation() }
             // A restart asked for mid-dictation has been waiting for exactly this.
@@ -62,6 +65,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         RemoteTranscriptionManager.shared.activity.onIdle = { [weak self] in
             Task { @MainActor in self?.restart.attempt() }
         }
+        HandsFreeService.shared.onIdle = { [weak self] in
+            Task { @MainActor in self?.restart.attempt() }
+        }
         speechService.requestRestart = { [unowned self] in restart.request(source: .http) }
         arbiter.onCommand = { [weak self] text, context in self?.routeCommand(text, context: context) }
         Task { @MainActor [weak self] in
@@ -77,6 +83,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 onSpeechActivity: { [weak self] active in
                     Task { @MainActor in
                         self?.arbiter.setSpeechActive(active)
+                        HandsFreeService.shared.host.speaking = self?.arbiter.isSpeaking ?? false
                         // Speech going quiet is one of the two ways the app becomes
                         // idle, so it is one of the two places a restart that has
                         // been waiting gets to fire.
@@ -128,7 +135,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             if muted { self?.arbiter.haltSpeech() }
             Task { await SpeechJobManager.shared.setMuted(muted) }
         }
-        arbiter.onSpeechIdle = { [weak self] in self?.restart.attempt() }
+        arbiter.onSpeechIdle = { [weak self] in
+            HandsFreeService.shared.host.speaking = false
+            self?.restart.attempt()
+        }
         menuBar.onRestart = { [unowned self] in restart.request(source: .menu) }
         wireTextToSpeechMenu()
         wireCleanup()
@@ -174,6 +184,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         // output change rather than sampling it at dictation time, so the headset
         // is already in the profile it will stay in before the key is pressed.
         outputWatcher.onChange = { [weak self] in
+            HandsFreeService.shared.host.speakers = OutputDevice.isSpeakers
             MainActor.assumeIsolated {
                 self?.applyMicrophonePolicy(reason: "output device changed")
                 self?.arbiter.outputDeviceChanged()
@@ -221,6 +232,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         installHotkeyWhenTrusted()
         watchSecureInput()
         do { try speechService.start() } catch { Log.log("speech HTTP start failed: \(error)") }
+        startHandsFree()
         // Dial the Baseten connection and fetch the token/dictionary now, so the
         // first dictation of the session doesn't pay for any of it.
         arbiter.prewarm()
@@ -242,6 +254,17 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         Log.log(on ? "incognito: on — nothing is saved or leaves this Mac" : "incognito: off")
         if on { FlowChannel.shared.close() }
         arbiter.incognitoChanged()
+        HandsFreeService.shared.incognitoChanged()
+    }
+
+    /// Hands-free (`HandsFreeService`): nothing listens until a client connects
+    /// and asks, but the socket is there from launch.
+    private func startHandsFree() {
+        let handsFree = HandsFreeService.shared
+        handsFree.host.speakers = OutputDevice.isSpeakers
+        let arbiter = self.arbiter
+        handsFree.setMicrophoneListener = { handler in arbiter.setHandsFreeListener(handler) }
+        do { try handsFree.start() } catch { Log.log("hands-free: could not start: \(error)") }
     }
 
     /// The Text to Speech submenu: the local Kokoro service.
@@ -347,6 +370,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         outputWatcher.stop()
         arbiter.prepareForTermination()
+        HandsFreeService.shared.stop()
         speechService.stop()
         Log.log("quit: teardown finished")
     }

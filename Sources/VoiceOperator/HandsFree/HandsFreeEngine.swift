@@ -152,8 +152,6 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     // MARK: - Tunables beyond `HandsFreeTuning`
 
-    /// Through a pause, the turn model is asked again this often.
-    static let turnSampleMs: Double = 500
     /// Frames without speech (about half a second) before a voice turned down
     /// for someone talking comes back up.
     static let unduckFrames = 16
@@ -583,43 +581,38 @@ final class HandsFreeEngine: @unchecked Sendable {
                                            reason: "lost", shutdown: false))
     }
 
-    /// A pause: ask the turn model every `turnSampleMs` for as long as it lasts,
-    /// and end the first time it is sure enough they have finished. An answer
-    /// arriving after they carried on is about a pause that is over, and dropped.
+    /// A pause: ask the turn model once, about 0.2 s in (`pauseCheckMs`), as
+    /// Smart Turn's documentation says to — it was trained on turns ending in
+    /// about 200 ms of silence. At or above the threshold the dictation ends
+    /// there; below it, it waits for the silence timeout, or for them to carry
+    /// on, when the next pause is asked about afresh. Asking again through the
+    /// pause, as this did until October 25, gave answers that jumped about
+    /// (0.67, 0.74, 0.68, 0.48, 0.30, 0.54, 0.94 in one pause), so most endings
+    /// after the first were chance. The one answer stays on the gauge until
+    /// they carry on. An answer arriving after they did is dropped.
     private func samplePause(talkMs: Double) {
         pauseOver()
         guard let utterance else { return }
         let pause = pauseNumber
         utterance.sampling = true
-        var sample = 0
-        func ask() {
-            guard pause == pauseNumber, let current = self.utterance, current === utterance else { return }
-            sample += 1
-            let asked = deps.now()
-            let window = Array(utterance.audio.suffix(SmartTurnWindow.samples)).map { Float($0) / 32768 }
-            deps.turn(window) { [weak self] p in
-                guard let self else { return }
-                let stillCurrent = pause == self.pauseNumber
-                self.deps.log(String(format: "pause after %.1fs, sample %d: %@%@", talkMs / 1000, sample,
-                                     p.map { String(format: "p(finished)=%.2f", $0) } ?? "no turn verdict",
-                                     stillCurrent ? "" : ", but it is over"))
-                let ends = stillCurrent && (p ?? 0) >= self.tuning.turnThreshold && p != nil
-                self.deps.record("turn", ["talkMs": Int(talkMs), "sample": sample, "p": p ?? NSNull(),
-                                          "threshold": self.tuning.turnThreshold, "ends": ends,
-                                          "carriedOn": !stillCurrent])
-                guard stillCurrent else { return }
-                if let p { utterance.turn = p }
-                self.publishGauge()
-                if ends {
-                    self.end(.finished)
-                    return
-                }
-                let wait = max(0, Self.turnSampleMs - (self.deps.now() - asked))
-                _ = self.deps.after(wait) { ask() }
-            }
-        }
         publishGauge()
-        ask()
+        let window = Array(utterance.audio.suffix(SmartTurnWindow.samples)).map { Float($0) / 32768 }
+        deps.turn(window) { [weak self] p in
+            guard let self else { return }
+            let stillCurrent = pause == self.pauseNumber
+            self.deps.log(String(format: "pause after %.1fs: %@%@", talkMs / 1000,
+                                 p.map { String(format: "p(finished)=%.2f", $0) } ?? "no turn verdict",
+                                 stillCurrent ? "" : ", but it is over"))
+            let ends = stillCurrent && p.map { $0 >= self.tuning.turnThreshold } == true
+            self.deps.record("turn", ["talkMs": Int(talkMs), "p": p ?? NSNull(),
+                                      "threshold": self.tuning.turnThreshold, "ends": ends,
+                                      "carriedOn": !stillCurrent])
+            guard stillCurrent, self.utterance === utterance else { return }
+            utterance.turn = p
+            utterance.sampling = false
+            self.publishGauge()
+            if ends { self.end(.finished) }
+        }
     }
 
     /// No more asking about this pause.

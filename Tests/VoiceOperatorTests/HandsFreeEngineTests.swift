@@ -252,28 +252,32 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.transcripts.count, 1)
     }
 
-    func testShowsTheLatestAnswerAndForgetsItWhenTheyCarryOn() {
+    func testShowsThePausesOneAnswerAndForgetsItWhenTheyCarryOn() {
         let h = harness { $0.turn = { 0.08 } }
         h.hear(Sound.quiet(1500), Sound.speech(2500), Sound.quiet(1000))
         XCTAssertEqual(h.lastGauge?.turn, 0.08)
-        XCTAssertEqual(h.lastGauge?.sampling, true)
+        XCTAssertEqual(h.lastGauge?.sampling, false, "answered: no longer being asked")
         h.hear(Sound.speech(500))
         XCTAssertNil(h.lastGauge?.turn)
         XCTAssertEqual(h.lastGauge?.sampling, false)
     }
 
-    func testAsksAgainEveryHalfSecondThroughThePause() {
+    func testAsksExactlyOnceAboutAFifthOfASecondIntoEachPause() {
         var p = 0.08
         let h = harness { $0.turn = { p } }
-        h.hear(Sound.quiet(1500), Sound.speech(2500), Sound.quiet(900))
-        let asked = h.turnAsks
-        XCTAssertGreaterThanOrEqual(asked, 1)
+        h.hear(Sound.quiet(1500), Sound.speech(2500), Sound.quiet(300))
+        XCTAssertEqual(h.turnAsks, 1, "asked as the pause began")
+        // A later, surer answer would come too late: it is not asked for.
         p = 0.93
-        h.elapse(500)
+        h.hear(Sound.quiet(1500))
+        h.elapse(2000)
+        XCTAssertEqual(h.turnAsks, 1)
+        XCTAssertEqual(h.transcripts.count, 0)
+        XCTAssertEqual(h.lastGauge?.turn, 0.08, "the first answer stays shown")
+        // The next pause is asked about afresh.
+        h.hear(Sound.speech(800), Sound.quiet(300))
+        XCTAssertEqual(h.turnAsks, 2)
         XCTAssertEqual(h.transcripts.count, 1)
-        let after = h.turnAsks
-        h.elapse(500)
-        XCTAssertEqual(h.turnAsks, after)
     }
 
     func testNotTheTriggerWordStartsNothing() {

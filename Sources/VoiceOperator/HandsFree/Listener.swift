@@ -49,7 +49,7 @@ struct HandsFreeTuning: Sendable, Equatable {
         noSpeechBeforeMs: 700,
         onsetWindowMs: 1000,
         wordMinMs: 250,
-        pauseCheckMs: 800,
+        pauseCheckMs: 200,
         turnThreshold: 0.75,
         wakeWordOnlyMs: 1500,
         afterWakeWordMs: 5000,

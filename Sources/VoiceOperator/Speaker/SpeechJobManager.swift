@@ -57,7 +57,7 @@ actor SpeechJobManager {
     /// contains an emoji or anything else outside the BMP. `start` is not
     /// always the previous sentence's `end`: the separator between two parts
     /// belongs to neither of them.
-    private struct Segment: Sendable { let text: String; let voice: String; let start: Int; let end: Int }
+    struct Segment: Sendable, Equatable { let text: String; let voice: String; let start: Int; let end: Int }
     struct SentencePlayback: Sendable {
         let jobID: String
         let text: String
@@ -553,7 +553,7 @@ actor SpeechJobManager {
     /// Sentence ranges are based on Foundation's linguistic sentence boundary
     /// detector, run over each part on its own so that no sentence spans two
     /// voices. Offsets are UTF-16 positions in the parts' joined text.
-    private static func segments(_ parts: [Part]) -> [Segment] {
+    static func segments(_ parts: [Part]) -> [Segment] {
         var answer: [Segment] = []
         var partStart = 0
         for (i, part) in parts.enumerated() {

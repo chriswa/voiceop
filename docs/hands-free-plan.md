@@ -1,6 +1,6 @@
 # Hands-free in Voice Operator — migration plan (2026-10-24)
 
-Status: **phases 0–4 and 6 built (2026-10-24); phase 5 is the open follow-up.**
+Status: **phases 0–4 and 6 built (2026-10-24); phase 5 built 2026-10-25.**
 What was built, where it differs from the plan:
 
 - VO: `Sources/VoiceOperator/HandsFree/` (DESIGN.md "Hands-free" has the
@@ -18,9 +18,13 @@ What was built, where it differs from the plan:
   record, the tuning file and onnxruntime are gone. Audio is still PCM (opus is
   a follow-up), and the phone's button dictation still goes through the page's
   own path (`/v1/transcriptions`), on audio the SDK engine hands the page.
-- Phase 5 (VO speech to an SDK device) is not built: Control's voice is still
-  synthesised by Spaceterm (`RemoteSpeech`) and played by the SDK's engine,
-  which reports `playing` itself.
+- Phase 5 (VO speech to a device), 2026-10-25: VO keeps the job
+  (`DeviceSpeech`, DESIGN.md "Speech on a device") and Spaceterm's
+  `RemoteSpeech` is gone. The SDK has the speaker client (`SpeechDevice`,
+  `SpeakerSession`), but Spaceterm's phone page speaks the protocol itself:
+  it still chooses between the app's engine and the page's own audio for each
+  job, as before, and runs in a browser too. The SDK's engine still reports
+  `playing` itself.
 - VO's `/v1/wake-word` stays until no Spaceterm build uses it.
 
 ## Goal

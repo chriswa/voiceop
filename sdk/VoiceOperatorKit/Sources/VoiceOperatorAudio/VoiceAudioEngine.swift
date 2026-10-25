@@ -75,6 +75,9 @@ public final class VoiceAudioEngine {
     public var captureObserver: ((Data) -> Void)?
     /// What the player is playing has changed: see `playback`. `HandsFreeSession`'s.
     public var onPlaybackChange: (() -> Void)?
+    /// Each sentence of speech `started`, `finished` or `failed`, as the host is told it,
+    /// for a second listener beside the host — `SpeakerSession`'s.
+    public var speechObserver: ((_ id: String, _ index: Int, _ event: String) -> Void)?
     /// The `UserDefaults` key an open AirPods incident is kept under across launches; nil keeps none.
     private let badStateDefaultsKey: String?
 
@@ -1454,6 +1457,7 @@ public final class VoiceAudioEngine {
         var detail: [String: Any] = ["id": id, "index": index, "event": event]
         if let outputDb { detail["outputDb"] = outputDb }
         host?.engine(self, speech: detail)
+        speechObserver?(id, index, event)
         notePlayback()
     }
 

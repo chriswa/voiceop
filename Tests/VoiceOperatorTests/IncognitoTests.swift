@@ -139,6 +139,39 @@ final class IncognitoTests: XCTestCase {
         do { _ = try await WakeWordCheck.check(pcm: Data(count: 3_200), sampleRate: 16_000, word: "control"); XCTFail("checked") }
         catch { assertBlocked(error) }
     }
+
+    func testSpeechForADeviceIsRefused() async {
+        guard Incognito.blocksSpaceterm else { return }
+        let speech = DeviceSpeech(deps: .init(synthesize: { _, _ in
+            XCTFail("synthesized")
+            return nil
+        }, log: { _ in }))
+        _ = speech.connect(client: "spaceterm", device: "phone") { _ in XCTFail("sent to the device") }
+        let answer = await speech.speak(parts: [.init(text: "Hello.", voice: "af_heart")], client: "spaceterm", device: "phone")
+        guard case .refused = answer else { return XCTFail("spoke: \(answer)") }
+    }
+
+    /// Turned on mid-job: the sentence made after it never leaves.
+    func testSpeechForADeviceStopsAtTheSend() async {
+        guard Incognito.blocksSpaceterm else { return }
+        Incognito.isOn = false
+        let sent = NSLock(), turnedOn = expectation(description: "made")
+        nonisolated(unsafe) var sentences = 0
+        let speech = DeviceSpeech(deps: .init(synthesize: { _, _ in
+            Incognito.isOn = true
+            turnedOn.fulfill()
+            return .init(wav: WAVFile(sampleRate: 24_000, samples: Data(count: 480)), words: nil)
+        }, log: { _ in }))
+        _ = speech.connect(client: "spaceterm", device: "phone") { message in
+            if message["type"] as? String == "sentence" { sent.withLock { sentences += 1 } }
+        }
+        guard case .accepted(let job) = await speech.speak(parts: [.init(text: "Hello.", voice: "af_heart")],
+                                                           client: "spaceterm", device: "phone") else { return XCTFail("refused") }
+        await fulfillment(of: [turnedOn], timeout: 2)
+        let ended = await speech.status(id: job.id, wait: 2)
+        XCTAssertEqual(ended?.state, .synthesisFailed)
+        XCTAssertEqual(sent.withLock { sentences }, 0)
+    }
 }
 
 private final class RecordingRunner: CommandRunner, @unchecked Sendable {

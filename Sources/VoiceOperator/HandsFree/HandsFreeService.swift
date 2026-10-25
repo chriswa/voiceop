@@ -17,6 +17,10 @@ import Network
 /// - A **stream** connection says `hello` with `role: "stream"` for a client
 ///   already registered, then `start` (or `resume` after a dropout), `audio`,
 ///   `playing`, and `stop`. It is the phone's whole session.
+/// - A **speaker** connection says `hello` with `role: "speaker"` and a
+///   device name, for speech played on that device (`DeviceSpeech`): it is
+///   sent `sentence`s and `ended`, and says `progress`. No trigger word or
+///   control connection needed.
 /// - Voice Operator sends each session's `state`, `gauge`, `cue`, `duck`,
 ///   `cut-in`, `transcript` and `session-ended` to the connection that started
 ///   it, and `ack`s stream audio.
@@ -222,6 +226,10 @@ final class HandsFreeService: @unchecked Sendable {
             if !session.playing { session.playingEndedAt = Date() }
         case (.stream, "stop"):
             if let session = connection.session { end(session, why: "off") }
+        case (.speaker, "progress"):
+            guard let token = connection.speaker, let id = message["id"] as? String, let index = message["index"] as? Int,
+                  let event = message["event"] as? String else { return }
+            DeviceSpeech.shared.progress(token, id: id, index: index, event: event)
         default:
             connection.send(["type": "error", "error": "unknown_type", "detail": type])
         }
@@ -239,6 +247,21 @@ final class HandsFreeService: @unchecked Sendable {
         }
         guard let name = message["client"] as? String, !name.isEmpty, name.count <= 64 else {
             refuse("invalid_client", "a client name of 1–64 characters")
+            return
+        }
+        if message["role"] as? String == "speaker" {
+            guard let device = message["device"] as? String, !device.isEmpty, device.count <= 128 else {
+                refuse("invalid_device", "a device name of 1–128 characters")
+                return
+            }
+            connection.role = .speaker
+            connection.client = name
+            connection.device = device
+            let queue = self.queue
+            connection.speaker = DeviceSpeech.shared.connect(client: name, device: device) { [weak connection] message in
+                queue.async { connection?.send(message) }
+            }
+            connection.send(["type": "welcome", "protocol": Self.protocolVersion])
             return
         }
         if message["role"] as? String == "stream" {
@@ -275,6 +298,8 @@ final class HandsFreeService: @unchecked Sendable {
             clients[connection.client] = nil
         case .stream:
             if let session = connection.session { suspend(session) }
+        case .speaker:
+            if let token = connection.speaker { DeviceSpeech.shared.disconnect(token) }
         case nil:
             break
         }
@@ -718,7 +743,7 @@ struct Unchecked<Value>: @unchecked Sendable {
 /// One client connection: newline-delimited JSON both ways. Confined to the
 /// service's queue.
 fileprivate final class Connection: @unchecked Sendable {
-    enum Role { case control, stream }
+    enum Role { case control, stream, speaker }
 
     let nw: NWConnection
     let queue: DispatchQueue
@@ -730,6 +755,8 @@ fileprivate final class Connection: @unchecked Sendable {
     var playingEndedAt: Date?
     /// A stream connection's session.
     weak var session: StreamSession?
+    /// A speaker connection's device, as `DeviceSpeech` knows it.
+    var speaker: Int?
     var onMessage: (([String: Any]) -> Void)?
     var onClose: (() -> Void)?
     private var buffer = Data()

@@ -255,6 +255,7 @@ serves the current user only, on loopback. In brief (full tables in
 | What | Where |
 | --- | --- |
 | Speak text (one or several voices), poll or long-poll it, stop it — a stop reports how far the listener got | `POST /v1/speech`, `GET`/`DELETE /v1/speech/{id}` |
+| The same, played on a device instead — a phone using the SDK — with the job kept here | `POST /v1/speech` with `client` and `device`; the device connects on the Unix socket — DESIGN.md, "Speech on a device" |
 | Synthesize without playing: audio plus word timings, for playback elsewhere | `POST /v1/synthesize` |
 | Transcribe audio captured elsewhere, streamed in | `/v1/transcriptions` |
 | Receive command dictations (Ctrl+Fn) and dictation start/stop events on your own socket | `PUT /v1/subscribers/{name}` |
@@ -269,10 +270,16 @@ serves the current user only, on loopback. In brief (full tables in
   the app carries its lines to the Mac (Spaceterm relays them through its
   server). It numbers the audio, keeps a minute of it until the Mac has it, and
   resumes a session after a dropout.
+- `VoiceOperatorSpeech` — the speaker client: speech a client asks for on this
+  device arrives a sentence at a time, and the device says when each starts
+  and finishes. Voice Operator keeps the job, so the client asking follows it
+  as it follows speech on the Mac, down to the word the listener cut in on.
+  Transport-agnostic, like the stream client.
 - `VoiceOperatorAudio` — the audio engine: the microphone with echo
   cancellation, speech playback through one player (the app's own sounds mix
   into it), and the audio-session rules that keep AirPods, the speaker,
-  Spotify and a locked screen working.
+  Spotify and a locked screen working. `HandsFreeSession` and
+  `SpeakerSession` connect it to the two clients above.
 
 ```bash
 cd sdk/VoiceOperatorKit && swift test

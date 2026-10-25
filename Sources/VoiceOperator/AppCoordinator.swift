@@ -13,7 +13,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         isBusy: { [unowned self] in
             self.arbiter.isDictating || self.arbiter.isSpeaking
                 || RemoteTranscriptionManager.shared.activity.active > 0
-                || HandsFreeService.shared.isBusy
+                || HandsFreeService.shared.isBusy || DeviceSpeech.shared.isSpeaking
         })
     /// The local Kokoro server's launchd agent. Like a restart, anything that
     /// stops the server waits until nothing is being dictated or spoken.
@@ -55,7 +55,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         speechService.snapshot = { [unowned self] in
             .init(status: currentStatus, dictating: arbiter.isDictating,
-                  speaking: arbiter.isSpeaking, restart: restart.state,
+                  speaking: arbiter.isSpeaking || DeviceSpeech.shared.isSpeaking, restart: restart.state,
                   stream: arbiter.streamHealth,
                   remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active,
                   provider: TranscriptionPreferences.primary, shadow: TranscriptionPreferences.shadow,
@@ -66,6 +66,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.restart.attempt() }
         }
         HandsFreeService.shared.onIdle = { [weak self] in
+            Task { @MainActor in self?.restart.attempt() }
+        }
+        // Speech playing on a phone holds a restart as speech here does.
+        DeviceSpeech.shared.onIdle = { [weak self] in
             Task { @MainActor in self?.restart.attempt() }
         }
         speechService.requestRestart = { [unowned self] in restart.request(source: .http) }

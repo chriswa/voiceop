@@ -21,11 +21,12 @@ removed when the app quits, so a present file whose `pid` is alive means a
 reachable instance. `version` is the API generation: 2 added `/v1/status` and
 `/v1/restart`; 5 added `/v1/transcriptions` (status reports
 `"remote_transcription": true` for feature detection); 7 added `parts` on
-`POST /v1/speech`.
+`POST /v1/speech`; 17 added speech on a device (`client` and `device` on
+`POST /v1/speech`).
 
 | Method | Path | Meaning |
 | --- | --- | --- |
-| `POST` | `/v1/speech` | Queue `{text, voice?}` — or `{parts: [{text, voice?}, …]}` for one job in several voices — and return `202` + job id. `400` for a body with both or neither of `text`/`parts`, an empty `parts` (`parts_empty`), or a part with blank text (`part_text_required` + `index`); `422 text_too_long` past 50 000 scalars of the joined text; `503 speech_muted`. |
+| `POST` | `/v1/speech` | Queue `{text, voice?}` — or `{parts: [{text, voice?}, …]}` for one job in several voices — and return `202` + job id. With `client` and `device` it is spoken on that device instead (see "Speech on a device"): `404 unknown_device` when none by that name is connected, `403 incognito` in incognito mode. `400` for a body with both or neither of `text`/`parts`, an empty `parts` (`parts_empty`), or a part with blank text (`part_text_required` + `index`); `422 text_too_long` past 50 000 scalars of the joined text; `503 speech_muted`. |
 | `GET` | `/v1/speech/{id}?wait=0..30[&since=N]` | Inspect or long-poll a job. Pending is `202`; complete is `200`; a dictation barge-in is `409`; cancellation/mute flush is `410`; synthesis failure is `500`. |
 | `DELETE` | `/v1/speech/{id}` | Halt immediately if audible, otherwise retract it. |
 | `GET` | `/v1/voices` | Return the currently available external Kokoro voices. |
@@ -876,6 +877,46 @@ dictation was under way: it is history, not the user talking now.
 | `transcript {text, trigger, interrupted, reason, shutdown}` | The dictation, trigger word included — strip it yourself. Empty when nothing was caught; `interrupted`: it cut the client's voice off (with empty text: say you had not finished, and carry on). `shutdown`: "let me turn this off" or "<trigger>, shutdown" — hands-free turns itself off: `session-ended {why:"shutdown"}` follows. |
 | `ack {at}`, `resumed {session, at}` | Stream bookkeeping, above. |
 
+## Speech on a device (2026-10-25)
+
+Speech a client wants heard on a device that plays it itself — a phone, through
+the iOS SDK's `VoiceOperatorSpeech` (or anything speaking the same protocol) —
+is a Voice Operator job like any other: `POST /v1/speech` with `client` and
+`device`, then `GET`/`DELETE /v1/speech/{id}` exactly as for speech played
+here, `character_offset` and `heard_until` included. `DeviceSpeech` keeps the
+job: it splits it as the Mac's speech is split (`SpeechJobManager.segments`),
+makes each sentence in turn (`RemoteSynthesis`: `TTSPreprocess`, Kokoro with
+word timings, `SpeechLoudness`), sends it to the device, and counts what was
+heard from the device's reports of each sentence starting and finishing — word
+by word, from the timings, for a sentence cut part way (also for a `heard_until`
+before now). It moved here from Spaceterm's `RemoteSpeech`, so any client gets it.
+
+Which device speech goes to is the client's call: Spaceterm sends Control's
+replies to the phone holding Control while it is connected. A device's jobs are
+made one after another, in the order asked for; they do not queue behind the
+Mac's speech, a dictation here does not stop them, and the menu's mute does not
+silence them (the client has its own). Job ids start `ds_`. A job in progress
+holds off a restart, as speech here does (`speaking` in `/v1/status`).
+
+**Protocol.** A **speaker** connection on the client socket (the one in
+`hands_free_socket`, newline-delimited JSON, as hands-free's), one per device.
+No trigger word or control connection is needed.
+
+| Device sends | Meaning |
+| --- | --- |
+| `{"type":"hello","protocol":1,"client":"spaceterm","role":"speaker","device":"<id>"}` | `welcome`, or `refused` (`protocol`, `invalid_client`, `invalid_device`). A second hello as the same client and device replaces the first: it is sent `replaced`, and what it was playing ends where it got to. |
+| `{"type":"progress","id","index","event"}` | `started` (its first sample is audible), `finished` (its last), or `failed` (it cannot be played: the job ends `synthesis_failed`). Timed on arrival, on the Mac's clock. |
+
+| Voice Operator sends | Meaning |
+| --- | --- |
+| `sentence {id, index, count, sampleRate, pcm, sentAt, synthMs}` | One sentence to play after whatever is queued: base64 s16le mono at `sampleRate`. `sentAt` (wall ms) and `synthMs` are for the device's record. |
+| `ended {id, state, characterOffset}` | The job is over; stop anything left of it unless `state` is `completed`. |
+| `replaced` | Another connection is this device now. |
+
+A speaker connection that closes ends its jobs where they got to
+(`cancelled_by_client`); there is no resume — the next job goes to whichever
+connection is the device's then.
+
 ## Incognito mode (2026-10-13)
 
 A menu checkbox (`Incognito`, persisted in `UserDefaults` as `vo.incognito`, so a restart
@@ -897,7 +938,7 @@ error. `IncognitoTests` asks each gate directly.
 | TTS audio cache | `AudioCache.store`. `TTSEngine` keeps lookahead clips in memory instead, each dropped once played and all of them (and the word timings) on `stop()` |
 | Words in the log | `Log.clip` logs only the length |
 | HTTP cache (`~/Library/Caches/com.chriswa.voiceoperator`) | Not incognito-specific: Kokoro requests use an ephemeral `URLSession` and `URLCache.shared` has no disk capacity, in every mode. `URLSession.shared` had been caching TTS request text, `/timestamps` words and the audio itself — the first incognito test found a sentence there. |
-| Spaceterm: `/v1/transcriptions`, `/v1/synthesize`, `/v1/wake-word`, subscriber sockets (commands and dictation events) | `RemoteTranscriptionManager`, `WakeWordCheck.check`, the `/v1/synthesize` handler, `SubscriberSocket`; HTTP refusals are 403 `{"error":"incognito"}`. Spaceterm is local, so this is policy rather than necessity: it has its own switch, `Incognito.blocksSpaceterm`. |
+| Spaceterm and other clients: `/v1/transcriptions`, `/v1/synthesize`, speech on a device, `/v1/wake-word`, subscriber sockets (commands and dictation events) | `RemoteTranscriptionManager`, `WakeWordCheck.check`, the `/v1/synthesize` handler, `DeviceSpeech` (refuses the job, and each sentence as it is about to be sent), `SubscriberSocket`; HTTP refusals are 403 `{"error":"incognito"}`. Spaceterm is local, so this is policy rather than necessity: it has its own switch, `Incognito.blocksSpaceterm`. |
 
 Still allowed: Parakeet (on device; FluidAudio only touches the network to download model
 weights), the local Kokoro, dictation clean-up (loopback llama.cpp; its `URLSession` is

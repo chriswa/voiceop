@@ -25,15 +25,17 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// `{"error": "incognito"}`, and fixed `/v1/voices`' provider at `kokoro`
     /// again (custom TTS servers are gone); 16 added hands-free — the
     /// `hands_free_socket` here and `hands_free` in `/v1/status` (see
-    /// `HandsFreeService`).
-    static let discoveryVersion = 16
+    /// `HandsFreeService`); 17 added speech on a device — `client` and
+    /// `device` on `POST /v1/speech`, and `ds_` job ids (see `DeviceSpeech`).
+    static let discoveryVersion = 17
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
     struct Snapshot: Sendable {
         var status: OperatorStatus
         var dictating: Bool
-        /// Whether speech is audible. Like `dictating`, this holds off a restart —
+        /// Whether speech is audible, here or on a device (`DeviceSpeech`). Like
+        /// `dictating`, this holds off a restart —
         /// `restart-app.sh` reads it to say which of the two it is waiting on.
         var speaking: Bool
         var restart: RestartCoordinator.State
@@ -198,15 +200,10 @@ final class SpeechHTTPService: @unchecked Sendable {
             catch { return .init(status: 503, object: ["error": "tts_unavailable"]) }
         }
         // Remote synthesis: the audio for one piece of text, handed back rather
-        // than played — for a client that plays it elsewhere (the phone, via
-        // spaceterm). No queue, no playback, no ducking: the caller owns all of
-        // that. The mirror of `/v1/transcriptions`, and like it the reason is
-        // that this process holds the synthesizer's address and credentials.
-        //
-        // The text goes through `TTSPreprocess` first, as speech played here
-        // does, so a path or a camelCase name sounds the same on the phone.
-        // So does `SpeechLoudness`: the phone plays this WAV as is, so the gain
-        // and limiter speech gets here are applied before it leaves.
+        // than played — for a client that plays it elsewhere itself. No queue,
+        // no playback, no ducking: the caller owns all of that. A device that
+        // only wants speech played is better served by `DeviceSpeech`, which
+        // keeps the job for it. Made as `RemoteSynthesis` makes it.
         //
         // With `"word_timings": true` the answer is JSON instead: the WAV as
         // base64 `audio`, and `words`, each word's `start`/`end` in seconds and
@@ -222,20 +219,16 @@ final class SpeechHTTPService: @unchecked Sendable {
                   let text = o["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(status: 400, object: ["error": "text_required"]) }
             guard text.unicodeScalars.count <= 5_000 else { return .init(status: 422, object: ["error": "text_too_long"]) }
             let voice = o["voice"] as? String ?? KokoroSynthesizer.defaultVoiceID
-            let synthesizer = KokoroSynthesizer()
-            let prepared = TTSPreprocess.prepare(text)
+            let timed = o["word_timings"] as? Bool == true
             do {
-                guard o["word_timings"] as? Bool == true else {
-                    let wav = try await Self.loud(synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice))
-                    Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice)")
-                    return .init(status: 200, object: nil, raw: (wav, "audio/wav"))
+                let clip = try await RemoteSynthesis.make(text: text, voice: voice, timed: timed)
+                guard timed else {
+                    Log.log("remote synthesis: \(text.count) chars as \(clip.wav.data.count) bytes, voice=\(voice)")
+                    return .init(status: 200, object: nil, raw: (clip.wav.data, "audio/wav"))
                 }
-                async let timings = try? synthesizer.wordTimings(text: prepared.ttsText, voiceID: voice)
-                let wav = try await Self.loud(synthesizer.synthesizeWAV(text: prepared.ttsText, voiceID: voice))
-                let words = await timings.flatMap { Self.wordObjects(prepared: prepared, timings: $0) }
-                Log.log("remote synthesis: \(text.count) chars as \(wav.count) bytes, voice=\(voice), \(words.map { "\($0.count) timed words" } ?? "untimed")")
-                var answer: [String: Any] = ["audio": wav.base64EncodedString()]
-                if let words { answer["words"] = words }
+                Log.log("remote synthesis: \(text.count) chars as \(clip.wav.data.count) bytes, voice=\(voice), \(clip.words.map { "\($0.count) timed words" } ?? "untimed")")
+                var answer: [String: Any] = ["audio": clip.wav.data.base64EncodedString()]
+                if let words = clip.words { answer["words"] = words.map(Self.wordObject) }
                 return .init(status: 200, object: answer)
             } catch {
                 Log.log("remote synthesis failed: \(error)")
@@ -248,6 +241,14 @@ final class SpeechHTTPService: @unchecked Sendable {
             case .success(let parsed): parts = parsed
             case .failure(let rejection): return .init(status: rejection.status, object: rejection.object)
             }
+            // Speech for a device that plays it itself (`DeviceSpeech`), named by its client and device.
+            if let device = Self.deviceTarget(r.body) {
+                switch await DeviceSpeech.shared.speak(parts: parts, client: device.client, device: device.device) {
+                case .accepted(let result): return .init(status: 202, object: object(result))
+                case .unknownDevice: return .init(status: 404, object: ["error": "unknown_device"])
+                case .refused(let blocked): return Self.refused(blocked)
+                }
+            }
             guard let result = await SpeechJobManager.shared.enqueue(parts: parts) else { return .init(status: 503, object: ["error": "speech_unavailable"]) }
             if result.error == "speech_muted" { return .init(status: 503, object: ["error": "speech_muted"]) }
             return .init(status: 202, object: object(result))
@@ -258,6 +259,12 @@ final class SpeechHTTPService: @unchecked Sendable {
         if r.method == "DELETE" {
             // `heard_until` (epoch ms): the listener began talking over it then, before this
             // arrived — the client and this app share the Mac's clock. See `SpeechJobManager.cancel`.
+            if DeviceSpeech.owns(id) {
+                guard let result = await DeviceSpeech.shared.cancel(id: id, heardUntil: r.query["heard_until"].flatMap { Double($0) }) else {
+                    return .init(status: 404, object: ["error": "unknown_job"])
+                }
+                return .init(status: status(result), object: object(result))
+            }
             let heardUntil = r.query["heard_until"].flatMap { Double($0) }.map { Date(timeIntervalSince1970: $0 / 1000) }
             guard let result = await SpeechJobManager.shared.cancel(id: id, heardUntil: heardUntil) else { return .init(status: 404, object: ["error": "unknown_job"]) }
             return .init(status: status(result), object: object(result))
@@ -267,16 +274,16 @@ final class SpeechHTTPService: @unchecked Sendable {
             // `since` is opt-in: without it a long poll keeps its original
             // terminal-only meaning, so existing callers are unaffected.
             let since = r.query["since"].flatMap { Int($0) }
+            if DeviceSpeech.owns(id) {
+                guard let result = await DeviceSpeech.shared.status(id: id, wait: Double(wait), since: since) else {
+                    return .init(status: 404, object: ["error": "unknown_job"])
+                }
+                return .init(status: status(result), object: object(result))
+            }
             guard let result = wait > 0 ? await SpeechJobManager.shared.wait(id: id, seconds: wait, since: since) : await SpeechJobManager.shared.liveResult(id: id) else { return .init(status: 404, object: ["error": "unknown_job"]) }
             return .init(status: status(result), object: object(result))
         }
         return .init(status: 405, object: ["error": "method_not_allowed"])
-    }
-    /// `SpeechLoudness.boosted` for a synthesized WAV blob. A clip that will not
-    /// boost is sent at its original level rather than not at all.
-    private static func loud(_ wav: Data) -> Data {
-        do { return try SpeechLoudness.boosted(WAVFile.parse(wav)).data }
-        catch { Log.log("remote synthesis: loudness skipped: \(error)"); return wav }
     }
     private func handleSubscribers(_ r: Request) -> Response {
         let registry = SubscriberRegistry.shared
@@ -305,13 +312,12 @@ final class SpeechHTTPService: @unchecked Sendable {
         }
     }
 
-    /// `words` for a timed `/v1/synthesize`: Kokoro times the prepared text, and
-    /// each word is mapped back to where it ends in the text as sent — a spoken
-    /// "slash" ends just past the `/` it stands for.
+    /// `words` for a timed `/v1/synthesize`: see `RemoteSynthesis.words`.
     static func wordObjects(prepared: TTSPrepared, timings: [WordTiming]) -> [[String: Any]]? {
-        return SpokenNarration.wordRanges(prepared: prepared, words: timings)?.map {
-            ["start": $0.timing.start, "end": $0.timing.end, "character_end": NSMaxRange($0.range)]
-        }
+        RemoteSynthesis.words(prepared: prepared, timings: timings)?.map(wordObject)
+    }
+    private static func wordObject(_ word: RemoteSynthesis.Word) -> [String: Any] {
+        ["start": word.start, "end": word.end, "character_end": word.characterEnd]
     }
 
     /// Remote dictation — see `RemoteTranscriptionManager`.
@@ -348,6 +354,12 @@ final class SpeechHTTPService: @unchecked Sendable {
         } catch {
             return .init(status: 500, object: ["error": "internal_error", "detail": "\(error)"])
         }
+    }
+    /// `client` and `device` on a `POST /v1/speech` body: speech for that device, not this Mac.
+    static func deviceTarget(_ body: Data) -> (client: String, device: String)? {
+        guard let o = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let client = o["client"] as? String, let device = o["device"] as? String else { return nil }
+        return (client, device)
     }
     private func object(_ r: SpeechJobManager.Result) -> [String: Any] {
         ["id": r.id, "state": r.state.rawValue, "playback_state": r.playbackState?.rawValue as Any,

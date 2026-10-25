@@ -208,21 +208,32 @@ and asks, and nothing outlives that connection. While it is on:
 
 - Say the trigger word first — "Control, what's Kevin doing?" — and keep
   talking; you are transcribed from your first syllable. Stop when you are done:
-  a turn model (Smart Turn) and a patience that grows with how long you have
-  talked decide when you have finished. The transcript goes to the client.
+  a streaming end-of-turn model, [turn-1-mini](https://huggingface.co/p99lab/turn-1-mini)
+  (p99lab, Apache-2.0), decides when you have finished — half a second after
+  its score first reaches its threshold in a pause, unless you speak again
+  first. A silence timeout (3 s, 4 s at most in a long dictation) is the
+  fallback. [Smart Turn](https://github.com/pipecat-ai/smart-turn) is asked
+  too, once per pause, for comparison only. The transcript goes to the client.
 - After that, a **conversation window** lets you reply without the trigger word
   until both sides have been quiet for 15 seconds.
 - Talking over the client's own voice turns it down, and cuts it off once it is
   clear you meant it, counted to when you began.
-- "Let me turn this off" — or "<trigger>, shutdown" — ends the conversation.
+- "Let me turn this off" — or "<trigger>, shutdown" — turns hands-free off.
 
 It listens on the Mac's microphone (your Fn dictation always takes priority, and
 it does not listen while Voice Operator speaks on the Mac's speakers, so
 barge-in on the Mac needs a headset) or on audio a client streams in — a phone,
 through the iOS SDK. Detecting speech (Silero VAD), checking the trigger word
-(Apple's on-device model, macOS 26) and Smart Turn all run on the Mac; the
-transcription uses your chosen provider. What it heard and decided is kept for
-review in `~/Library/Application Support/VoiceOperator/hands-free/`.
+(Apple's on-device model, macOS 26) and both end-of-turn models all run on the
+Mac (the two models, about 14 MB, download from Hugging Face on first use);
+the transcription uses your chosen provider. While hands-free holds the Mac's
+microphone, speech does not turn other audio down (doing so tore the
+microphone down at every reply). A Voice Operator restart leaves a client's
+hands-free on, and it starts again once the app is back. What it heard and
+decided — every check, every pause with both models' scores, every dictation's
+start and end — is kept for review in
+`~/Library/Application Support/VoiceOperator/hands-free/` (DESIGN.md,
+"Debugging it").
 
 ## Incognito mode
 

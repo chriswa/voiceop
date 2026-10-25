@@ -809,6 +809,16 @@ Mac therefore needs a headset, as it did in Spaceterm.
 **Incognito** ends every session and refuses new ones: what hands-free hears
 goes to a client.
 
+**Debugging it.** `hands-free/decisions.jsonl` in Application Support has a
+line per decision, with the clip it was made on in `clips/`: `check` (what
+Apple's model heard), `turn` (Smart Turn), `dictation`, `levels` (the room,
+every 30 s), `silent-input` (digital silence: a closed lid, a muted input),
+`interrupt` (what cut the client's voice off, and `intoReplyMs` — how far into
+the reply), and `echo` per reply the client played through echo cancellation
+(how much still sounded like speech, `firstSpeechMs`, peak level, ducks,
+cut-ins). Echo leaking through always starts at about the same `intoReplyMs`;
+a person interrupting does not.
+
 ### Protocol (version 1)
 
 Newline-delimited JSON over the Unix socket named in `speech-service.json` as

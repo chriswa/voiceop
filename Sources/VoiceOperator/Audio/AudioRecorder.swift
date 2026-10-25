@@ -116,6 +116,8 @@ final class AudioRecorder: @unchecked Sendable {
     /// or a buffer. See `setListener`.
     private var listener: (@Sendable (Data) -> Void)?
     private var listenerConverter: AVAudioConverter?
+    /// The listener's first buffer has been logged (raw and converted levels).
+    private var listenerSawAudio = false
 
     /// Duration (seconds) of the most recently stopped clip.
     private(set) var lastDurationSeconds: Double = 0
@@ -363,6 +365,7 @@ final class AudioRecorder: @unchecked Sendable {
         let had = listener != nil
         listener = handler
         listenerConverter = nil
+        listenerSawAudio = false
         holdSuspended = false
         rebuildCount = 0
         rebuildWindowStart = nil
@@ -649,6 +652,11 @@ final class AudioRecorder: @unchecked Sendable {
         // Handed over outside the lock, after the recording has had the buffer.
         let listener = self.listener
         let heard = listener == nil ? Data() : convertForListenerLocked(buffer)
+        if listener != nil, !listenerSawAudio, buffer.frameLength > 0 {
+            listenerSawAudio = true
+            let converted = Self.levels(pcm16: heard)
+            Log.log(Self.firstBufferSummary(buffer) + String(format: " → hands-free %d bytes, peak %.4f", heard.count, converted.peak))
+        }
         defer { if let listener, !heard.isEmpty { listener(heard) } }
         guard capturing else { lock.unlock(); return }
         let isFirstAudio = !sawFirstAudio && buffer.frameLength > 0

@@ -39,7 +39,7 @@ import Foundation
 ///
 /// Not thread-safe: every call is made on one queue (`HandsFreeService`), and
 /// every dependency answers back on it.
-final class HandsFreeEngine {
+final class HandsFreeEngine: @unchecked Sendable {
     enum Phase: String, Sendable { case off, listening, hearing, sending }
 
     /// A cue the client plays (or makes felt) its own way.
@@ -166,6 +166,11 @@ final class HandsFreeEngine {
     /// Listening this long with no audio at all is recorded: the client shows
     /// hands-free on, so nothing else would say it is deaf.
     static let deafAfterMs: Double = 5000
+    /// While listening, how often to record the room: how loud, and how much
+    /// of it was speech — the first report this soon, so even a short try says
+    /// what the source heard.
+    static let levelsReportMs: Double = 30_000
+    static let firstLevelsMs: Double = 5_000
 
     let tuning: HandsFreeTuning
     private let deps: Deps
@@ -207,6 +212,9 @@ final class HandsFreeEngine {
     /// for the stall it began at.
     private var stalls = 0
     private var deafTimer: Timer?
+    /// The room since the last levels report.
+    private var levels = (frames: 0, speechFrames: 0, sumDb: 0.0, maxDb: -120.0)
+    private var firstLevels = true
 
     private final class Utterance {
         let client: String
@@ -273,6 +281,8 @@ final class HandsFreeEngine {
         guard !live else { return }
         live = true
         stalls += 1
+        firstLevels = true
+        levels = (0, 0, 0, -120)
         framer.reset()
         scorer.reset()
         listener.resume()
@@ -341,9 +351,38 @@ final class HandsFreeEngine {
                 listener.resume()
                 continue
             }
+            noteLevels(frame, p: p)
             routeFrame(ScoredFrame(pcm: frame, p: p))
             publishState()
         }
+    }
+
+    private func noteLevels(_ frame: [Int16], p: Float) {
+        let db = levelDb(frame)
+        levels.frames += 1
+        if p >= 0.5 { levels.speechFrames += 1 }
+        levels.sumDb += db
+        levels.maxDb = max(levels.maxDb, db)
+        let seconds = Double(levels.frames) * HandsFreeAudio.frameMs
+        guard seconds >= (firstLevels ? Self.firstLevelsMs : Self.levelsReportMs) else { return }
+        let report: [String: Any] = [
+            "detector": scorer.name, "seconds": Int(seconds / 1000),
+            "speechPercent": 100 * levels.speechFrames / max(1, levels.frames),
+            "meanDb": Int((levels.sumDb / Double(max(1, levels.frames))).rounded()), "maxDb": Int(levels.maxDb.rounded()),
+            "phase": phase.rawValue,
+        ]
+        deps.record("levels", report)
+        if levels.maxDb <= -119 {
+            // Exact zeros: a microphone that is off (a closed lid) or muted, not a quiet room.
+            deps.log("the source is sending only digital silence — a closed lid, or a muted input?")
+            deps.record("silent-input", ["seconds": Int(seconds / 1000)])
+        }
+        if firstLevels {
+            deps.log("first \(report["seconds"] ?? 0)s heard: \(report["speechPercent"] ?? 0)% speech, mean \(report["meanDb"] ?? 0) dB, "
+                     + "peak \(report["maxDb"] ?? 0) dB (\(scorer.name))")
+        }
+        firstLevels = false
+        levels = (0, 0, 0, -120)
     }
 
     /// How far the quiet has got towards ending the dictation (0…1), nil with none.

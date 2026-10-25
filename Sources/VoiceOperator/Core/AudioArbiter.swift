@@ -1065,6 +1065,14 @@ final class AudioArbiter {
         if OutputDevice.isWireless {
             narrationDucker.stop()
             if announce { Log.log("tts ducking: off on Bluetooth output — \(OutputDevice.summary)") }
+        } else if recorder.hasListener {
+            // Hands-free holds the microphone. The ducker's Voice Processing I/O graph
+            // takes the input device as it starts and stops: every reply was two
+            // configuration changes, each tearing the held microphone down (its light
+            // going off, audio cutting out), and three in 30 s stood the hold down
+            // altogether. Listening through speech matters more than ducking other audio.
+            narrationDucker.stop()
+            if announce { Log.log("tts ducking: off while hands-free holds the microphone") }
         } else {
             narrationDucker.start()
         }

@@ -209,6 +209,20 @@ final class HandsFreeStreamTests: XCTestCase {
         XCTAssertEqual(t.types(t.take()), ["hello"])
     }
 
+    func testVoiceOperatorRestartingKeepsItOnAndStartsAfreshOnTheNextConnection() {
+        let t = FakeTransport()
+        t.stream.transportOpened()
+        t.stream.start()
+        t.vo(["type": "session", "source": "stream", "session": "s1"])
+        t.vo(["type": "session-ended", "why": "restarting"])
+        XCTAssertNil(t.stream.sessionID)
+        XCTAssertTrue(t.stream.isOn)
+        t.stream.transportClosed()
+        _ = t.take()
+        t.stream.transportOpened()
+        XCTAssertEqual(t.types(t.take()), ["hello", "start"])
+    }
+
     func testStopSendsStopAndForgets() {
         let t = FakeTransport()
         t.stream.transportOpened()

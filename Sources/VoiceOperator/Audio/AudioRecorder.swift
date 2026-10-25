@@ -357,6 +357,9 @@ final class AudioRecorder: @unchecked Sendable {
 
     // MARK: - Holding the microphone open
 
+    /// Whether hands-free is listening (`setListener`).
+    var hasListener: Bool { lock.withLock { listener != nil } }
+
     /// Hand every buffer the microphone delivers to `handler`, as 16 kHz s16le
     /// mono, until called with nil. Holds the microphone open meanwhile, whatever
     /// the always-on preference says, and a dictation records alongside as usual.

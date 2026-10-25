@@ -128,6 +128,8 @@ public final class HandsFreeStream {
             }
         case "session-ended":
             endSession()
+            // Voice Operator is quitting to restart: still on, so the next connection starts afresh.
+            if message["why"] as? String == "restarting" { isOn = true }
         default:
             break
         }

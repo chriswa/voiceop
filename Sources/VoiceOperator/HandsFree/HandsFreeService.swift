@@ -125,10 +125,12 @@ final class HandsFreeService: @unchecked Sendable {
         Task { [turnDetector] in await turnDetector.warm() }
     }
 
+    /// Voice Operator is quitting — usually to restart: `restarting` tells
+    /// clients it is not their doing, so they may wait for it to come back.
     func stop() {
         queue.sync {
-            for session in streams.values { end(session, why: "off") }
-            if let mac { for client in mac.engine.clients { stopMac(client, why: "off") } }
+            for session in Array(streams.values) { end(session, why: "restarting") }
+            if let mac { for client in mac.engine.clients { stopMac(client, why: "restarting") } }
             listener?.cancel()
             listener = nil
         }
@@ -349,6 +351,10 @@ final class HandsFreeService: @unchecked Sendable {
         if case .state(let phase, _, _, _, _) = outgoing.event {
             setBusy("mac", phase == .hearing || phase == .sending)
         }
+        // "Let me turn this off" ends hands-free hands-free: after the words and the cue have gone.
+        if case .transcript(_, _, _, _, true) = outgoing.event, let client = outgoing.client {
+            queue.async { [weak self] in self?.stopMac(client, why: "shutdown") }
+        }
     }
 
     // MARK: - Streams
@@ -378,6 +384,11 @@ final class HandsFreeService: @unchecked Sendable {
             session.connection?.send(Self.wire(outgoing.event))
             if case .state(let phase, _, _, _, _) = outgoing.event {
                 self.setBusy(id, phase == .hearing || phase == .sending)
+            }
+            if case .transcript(_, _, _, _, true) = outgoing.event {
+                self.queue.async { [weak self, weak session] in
+                    if let self, let session { self.end(session, why: "shutdown") }
+                }
             }
         }
         let created = StreamSession(id: id, client: client, device: connection.device, engine: engine, resampler: resampler)

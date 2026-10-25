@@ -853,13 +853,13 @@ dictation was under way: it is history, not the user talking now.
 
 | Message | Meaning |
 | --- | --- |
-| `session {source, session?}` / `session-ended {why}` | On / off: `off`, `replaced`, `lost`, `disconnected`, `incognito`, `unsupported_audio`. |
+| `session {source, session?}` / `session-ended {why}` | On / off: `off`, `shutdown` (said by voice), `replaced`, `lost`, `restarting` (Voice Operator is quitting — a client may keep hands-free on and start it again when it is back), `incognito`, `unsupported_audio`. |
 | `state {phase, conversation, closesAt, checking, pending}` | `phase`: `off`, `listening`, `hearing` (the user is being dictated — hold your own voice), `sending`. `closesAt` (wall ms) when the window closes if nobody speaks; null while held open. `pending`: speech that needs the trigger word is undecided — play a "deciding" beep while true. Sent on change. |
 | `gauge {quietSince, patienceMs, turn, threshold, sampling}` | While dictating: the quiet since `quietSince` (wall ms; null while they talk) ends it at `patienceMs`; `turn` is Smart Turn's latest answer, which ends it at `threshold`; `sampling` while it is being asked. Data points, sent on change — animate between them. |
 | `cue {name, haptic?}` | `ready`, `dictationStart` (tap), `dictationEnd` (double), `notWakeWord`, `conversationClosed` (triple), `shutdown`, `error`. The client decides how each sounds or feels. |
 | `duck {on}` | Turn the client's voice down (someone is talking over it) or back up. |
 | `cut-in {msAgo, at}` | The user cut the client's voice off: they began `msAgo` ms ago (`at`, wall ms), which is as far as they heard it. |
-| `transcript {text, trigger, interrupted, reason, shutdown}` | The dictation, trigger word included — strip it yourself. Empty when nothing was caught; `interrupted`: it cut the client's voice off (with empty text: say you had not finished, and carry on). `shutdown`: "let me turn this off" or "<trigger>, shutdown" — the window has closed. |
+| `transcript {text, trigger, interrupted, reason, shutdown}` | The dictation, trigger word included — strip it yourself. Empty when nothing was caught; `interrupted`: it cut the client's voice off (with empty text: say you had not finished, and carry on). `shutdown`: "let me turn this off" or "<trigger>, shutdown" — hands-free turns itself off: `session-ended {why:"shutdown"}` follows. |
 | `ack {at}`, `resumed {session, at}` | Stream bookkeeping, above. |
 
 ## Incognito mode (2026-10-13)

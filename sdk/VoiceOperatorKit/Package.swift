@@ -7,7 +7,8 @@ import PackageDescription
 
 let package = Package(
     name: "VoiceOperatorKit",
-    platforms: [.iOS(.v16), .macOS(.v14)],
+    // iOS 17: the engine asks for the microphone through AVAudioApplication.
+    platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
         .library(name: "VoiceOperatorHandsFree", targets: ["VoiceOperatorHandsFree"]),
         .library(name: "VoiceOperatorAudio", targets: ["VoiceOperatorAudio"]),

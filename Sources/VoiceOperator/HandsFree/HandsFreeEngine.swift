@@ -445,11 +445,13 @@ final class HandsFreeEngine: @unchecked Sendable {
                 case .ended(let reason): end(reason == .silence ? .silence : .tooLong)
                 case .resumed:
                     closePause(utterance, outcome: "resumed")
+                    utterance.miniPeak = nil
                     pauseOver()
                 case .pause(let talkMs, let wakeWordOnly):
                     // The pause's line: what turn-1-mini says from here on, and Smart Turn's one answer.
                     utterance.pause = PauseRecord(talkMs: talkMs, wakeWordOnly: wakeWordOnly, at: utterance.audio.count,
-                                                  miniAtPause: utterance.miniLatest)
+                                                  miniAtPause: utterance.miniLatest, miniPeak: utterance.miniLatest,
+                                                  miniPeakMs: utterance.miniLatest == nil ? nil : Int(tuning.pauseCheckMs))
                     utterance.miniPeak = utterance.miniLatest
                     if wakeWordOnly {
                         // "Control." and a breath: the turn model would call that finished. Wait for the rest.
@@ -679,7 +681,6 @@ final class HandsFreeEngine: @unchecked Sendable {
     private func pauseOver() {
         stopSampling()
         utterance?.turn = nil
-        utterance?.miniPeak = nil
     }
 
     /// Feed turn-1-mini the dictation's audio; keep its latest answer, and its

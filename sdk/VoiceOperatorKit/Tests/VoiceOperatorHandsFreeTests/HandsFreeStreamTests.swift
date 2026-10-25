@@ -194,9 +194,8 @@ final class HandsFreeStreamTests: XCTestCase {
         t.stream.transportOpened()
         t.stream.start()
         t.vo(["type": "session", "source": "stream", "session": "s1"])
-        t.stream.transportClosed()
-        t.stream.transportOpened()
         _ = t.take()
+        // Ended by Voice Operator while live (not a resume refused: that starts afresh).
         t.vo(["type": "session-ended", "why": "lost"])
         XCTAssertNil(t.stream.sessionID)
         XCTAssertFalse(t.stream.isOn)
@@ -221,6 +220,23 @@ final class HandsFreeStreamTests: XCTestCase {
         _ = t.take()
         t.stream.transportOpened()
         XCTAssertEqual(t.types(t.take()), ["hello", "start"])
+    }
+
+    func testAResumeTooLateStartsAFreshSessionWithoutTellingTheApp() {
+        let t = FakeTransport()
+        t.stream.transportOpened()
+        t.stream.start()
+        t.vo(["type": "session", "source": "stream", "session": "s1"])
+        t.stream.transportClosed()
+        t.stream.transportOpened()
+        XCTAssertEqual(t.types(t.take()).suffix(1), ["resume"])
+        let events = t.events.count
+        t.vo(["type": "session-ended", "why": "lost"])
+        XCTAssertTrue(t.stream.isOn)
+        XCTAssertEqual(t.types(t.take()), ["start"])
+        XCTAssertEqual(t.events.count, events, "the app is not told hands-free ended")
+        t.vo(["type": "session", "source": "stream", "session": "s2"])
+        XCTAssertEqual(t.stream.sessionID, "s2")
     }
 
     func testStopSendsStopAndForgets() {

@@ -127,6 +127,14 @@ public final class HandsFreeStream {
                 if playingNow.on { sendPlaying() }
             }
         case "session-ended":
+            // Too late to resume (Voice Operator kept it 10 s; the way back took longer — a
+            // server restart): still on, so a new session, unnoticed by the app.
+            if resuming, isOn, message["why"] as? String == "lost" {
+                endSession()
+                isOn = true
+                if connected { sendStart() }
+                return
+            }
             endSession()
             // Voice Operator is quitting to restart: still on, so the next connection starts afresh.
             if message["why"] as? String == "restarting" { isOn = true }

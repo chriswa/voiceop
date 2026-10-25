@@ -228,7 +228,7 @@ CAVEATS:
 
 In:
 - **Dictation**: hold-to-talk + double-tap-to-toggle (+ ⌘ mid-hold to promote a hold to
-  hands-free), transcription pasted into the focused
+  a transcribe lock), transcription pasted into the focused
   app, with matched start/stop/**pasted** SFX.
 - **Claude Code narration**: watch transcripts, summarize each completed turn, speak it in a
   sticky per-session name+voice ("Waldo here. …"), forward speaking events to spaceterm.
@@ -360,7 +360,7 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
 - **Trigger-key timing.** Recording begins on key-**down**, never after a hold threshold. The
   hold-vs-tap-vs-double-tap ambiguity is resolved on the *stop* side instead: a release inside
   `lockWindow` (500 ms, Wispr's `DICTATION_DEBOUNCE_DELAY`) keeps recording until the window
-  closes, and a second press inside it locks hands-free. Audio we turn out not to need is free;
+  closes, and a second press inside it sets transcribe lock. Audio we turn out not to need is free;
   audio we failed to capture is gone. The old 250 ms `holdThreshold` was the main cause of
   dropped opening words. Consequently the start cue now fires on the first real microphone
   buffer (`AudioRecorder.onFirstAudio`) rather than on key-down — it means "safe to talk", so
@@ -528,15 +528,15 @@ cues fire back to back and no dictation runs.
 Note the failure mode: a slow key path does not merely feel laggy, it makes the
 gesture recogniser read a *different gesture* than the one performed.
 
-#### Locking hands-free mid-dictation — ⌘ while holding the trigger (2026-08-18)
+#### Transcribe lock mid-dictation — ⌘ while holding the trigger (2026-08-18)
 
 There are three ways to run a dictation, and the third exists because the choice
 between the first two has to be made *before* you know how long you will talk:
 
 1. **Hold** Fn, speak, release — push-to-talk.
-2. **Double-tap** Fn, speak, tap Fn — hands-free.
+2. **Double-tap** Fn, speak, tap Fn — transcribe lock.
 3. **Hold** Fn, speak, **tap ⌘ while still holding**, release Fn, keep speaking,
-   tap Fn to end — a push-to-talk promoted to hands-free without interrupting it.
+   tap Fn to end — a push-to-talk promoted to transcribe lock without interrupting it.
 
 The third is the same `.locked` gesture state as the second, just reached later, so
 nothing downstream of `HotkeyMonitor` knows the difference: one dictation, one
@@ -559,7 +559,7 @@ thinks of it.
 #### Stop tail — 500 ms more after Fn ends a dictation (2026-10-20)
 
 When Fn itself ends a dictation (releasing a push-to-talk hold, or the press that
-ends a hands-free lock), recording continues for `stopTail` (500 ms) before
+ends a transcribe lock), recording continues for `stopTail` (500 ms) before
 `onStop` fires, because users tend to end a fraction early and clip their last
 word. The gesture sits in `.stopping` meanwhile and ignores Fn. Stops that are not
 the user's key — the `lockWindow` timer after a lone quick tap, tap-disable
@@ -593,7 +593,7 @@ Three things the mechanism has to get right:
 1. **The state is ephemeral and per-dictation.** It lives on the `LiveDictation`
    and is latched at key-up alongside the mode, for the same reason: the transcript
    lands long after this dictation stopped being the current one.
-2. **Shift is not cycled on key-down.** During a hands-free locked dictation the
+2. **Shift is not cycled on key-down.** During a transcribe-locked dictation the
    user is free to type, and Shift is the most-pressed modifier there is — every
    shift-selection and every capital letter would silently reshape the transcript.
    A press only *arms* the gesture; any other key, click, or modifier change while

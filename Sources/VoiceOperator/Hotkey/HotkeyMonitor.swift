@@ -21,9 +21,9 @@ import IOKit.hid
 ///   • **Hold** the key → push-to-talk: dictate while held, stop on release.
 ///   • **Quick tap then release** → recording keeps running until `lockWindow`
 ///     has elapsed since key-down, in case a second press is coming.
-///   • **Second press inside that window** → hands-free lock: keep dictating
+///   • **Second press inside that window** → transcribe lock: keep dictating
 ///     until the next press stops it.
-///   • **⌘ pressed while the key is held** → the same hands-free lock, decided
+///   • **⌘ pressed while the key is held** → the same transcribe lock, decided
 ///     mid-dictation: release the trigger whenever you like and keep talking
 ///     until the next press stops it. See `trackCommandLock`.
 ///
@@ -41,7 +41,7 @@ import IOKit.hid
 ///
 /// Set `tapToToggle` (from the menu preference) and the trigger drops to a
 /// single model: **every key-down flips recording on or off, and key-up is
-/// ignored.** A first press starts dictating hands-free and the next press
+/// ignored.** A first press starts a locked dictation and the next press
 /// stops it, so a hold, a tap and a double-tap all collapse to "press to start,
 /// press to stop" (a double-tap being a quick start immediately stopped). It is
 /// implemented as one change — a first press enters `.locked` rather than
@@ -249,13 +249,13 @@ final class HotkeyMonitor: @unchecked Sendable {
     private static let otherModifierBits: UInt64 = (0x00FF_0000 | 0x0000_207F) & ~leftShiftBit
 
     /// The **generic** Command bit (`NSEvent.ModifierFlags.command`). Either
-    /// Command key locks a dictation hands-free, so unlike left Shift there is
+    /// Command key locks a dictation (transcribe lock), so unlike left Shift there is
     /// nothing here to tell apart — see `trackCommandLock`.
     private static let commandBit: UInt64 = 0x0010_0000
 
     /// A left-Shift press that is still a candidate for a style-cycling *tap*.
     ///
-    /// Cycling on Shift **down** would be a trap: during a hands-free locked
+    /// Cycling on Shift **down** would be a trap: during a transcribe-locked
     /// dictation the user is free to type, and Shift is the most-pressed modifier
     /// there is — every shift-selected range and every capital letter would
     /// silently change the transcript's shape. So a press only arms the gesture,
@@ -298,7 +298,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         /// Recording, key released inside `lockWindow`. Still going, because a
         /// second press may yet arrive to lock it on; `stopTimer` stops it if not.
         case awaitingLock
-        /// Recording hands-free. The next key press ends it.
+        /// Recording under transcribe lock. The next key press ends it.
         case locked
         /// Recording, key has asked to stop; `stopTimer` stops it after
         /// `stopTail`. Key events are ignored until then.
@@ -490,7 +490,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         if shiftArmed, others != shiftArmFlags { shiftArmed = false }
     }
 
-    /// Promote a push-to-talk hold to a hands-free lock when Command is pressed
+    /// Promote a push-to-talk hold to a transcribe lock when Command is pressed
     /// while the trigger key is still down. It is the third way to reach `.locked`
     /// — and the only one available *after* you have started talking, so a
     /// dictation that turns out to be longer than a hold is comfortable for does
@@ -517,7 +517,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         commandDown = down
         guard down, gesture == .holding else { return }
         gesture = .locked
-        Log.log("hotkey: ⌘ pressed while holding the trigger — dictation locked hands-free")
+        Log.log("hotkey: ⌘ pressed while holding the trigger — dictation transcribe-locked")
     }
 
     private func keyDown(at timestamp: UInt64) {
@@ -545,7 +545,7 @@ final class HotkeyMonitor: @unchecked Sendable {
                 self.onStart?(decision, trace)
             }
         case .awaitingLock:
-            // Second press inside the window: hands-free from here on.
+            // Second press inside the window: transcribe lock from here on.
             cancelStopTimer()
             gesture = .locked
         case .locked:

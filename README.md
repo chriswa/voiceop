@@ -192,7 +192,7 @@ Two modes, chosen by whether **Control** is held when you start:
   to the app registered for commands (never pasted; see below). A distinct
   start/stop chirp signals command mode; a "sad" chirp means nobody took it.
 
-Each mode supports **hold** (push-to-talk) and **double-tap** (hands-free; next
+Each mode supports **hold** (push-to-talk) and **double-tap** (transcribe lock; next
 press stops).
 
 Set System Settings → Keyboard → "Press 🌐 key to" = **Do Nothing** so Fn doesn't

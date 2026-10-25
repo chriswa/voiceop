@@ -557,18 +557,6 @@ public final class VoiceAudioEngine {
             return Started(player: player, voiceProcessing: false, voiceProcessingError: nil, sampleRate: 0, ms: ms())
         }
         options.formUnion([.defaultToSpeaker, .allowBluetooth])
-        /**
-         * A dictation asks for the AirPods' high-quality recording in its one
-         * category change, before activating, rather than in a second one
-         * after seeing 48 kHz. The second cost about two seconds and swung the
-         * route to the earpiece on the way (October 25, 19:00:55); re-activating
-         * for 24 kHz instead cost about 2.3 s a try, flipping Spotify in and out
-         * each time — three tries took 11 s (19:02:39). A tap's microphone must
-         * come up at once, at whatever rate the AirPods pick. (Asked for this way
-         * on October 12, a hands-free start that followed came up dead; hands-free
-         * now sets its own category without it, and never takes 48 kHz.)
-         */
-        if plan.dictation, #available(iOS 26.0, *) { options.insert(.bluetoothHighQualityRecording) }
         try session.setCategory(.playAndRecord, mode: .default, options: options)
         // iOS silences haptics while recording unless told otherwise; hands-free's cue is one.
         try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
@@ -629,7 +617,34 @@ public final class VoiceAudioEngine {
             highQuality["supportedAtActivation"] = bluetooth.highQualityRecording.isSupported
             highQuality["enabledAtActivation"] = bluetooth.highQualityRecording.isEnabled
         }
-        if plan.dictation, #available(iOS 26.0, *) { highQuality["asked"] = true }
+        /**
+         * A dictation that came up on the AirPods' 48 kHz link asks for their
+         * high-quality recording, without which that link sends only exact
+         * zeros (every such start, October 13–25). Only then: asked for up
+         * front, every start paid for it — 3.2–4.2 s against about 1 s for a
+         * plain one, at 24 kHz or 48 (October 25) — and about half come up at
+         * 24 kHz without it. Re-activating for 24 kHz instead costs about
+         * 2.3 s a try, flipping Spotify in and out (three tries: 11 s,
+         * 19:02:39); that is hands-free's way, not a tap's.
+         */
+        if plan.dictation, #available(iOS 26.0, *), session.sampleRate > Self.voiceProcessingRate,
+           isBluetooth(session.currentRoute.inputs.first) {
+            highQuality["asked"] = true
+            highQuality["rateBefore"] = session.sampleRate
+            let asked = Date()
+            do {
+                try session.setCategory(.playAndRecord, mode: .default, options: options.union(.bluetoothHighQualityRecording))
+                try session.setActive(true)
+            } catch {
+                highQuality["refused"] = error.localizedDescription
+            }
+            highQuality["ms"] = Int(Date().timeIntervalSince(asked) * 1000)
+            if let port = session.currentRoute.inputs.first, let bluetooth = port.bluetoothMicrophoneExtension {
+                highQuality["supported"] = bluetooth.highQualityRecording.isSupported
+                highQuality["enabled"] = bluetooth.highQualityRecording.isEnabled
+            }
+            highQuality["rateAfter"] = session.sampleRate
+        }
         let input = engine.inputNode
         /**
          * Voice processing over a Bluetooth route faster than 24 kHz sent only

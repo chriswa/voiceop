@@ -1,6 +1,6 @@
 # Hands-free in Voice Operator — migration plan (2026-10-24)
 
-Status: **plan, under review.** Nothing here is built yet.
+Status: **plan, reviewed 2026-10-24** (findings folded in below). Nothing here is built yet.
 
 ## Goal
 
@@ -83,7 +83,7 @@ VO:
 
 | VO (Mac) | iOS SDK (phone, VO's code) | Client (Spaceterm) |
 |---|---|---|
-| Speech detection (Silero via FluidAudio), the quiet-before rule, trigger check against all registered words, routing | Audio session, mic capture with echo cancellation, config-change recovery | Register trigger word; turn hands-free on/off and choose where (Mac or a phone) |
+| Speech detection (Spaceterm's Silero ONNX model, 32 ms frames), the quiet-before rule, trigger check against all registered words, routing | Audio session, mic capture with echo cancellation, config-change recovery | Register trigger word; turn hands-free on/off and choose where (Mac or a phone) |
 | Conversation window, shutdown phrases | One player: VO speech + client audio mixed in software, ducking | Buttons and gauges, animated locally from data points |
 | Endpointing: silence patience + Smart Turn | Streaming with sequence numbers, ack, resume buffer | Play cues / haptics for VO's signals |
 | Transcription via the user's provider, fed from the start of speech | Transport-agnostic: the app supplies send/receive bytes | Strip the trigger word; run Control on transcripts |
@@ -137,18 +137,19 @@ Each phase leaves both apps working.
 1. **Connection + registration** in VO (held socket, hello, trigger words,
    sessions, signals plumbing), with a CLI live-test (`--hands-free-test`).
    Spaceterm server registers `control` and relays VO's events to its clients.
-2. **Mac hands-free in VO, silence-only endpointing.** Port the listener state
-   machine (`SpeechGate`, `WakeListener`, `UtteranceEndpointer`, conversation
-   window, shutdown phrases, filler words) to Swift on `AudioRecorder`'s
-   always-on capture, Silero from FluidAudio. Wake check is `WakeWordCheck` with
+2. **Mac hands-free in VO, silence-only endpointing.** Pre-work: the second
+   microphone consumer and the open-mic stale-engine fix (see "Decisions from
+   review"). Port the listener state machine (`SpeechGate`, `WakeListener`,
+   `UtteranceEndpointer`, conversation window, shutdown phrases, filler words)
+   to Swift on that consumer, Silero on ONNX Runtime. Wake check is `WakeWordCheck` with
    all registered words. Transcription through `TranscriptionProvider`, fed the
    backlog from speech start then live. Fn dictation preempts. Decision record
    (`hands-free/decisions.jsonl` + clips, newest 400) behind `Incognito`.
    Spaceterm's Mac button switches to VO; `desktop-hands-free.ts` removed.
-   **Regression check:** replay Spaceterm's 400 kept clips and
-   `voice-decisions.jsonl` through VO's listener and compare decisions.
+   **Regression check:** replay Spaceterm's 400 kept clips through the wake
+   check and compare with `voice-decisions.jsonl`.
 3. **Smart Turn in VO.** Run the same `smart-turn-v3.2-cpu.onnx` (pinned URL and
-   hash, as Spaceterm does) with ONNX Runtime's Swift package; port
+   hash, as Spaceterm does) on the ONNX Runtime brought in by phase 2; port
    `whisperFeatures` and its reference tests from `turn-detector.test.ts`.
 4. **iOS SDK + phone through VO.** Swift package: engine and session handling
    moved from `NativeMicrophone.swift`, one player with software mixing, stream
@@ -169,7 +170,81 @@ Each phase leaves both apps working.
    onnxruntime dependencies. VO keeps `/v1/wake-word` for one release, then
    removes it.
 
-## Open questions for review
+## Decisions from review
+
+- **Silero runs as Spaceterm runs it**, not through FluidAudio. FluidAudio's
+  CoreML Silero takes 256 ms chunks (`VadManager.chunkSize` 4096); every
+  hands-free constant is built on 32 ms frames (start 0.5 / stop 0.35, two
+  start frames, five hangover frames, `wordMinMs` 250). VO runs
+  `silero_vad_16k_op15.onnx` (512-sample frames, 64-sample context, state
+  `[2,1,128]`) on ONNX Runtime's Swift package, which therefore arrives in
+  phase 2, not 3. Models download at prewarm, never at first "on".
+- **Hands-free reads the microphone through its own consumer.** The always-on
+  tap drops every buffer outside a recording (`AudioRecorder.handleTap`) and a
+  second `start()` throws, so hands-free never calls `recorder.start()`: it gets
+  a second, recording-independent consumer feeding an 8 s ring buffer. A Fn
+  dictation then records normally beside it, and hands-free stands aside while
+  it does. Hands-free forces the hold on (overriding the AirPods-only
+  preference and the stand-down limiter) and is told when the hold gives up.
+  `replaceEngineIfStale` only runs while the mic is closed; with hands-free
+  holding it open on AirPods, the post-TTS stale-engine failure needs a fix
+  that works with the mic open. This is pre-work for phase 2.
+- **A hands-free dictation is not an `AudioArbiter` dictation.** That path
+  halts speech, mutes output and interrupts the speech job; the conversation
+  window needs Control to keep talking while VO listens. Hands-free builds its
+  own session on `TranscriptionLeg`, as `RemoteTranscriptionManager` does: it
+  holds cooperative restarts, mutes nothing, fires no `voice-dictation` event.
+  VO sends `phase hearing` at its start and the transcript at its end; Spaceterm
+  maps those to Control's "user is speaking" hold (today's `forControl`).
+- **VO takes over Spaceterm's judging**, not only `WakeWordCheck`: the trigger
+  words, the filler list, `wakeFreeShutdown` (start-of-phrase → watch the whole
+  utterance), "lemme". One `SpeechTranscriber` analyzer is kept warm while a
+  session is on.
+- **Incognito ends hands-free.** Turning it on ends every session
+  (`session-ended {why: incognito}`); `hands-free on` is refused while it is on.
+  (Today the checks are already refused, so the microphone listens for nothing.)
+- **Phone timing.** VO converts stream time to Mac wall time (arrival minus the
+  unprocessed backlog) for `heard_until`, capped as today (10 s). A gap over
+  ~2 s resets the listener (`listener.resume()` semantics): late audio is
+  transcribed if a dictation was already under way, but never starts a new one
+  or cuts Control off retroactively.
+- **Audio is opus from the start of phase 4**, in binary frames — raw base64
+  PCM would be ~340 kbit/s through Spaceterm's server event loop.
+- **The SDK is a separate Swift package** (VO's `Package.swift` links libopus
+  with `unsafeFlags`, which SwiftPM refuses in a remote dependency). A small
+  platform-agnostic protocol target is shared, VO depending on it by path.
+- **Mac on speakers:** while VO's own speech plays on a non-headphone output,
+  hands-free stands aside (plus the playback tail); voice cut-in works on
+  headsets only — today's assumption, made explicit. VO's speech now also holds
+  the conversation window open on the Mac, which it cannot do today.
+- **A duplicate trigger word is refused**, keyed on the held connection, so a
+  test instance can never take `control` from the real one.
+- **Between phases 2 and 6**, Spaceterm picks one source per device, so VO's Mac
+  hands-free and the old phone path never both answer the same "control". The
+  empty-text and `interrupted` semantics of today's `receptionist-hands-free`
+  are kept by `transcript {text: "", interrupted}`.
+- **Phase 1 is real infrastructure:** VO has no Unix-socket server (subscriber
+  sockets are one connection per message; the HTTP service is `NWListener` TCP).
+  Framing, duplex and audio backpressure are built there.
+- **The SDK carries over `NativeMicrophone.swift`'s rules** as a checklist:
+  pending tone only on an idle player, cut by a cue or speech; headphones mean
+  no voice processing, duck-others and `echoFree`; echo-cancelled speech volume
+  compensation; Spotify ducking while dictating (now driven by VO's `phase`);
+  the half-second session release before hands-free; the `hands-free-echo`
+  record; the 48 kHz wide-Bluetooth zero-audio rule.
+- **Tests:** the listener is pure Swift, with synthetic-frame tests mirroring
+  `wake-listener.test.ts` and `hands-free.test.ts`. The 400 kept clips replay
+  the wake check and Smart Turn only — they are 1 s and 8 s snippets, not
+  continuous audio.
+
+## Still open (taken with the user one at a time)
+
+- A baseline of continuous hands-free sessions recorded before the port, for
+  replaying start/end-of-speech decisions.
+- Parakeet transcribes only at commit (`ParakeetSession.send` just appends), so
+  a long hands-free utterance waits for one whole-clip transcription at the end.
+
+## Open questions as first written (resolved above)
 
 - **Mac without a headset.** Spaceterm's Mac hands-free assumes a headset. VO
   plays Control's voice; through built-in speakers the microphone hears it and

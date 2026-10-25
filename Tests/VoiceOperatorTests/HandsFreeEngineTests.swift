@@ -348,6 +348,30 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.transcripts.first?.interrupted, true)
     }
 
+    func testRecordsPerReplyHowMuchOfTheClientsVoiceGotPastEchoCancellation() {
+        // In the conversation window, where any words cut the client off.
+        let h = harness(justTurnedOn: true) { $0.heard = { _ in "I hadn't finished." } }
+        h.state.clientSpeaking = true
+        h.hear(Sound.quiet(700), Sound.speech(1500), Sound.quiet(500))
+        h.state.clientSpeaking = false
+        h.hear(Sound.quiet(100))
+        let echo = h.recorded("echo").first
+        XCTAssertEqual(echo?["ducks"] as? Int, 1)
+        XCTAssertEqual(echo?["cutIns"] as? Int, 1)
+        XCTAssertGreaterThan(echo?["speechPercent"] as? Int ?? 0, 40)
+        XCTAssertEqual(Double(echo?["firstSpeechMs"] as? Int ?? 0), 700, accuracy: 70)
+        let interrupt = h.recorded("interrupt").first
+        XCTAssertEqual(interrupt?["heard"] as? String, "I hadn't finished.")
+        XCTAssertEqual(Double(interrupt?["intoReplyMs"] as? Int ?? 0), 700, accuracy: 100)
+        // A reply heard in silence: nothing got past.
+        h.state.clientSpeaking = true
+        h.hear(Sound.quiet(1000))
+        h.state.clientSpeaking = false
+        h.hear(Sound.quiet(100))
+        XCTAssertEqual(h.recorded("echo").last?["speechPercent"] as? Int, 0)
+        XCTAssertNil(h.recorded("echo").last?["firstSpeechMs"])
+    }
+
     func testDatesTheCutToWhenTheyBeganTalking() {
         let h = harness { $0.slowChecks = true }
         h.state.clientSpeaking = true

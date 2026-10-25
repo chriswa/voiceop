@@ -488,7 +488,11 @@ final class HandsFreeEngine: @unchecked Sendable {
             // From the first syllable, in audio heard — so a check that took a while costs none of it.
             let msAgo = Int(listener.msSince(candidate.start).rounded())
             deps.log("\(window ? "words" : "the trigger word") over the client's voice: cutting it off as of \(msAgo)ms ago")
-            deps.record("interrupt", ["mode": window ? "speech" : "wake-word", "cutInMsAgo": msAgo])
+            var detail: [String: Any] = ["mode": window ? "speech" : "wake-word", "cutInMsAgo": msAgo, "heard": heard]
+            // How far into the reply they began: echo leaking through cancellation starts early, and the same each time.
+            if let e = echo { detail["intoReplyMs"] = max(0, Int(Double(e.frames) * HandsFreeAudio.frameMs) - msAgo) }
+            echo?.cutIns += 1
+            deps.record("interrupt", detail)
             emit(client, .cutIn(msAgo: msAgo))
         }
         respond(candidate, client: client, trigger: verdict.trigger, interrupted: interrupting,
@@ -733,6 +737,8 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// check is pending.
     private func trackPlayback(_ frame: ScoredFrame, speaking: Bool) {
         guard speaking else {
+            if let echo { recordEcho(echo) }
+            echo = nil
             setDuck(false)
             speechRun = 0
             quietRun = 0
@@ -747,11 +753,69 @@ final class HandsFreeEngine: @unchecked Sendable {
         }
         if !ducked, speechRun >= SpeechGate.startFrames { setDuck(true) }
         unduckIfDone()
+        noteEcho(frame)
+    }
+
+    /// What the source heard while the client's voice played through echo
+    /// cancellation, one reply at a time: how much of it still sounded like
+    /// speech, how loud, and how soon — the record that says whether
+    /// interrupting by voice can work on this device, and why the client's
+    /// voice was cut off when nobody spoke. Spaceterm's page kept it as
+    /// `hands-free-echo` before hands-free moved here.
+    private struct Echo {
+        var frames = 0
+        var speechFrames = 0
+        var run = 0
+        var longestRun = 0
+        /// Frames into the reply when speech was first heard.
+        var firstSpeechFrame: Int?
+        var sumDb = 0.0
+        var maxDb = -120.0
+        var ducks = 0
+        var cutIns = 0
+    }
+    private var echo: Echo?
+
+    private func noteEcho(_ frame: ScoredFrame) {
+        var e = echo ?? Echo()
+        let db = levelDb(frame.pcm)
+        e.frames += 1
+        e.sumDb += db
+        e.maxDb = max(e.maxDb, db)
+        if frame.p >= SpeechGate.start {
+            e.speechFrames += 1
+            e.run += 1
+            e.longestRun = max(e.longestRun, e.run)
+            if e.firstSpeechFrame == nil { e.firstSpeechFrame = e.frames - 1 }
+        } else {
+            e.run = 0
+        }
+        echo = e
+    }
+
+    private func recordEcho(_ e: Echo) {
+        let ms = { (frames: Int) in Int((Double(frames) * HandsFreeAudio.frameMs).rounded()) }
+        var detail: [String: Any] = [
+            "seconds": (Double(e.frames) * HandsFreeAudio.frameMs / 100).rounded() / 10,
+            "speechPercent": 100 * e.speechFrames / max(1, e.frames),
+            "longestSpeechMs": ms(e.longestRun),
+            "micMeanDb": Int((e.sumDb / Double(max(1, e.frames))).rounded()),
+            "micMaxDb": Int(e.maxDb.rounded()),
+            "ducks": e.ducks, "cutIns": e.cutIns,
+        ]
+        if let first = e.firstSpeechFrame { detail["firstSpeechMs"] = ms(first) }
+        deps.record("echo", detail)
+        if e.speechFrames > 0 {
+            deps.log("the client's voice played \(detail["seconds"] ?? 0)s through echo cancellation: "
+                     + "\(detail["speechPercent"] ?? 0)% still sounded like speech, the first at "
+                     + "\(detail["firstSpeechMs"] ?? 0)ms, peak \(detail["micMaxDb"] ?? 0) dB")
+        }
     }
 
     private func setDuck(_ on: Bool) {
         guard ducked != on else { return }
         ducked = on
+        if on { echo?.ducks += 1 }
         emit(conversationClient ?? owner, .duck(on))
         deps.record("duck", ["on": on])
     }

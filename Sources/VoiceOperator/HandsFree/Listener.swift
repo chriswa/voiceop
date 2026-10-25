@@ -52,9 +52,12 @@ struct HandsFreeTuning: Sendable, Equatable {
         pauseCheckMs: 200,
         turnThreshold: 0.75,
         wakeWordOnlyMs: 1500,
-        afterWakeWordMs: 5000,
+        // Capped at 4 s, like the silence timeout below (October 25): five felt endless.
+        afterWakeWordMs: 4000,
         endSilenceMinMs: 3000,
-        endSilenceMaxMs: 20_000,
+        // Spaceterm let a monologue's patience grow to 20 s; waited out, even 5 s was
+        // too long (October 25). It grows from 3 s to 4 s at most.
+        endSilenceMaxMs: 4000,
         endSilenceRampMs: 300_000,
         maxUtteranceMs: 600_000,
         playbackTailMs: 400,

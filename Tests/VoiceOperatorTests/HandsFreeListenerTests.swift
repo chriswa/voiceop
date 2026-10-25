@@ -162,7 +162,7 @@ final class HandsFreeListenerTests: XCTestCase {
 
     func testMeasuresTheQuietAfterControlAloneAgainstTheLongerWaitForTheRest() {
         let endpointer = UtteranceEndpointer(tuning: .standard, alreadyMs: 1800, alreadySpokeMs: 600)
-        _ = run(endpointer, silence(2500))
+        _ = run(endpointer, silence(2000))
         XCTAssertEqual(endpointer.silence(), 0.5, accuracy: 0.05)
     }
 
@@ -171,9 +171,11 @@ final class HandsFreeListenerTests: XCTestCase {
                           speech(2000), noise(3500)).contains("ended:silence"))
     }
 
-    func testWaitsFarLongerForTheNextThoughtDeepIntoAMonologue() {
+    func testWaitsLongerForTheNextThoughtDeepIntoAMonologue_butNoMoreThanFourSeconds() {
         XCTAssertEqual(run(UtteranceEndpointer(tuning: .standard, alreadyMs: 300_000, alreadySpokeMs: 200_000),
-                           speech(1000), silence(10_000)), ["pause"])
+                           speech(1000), silence(3700)), ["pause"])
+        XCTAssertEqual(run(UtteranceEndpointer(tuning: .standard, alreadyMs: 300_000, alreadySpokeMs: 200_000),
+                           speech(1000), silence(4100)), ["pause", "ended:silence"])
     }
 
     func testStopsAtTheCapAndOnlyEndsOnce() {
@@ -187,9 +189,9 @@ final class HandsFreeListenerTests: XCTestCase {
 
     func testEndSilenceGrowsFromTheMinimumToTheMaximumAtTheRampAndNoFurther() {
         XCTAssertEqual(endSilenceFor(talkMs: 0, tuning: .standard), 3000)
-        XCTAssertEqual(endSilenceFor(talkMs: 150_000, tuning: .standard), 11_500)
-        XCTAssertEqual(endSilenceFor(talkMs: 300_000, tuning: .standard), 20_000)
-        XCTAssertEqual(endSilenceFor(talkMs: 900_000, tuning: .standard), 20_000)
+        XCTAssertEqual(endSilenceFor(talkMs: 150_000, tuning: .standard), 3500)
+        XCTAssertEqual(endSilenceFor(talkMs: 300_000, tuning: .standard), 4000)
+        XCTAssertEqual(endSilenceFor(talkMs: 900_000, tuning: .standard), 4000)
     }
 
     // MARK: EnergyScorer, the fallback

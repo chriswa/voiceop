@@ -778,6 +778,80 @@ graph in offline rendering mode, including live rate changes and cross-sentence 
 
 ---
 
+## Hands-free (2026-10-24)
+
+Hands-free — always listening for a client's trigger word, dictating until the
+speaker is finished, a conversation window after — lives here. It moved from
+Spaceterm, which is now one client of it (`docs/hands-free-plan.md` has the
+migration and its decisions). Nothing listens until a client connects and asks,
+and nothing outlives the connection that asked.
+
+**Code.** `HandsFree/`: `HandsFreeService` (the socket, clients, sessions,
+sources), `HandsFreeEngine` (one source's state machine, ported from Spaceterm's
+`src/mobile/hands-free.ts`), `Listener` (speech gate, wake listener, utterance
+endpointer — `wake-listener.ts`), `Phrases` (trigger words, filler, shutdown
+phrases), `SileroVAD` and `SmartTurn` (the same ONNX models Spaceterm ran,
+on ONNX Runtime), `HandsFreeRecord` (the decision record). Live-test it with
+`--hands-free-test [text]`, which streams `say`-made speech as a phone would.
+
+**Sources.** The Mac's microphone — a second reader on `AudioRecorder`'s tap
+(`setListener`), which holds the microphone open while set and never touches a
+Fn recording beside it — is one source shared by every client that started a
+session there. A client's stream (a phone, through the iOS SDK) is a source of
+its own. One session per client: starting one ends its other.
+
+**When it does not listen.** On the Mac: during a Fn dictation; while Voice
+Operator speaks on the built-in speakers (and `playbackTailMs` after), because
+the microphone would hear it; while a client says it is `playing`. On a
+stream: while the device plays without echo cancellation. Voice cut-in on the
+Mac therefore needs a headset, as it did in Spaceterm.
+
+**Incognito** ends every session and refuses new ones: what hands-free hears
+goes to a client.
+
+### Protocol (version 1)
+
+Newline-delimited JSON over the Unix socket named in `speech-service.json` as
+`hands_free_socket` (`~/Library/Application Support/VoiceOperator/hands-free.sock`).
+Unknown fields are ignored.
+
+**Control connection** — one per client, held for as long as it wants
+hands-free:
+
+| Client sends | Meaning |
+| --- | --- |
+| `{"type":"hello","protocol":1,"client":"spaceterm","trigger":"control"}` | Register. `welcome` or `refused` (`protocol`, `invalid_client`, `invalid_trigger`, `client_taken`, `trigger_taken`) and the connection is closed. Registration lasts as long as the connection. |
+| `{"type":"start","source":"mac"}` | Hands-free on, on the Mac's microphone. Answered with `session`. |
+| `{"type":"stop"}` | Off, wherever it is on. |
+| `{"type":"playing","on":bool}` | The client is playing sound of its own on the Mac (a cue): not listened through, plus a tail. |
+
+**Stream connection** — a device's audio, for a client already registered:
+
+| Client sends | Meaning |
+| --- | --- |
+| `{"type":"hello","protocol":1,"client":"spaceterm","role":"stream","device":"iPhone"}` | `welcome`, or `refused` `no_client`. |
+| `{"type":"start","sampleRate":16000,"codec":"pcm16"}` | Hands-free on, on this stream: `session {source:"stream", session:<id>}`. |
+| `{"type":"resume","session":<id>}` | After a dropout, within 10 s: `resumed {session, at}` — send audio from sample `at` (16 kHz). Otherwise `session-ended {why:"lost"}`. |
+| `{"type":"audio","at":<n>,"data":<base64 s16le mono>}` | `at` is the 16 kHz sample position of the chunk's first sample (at the stream's own rate it is converted). Overlap with what was received is dropped; a hole resets listening. Acked about once a second: `ack {at}` — the SDK may forget audio before it. |
+| `{"type":"playing","on":bool,"speech":bool,"echoCancelled":bool}` | The device is playing; `speech`: the client's voice, which hands-free turns down for the user and can cut off; `echoCancelled`: the microphone does not hear it. |
+| `{"type":"stop"}` | Off. |
+
+Audio a resumed stream replays from more than 2 s ago resets listening unless a
+dictation was under way: it is history, not the user talking now.
+
+**Voice Operator sends**, on the connection that started the session:
+
+| Message | Meaning |
+| --- | --- |
+| `session {source, session?}` / `session-ended {why}` | On / off: `off`, `replaced`, `lost`, `disconnected`, `incognito`, `unsupported_audio`. |
+| `state {phase, conversation, closesAt, checking, pending}` | `phase`: `off`, `listening`, `hearing` (the user is being dictated — hold your own voice), `sending`. `closesAt` (wall ms) when the window closes if nobody speaks; null while held open. `pending`: speech that needs the trigger word is undecided — play a "deciding" beep while true. Sent on change. |
+| `gauge {quietSince, patienceMs, turn, threshold, sampling}` | While dictating: the quiet since `quietSince` (wall ms; null while they talk) ends it at `patienceMs`; `turn` is Smart Turn's latest answer, which ends it at `threshold`; `sampling` while it is being asked. Data points, sent on change — animate between them. |
+| `cue {name, haptic?}` | `ready`, `dictationStart` (tap), `dictationEnd` (double), `notWakeWord`, `conversationClosed` (triple), `shutdown`, `error`. The client decides how each sounds or feels. |
+| `duck {on}` | Turn the client's voice down (someone is talking over it) or back up. |
+| `cut-in {msAgo, at}` | The user cut the client's voice off: they began `msAgo` ms ago (`at`, wall ms), which is as far as they heard it. |
+| `transcript {text, trigger, interrupted, reason, shutdown}` | The dictation, trigger word included — strip it yourself. Empty when nothing was caught; `interrupted`: it cut the client's voice off (with empty text: say you had not finished, and carry on). `shutdown`: "let me turn this off" or "<trigger>, shutdown" — the window has closed. |
+| `ack {at}`, `resumed {session, at}` | Stream bookkeeping, above. |
+
 ## Incognito mode (2026-10-13)
 
 A menu checkbox (`Incognito`, persisted in `UserDefaults` as `vo.incognito`, so a restart

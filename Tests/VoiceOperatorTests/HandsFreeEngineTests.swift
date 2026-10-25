@@ -52,6 +52,8 @@ private final class Harness {
     private var timers: [FakeTimer] = []
     private var clock = 1_000_000.0
     var engine: HandsFreeEngine!
+    /// turn-1-mini's stand-in, when a test wants one.
+    var miniFactory: (() -> HandsFreeEngine.ContinuousTurn)?
 
     final class FakeDictation: HandsFreeEngine.Dictation {
         let backlogSeconds: Double
@@ -108,7 +110,8 @@ private final class Harness {
             now: { [unowned self] in clock },
             emit: { [unowned self] in events.append($0) },
             record: { [unowned self] kind, detail in records.append((kind, detail)) },
-            log: { _ in })
+            log: { _ in },
+            continuousTurn: { [unowned self] in miniFactory?() })
         engine = HandsFreeEngine(owner: "spaceterm", trigger: "control", scorer: FakeDetector(), deps: deps)
         engine.sourceState = { [unowned self] in state }
         engine.sourceStarted()
@@ -194,7 +197,7 @@ private final class Harness {
     }
     var conversation: Bool { lastState?.conversation ?? false }
     var lastGauge: (turn: Double?, sampling: Bool)? {
-        for e in events.reversed() { if case .gauge(_, _, let turn, _, let sampling) = e.event { return (turn, sampling) } }
+        for e in events.reversed() { if case .gauge(let g) = e.event { return (g.turn, g.sampling) } }
         return nil
     }
     func recorded(_ kind: String) -> [[String: Any]] { records.filter { $0.0 == kind }.map(\.1) }
@@ -260,6 +263,40 @@ final class HandsFreeEngineTests: XCTestCase {
         h.hear(Sound.speech(500))
         XCTAssertNil(h.lastGauge?.turn)
         XCTAssertEqual(h.lastGauge?.sampling, false)
+    }
+
+    /// turn-1-mini's stand-in: low while it hears speech, climbing through silence.
+    private final class FakeMini: HandsFreeEngine.ContinuousTurn {
+        var quiet = 0
+        func push(_ pcm: [Int16]) throws -> [Float] {
+            var out: [Float] = []
+            for frame in stride(from: 0, to: pcm.count - 319, by: 320) {
+                let loud = pcm[frame..<frame + 320].contains { abs(Int($0)) > 1000 }
+                quiet = loud ? 0 : quiet + 1
+                out.append(min(1, Float(quiet) / 50))
+            }
+            return out
+        }
+    }
+
+    func testTurnOneMiniIsShownAndRecordedPerPause_decidingNothing() {
+        let h = harness { $0.turn = { 0.1 } }
+        h.miniFactory = { FakeMini() }
+        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(1500))
+        var gauge: HandsFreeEngine.Gauge?
+        for e in h.events.reversed() { if case .gauge(let g) = e.event { gauge = g; break } }
+        XCTAssertNotNil(gauge?.mini)
+        XCTAssertGreaterThan(gauge?.miniPeak ?? 0, 0.5, "it climbed through the pause")
+        XCTAssertEqual(gauge?.miniThreshold, TurnOneMini.threshold)
+        XCTAssertEqual(h.transcripts.count, 0, "turn-1-mini decides nothing: above its threshold, still hearing")
+        h.hear(Sound.speech(500))
+        let pause = h.recorded("pause").last
+        XCTAssertEqual(pause?["outcome"] as? String, "resumed")
+        XCTAssertEqual(pause?["smartTurn"] as? Double, 0.1)
+        XCTAssertGreaterThan(pause?["miniPeak"] as? Double ?? 0, 0.5)
+        XCTAssertNotNil(pause?["silenceMs"])
+        h.hear(Sound.quiet(4000))
+        XCTAssertEqual(h.recorded("pause").last?["outcome"] as? String, "silence")
     }
 
     func testAsksExactlyOnceAboutAFifthOfASecondIntoEachPause() {

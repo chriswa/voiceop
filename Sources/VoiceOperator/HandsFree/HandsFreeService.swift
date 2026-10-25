@@ -59,6 +59,9 @@ final class HandsFreeService: @unchecked Sendable {
     private var mac: MacSource?
     private var streams: [String: StreamSession] = [:]
     private let turnDetector = TurnDetector()
+    /// turn-1-mini, on trial beside Smart Turn: loaded at start, then set here on `queue`.
+    private let miniLoader = TurnOneMini.Loader()
+    private var miniModel: TurnOneMini.Model?
     private let record = HandsFreeRecord.shared
     private let busyLock = NSLock()
     private var busyCount = 0
@@ -123,6 +126,10 @@ final class HandsFreeService: @unchecked Sendable {
         self.listener = listener
         // Fetched once and kept; loaded on the first pause anyone is asked about.
         Task { [turnDetector] in await turnDetector.warm() }
+        Task { [miniLoader, queue] in
+            let model = await miniLoader.model()
+            queue.async { [weak self] in self?.miniModel = model }
+        }
     }
 
     /// Voice Operator is quitting — usually to restart: `restarting` tells
@@ -536,7 +543,8 @@ final class HandsFreeService: @unchecked Sendable {
                 detail["source"] = sessionKey
                 record.write(kind, detail)
             },
-            log: { Log.log("hands-free: \($0)") })
+            log: { Log.log("hands-free: \($0)") },
+            continuousTurn: { [weak self] in self?.miniModel?.stream() })
         let engine = HandsFreeEngine(owner: owner, trigger: trigger, scorer: EnergyScorer(), deps: deps)
         if let url = SileroVAD.bundledModelURL() {
             do { engine.setScorer(try SileroVAD(modelURL: url)) } catch {
@@ -573,9 +581,10 @@ final class HandsFreeService: @unchecked Sendable {
         case .state(let phase, let conversation, let closesAt, let checking, let pending):
             return ["type": "state", "phase": phase.rawValue, "conversation": conversation,
                     "closesAt": opt(closesAt), "checking": checking, "pending": pending]
-        case .gauge(let quietSince, let patienceMs, let turn, let threshold, let sampling):
-            return ["type": "gauge", "quietSince": opt(quietSince), "patienceMs": opt(patienceMs),
-                    "turn": opt(turn), "threshold": threshold, "sampling": sampling]
+        case .gauge(let g):
+            return ["type": "gauge", "quietSince": opt(g.quietSince), "patienceMs": opt(g.patienceMs),
+                    "turn": opt(g.turn), "threshold": g.threshold, "sampling": g.sampling,
+                    "mini": opt(g.mini), "miniPeak": opt(g.miniPeak), "miniThreshold": g.miniThreshold]
         case .cue(let cue):
             var message: [String: Any] = ["type": "cue", "name": cue.rawValue]
             if let haptic = cue.haptic { message["haptic"] = haptic }

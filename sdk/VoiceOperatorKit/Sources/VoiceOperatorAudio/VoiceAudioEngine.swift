@@ -479,7 +479,8 @@ public final class VoiceAudioEngine {
             // Echo cancellation is for hands-free, which listens through Control's voice. A dictation
             // stops Control first, so it goes without, and without voice processing's ways with the route.
             voiceProcessingAllowed: voiceProcessingAllowed && !(mode == .microphone && forDictation),
-            headphones: mode == .microphone && !forDictation && holdOnHeadphones
+            headphones: mode == .microphone && !forDictation && holdOnHeadphones,
+            dictation: mode == .microphone && forDictation
         )
         let capture = self.capture
         audioQueue.async {
@@ -509,6 +510,8 @@ public final class VoiceAudioEngine {
          * (`echoFree`, sent to the page). On the phone's own speaker it stays.
          */
         let headphones: Bool
+        /// A tap's dictation: no voice processing, and asks for high-quality recording on AirPods (see `start`).
+        let dictation: Bool
     }
 
     private struct Started {
@@ -564,15 +567,20 @@ public final class VoiceAudioEngine {
          * asked for — every such start, with voice processing or without
          * (October 12–13) — while every 48 kHz start that asked for it heard.
          * At 24 kHz nothing changes: that link heard every time, and was the
-         * one of hands-free's best sessions (01:45, October 13). Not for a
-         * dictation, which must start at once.
+         * one of hands-free's best sessions (01:45, October 13).
+         *
+         * A dictation asks too. It was left out so as to start at once, but
+         * every dictation whose AirPods link came up at 48 kHz without it was
+         * silent — October 13, 15, 23, and nine of fifteen on October 25 —
+         * each costing the two-second wait for sound and a retry before the
+         * user could talk. Asking costs a moment; not asking cost the dictation.
          */
         var highQuality: [String: Any] = ["asked": false, "rateAtActivation": session.sampleRate]
         if #available(iOS 26.0, *), let port = session.currentRoute.inputs.first, let bluetooth = port.bluetoothMicrophoneExtension {
             highQuality["supportedAtActivation"] = bluetooth.highQualityRecording.isSupported
             highQuality["enabledAtActivation"] = bluetooth.highQualityRecording.isEnabled
         }
-        if plan.headphones, #available(iOS 26.0, *), session.sampleRate > Self.voiceProcessingRate,
+        if plan.headphones || plan.dictation, #available(iOS 26.0, *), session.sampleRate > Self.voiceProcessingRate,
            isBluetooth(session.currentRoute.inputs.first) {
             highQuality["asked"] = true
             highQuality["rateBefore"] = session.sampleRate

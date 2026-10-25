@@ -1,6 +1,27 @@
 # Hands-free in Voice Operator — migration plan (2026-10-24)
 
-Status: **plan, reviewed 2026-10-24** (findings folded in below). Nothing here is built yet.
+Status: **phases 0–4 and 6 built (2026-10-24); phase 5 is the open follow-up.**
+What was built, where it differs from the plan:
+
+- VO: `Sources/VoiceOperator/HandsFree/` (DESIGN.md "Hands-free" has the
+  protocol). Live-tested with `--hands-free-test` (a stream, end to end) and on
+  the Mac's microphone (audio flows; speech untested there — the lid was
+  closed, so the microphone gave digital silence, which hands-free now reports).
+- SDK: `sdk/VoiceOperatorKit` — `VoiceOperatorHandsFree` (the stream client,
+  tested on macOS, including a real transcription across a dropout and resume:
+  `VOICEOP_SDK_SPEECH_TEST=1`) and `VoiceOperatorAudio` (Spaceterm's
+  `NativeMicrophone` engine, moved; iOS 17). Builds for the simulator; not yet
+  run on a device.
+- Spaceterm: the server registers `control` and relays phone streams
+  (`voice-operator-hands-free.ts`); the page follows VO's messages
+  (`src/mobile/hands-free.ts`); the listener, Silero, Smart Turn, the voice
+  record, the tuning file and onnxruntime are gone. Audio is still PCM (opus is
+  a follow-up), and the phone's button dictation still goes through the page's
+  own path (`/v1/transcriptions`), on audio the SDK engine hands the page.
+- Phase 5 (VO speech to an SDK device) is not built: Control's voice is still
+  synthesised by Spaceterm (`RemoteSpeech`) and played by the SDK's engine,
+  which reports `playing` itself.
+- VO's `/v1/wake-word` stays until no Spaceterm build uses it.
 
 ## Goal
 

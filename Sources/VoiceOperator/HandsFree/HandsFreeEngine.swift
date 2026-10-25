@@ -250,6 +250,8 @@ final class HandsFreeEngine: @unchecked Sendable {
         var miniPeak: Double?
         /// When the peak was reached, ms into the pause.
         var miniPeakMs: Int?
+        /// When turn-1-mini first reached its threshold, ms into the pause: when it would have ended the turn.
+        var miniCrossedMs: Int?
     }
 
     private final class Utterance {
@@ -260,6 +262,8 @@ final class HandsFreeEngine: @unchecked Sendable {
         let interrupted: Bool
         /// Everything dictated so far, for the turn model's last eight seconds.
         var audio: [Int16]
+        /// Wall ms of the first syllable (the backlog's start, not the check's answer).
+        var startedAt: Double = 0
         var backstop: Timer?
         var turn: Double?
         var sampling = false
@@ -568,6 +572,8 @@ final class HandsFreeEngine: @unchecked Sendable {
                                              alreadySpokeMs: Double(candidate.spokeMs), wakeWordStart: wakeWordStart)
         let utterance = Utterance(client: client, trigger: trigger, dictation: dictation, endpointer: endpointer,
                                   interrupted: interrupted, audio: backlog)
+        utterance.startedAt = deps.now() - backlogMs
+        recordStart(utterance)
         utterance.mini = deps.continuousTurn()
         feedMini(utterance, backlog)
         self.utterance = utterance
@@ -588,7 +594,12 @@ final class HandsFreeEngine: @unchecked Sendable {
         stopSampling()
         self.utterance = nil
         emit(utterance.client, .cue(.dictationEnd))
-        deps.record("ended", ["reason": reason.rawValue])
+        // When the speech itself ended: the quiet that ended it is not part of it.
+        let speechEndedAt = deps.now() - utterance.endpointer.quietMs
+        deps.record("ended", ["reason": reason.rawValue, "client": utterance.client,
+                              "startedAt": Self.iso(utterance.startedAt), "speechEndedAt": Self.iso(speechEndedAt),
+                              "speechMs": Int(speechEndedAt - utterance.startedAt)])
+        lastDictation = (speechEndedAt, reason.rawValue)
         if reason == .lost {
             deps.log("the source stopped mid-dictation")
             utterance.dictation.cancel()
@@ -696,6 +707,13 @@ final class HandsFreeEngine: @unchecked Sendable {
         }
         guard let last = probs.last else { return }
         utterance.miniLatest = Double(last)
+        // The first frame at or over its threshold in this pause, timed to its own 20 ms frame.
+        if var pause = utterance.pause, pause.miniCrossedMs == nil,
+           let i = probs.firstIndex(where: { Double($0) >= TurnOneMini.threshold }) {
+            let endMs = HandsFreeAudio.ms(samples: utterance.audio.count - pause.at) + tuning.pauseCheckMs
+            pause.miniCrossedMs = max(0, Int(endMs) - (probs.count - 1 - i) * 20)
+            utterance.pause = pause
+        }
         if utterance.pause != nil, let top = probs.max().map(Double.init), top > (utterance.miniPeak ?? -1) {
             utterance.miniPeak = top
             if var pause = utterance.pause {
@@ -704,6 +722,26 @@ final class HandsFreeEngine: @unchecked Sendable {
                 utterance.pause = pause
             }
         }
+    }
+
+    /// The last dictation's end, for the next one's `started` line.
+    private var lastDictation: (speechEndedAt: Double, endedBy: String)?
+
+    /// A dictation's first syllable, and how soon after the last one's speech
+    /// ended — a gap of a second or two after one Smart Turn ended (`finished`)
+    /// says it ended the turn too early: they had not finished.
+    private func recordStart(_ utterance: Utterance) {
+        var detail: [String: Any] = ["client": utterance.client, "startedAt": Self.iso(utterance.startedAt),
+                                     "backlogMs": Int(HandsFreeAudio.ms(samples: utterance.audio.count))]
+        if let last = lastDictation {
+            detail["gapFromPreviousMs"] = Int(utterance.startedAt - last.speechEndedAt)
+            detail["previousEndedBy"] = last.endedBy
+        }
+        deps.record("started", detail)
+    }
+
+    private static func iso(_ ms: Double) -> String {
+        ISO8601DateFormatter.withFractions.string(from: Date(timeIntervalSince1970: ms / 1000))
     }
 
     /// The pause is over — they carried on, or the dictation ended: its line in the record.
@@ -719,6 +757,7 @@ final class HandsFreeEngine: @unchecked Sendable {
         if let p = pause.miniAtPause { detail["miniAtPause"] = p }
         if let p = pause.miniPeak { detail["miniPeak"] = p }
         if let ms = pause.miniPeakMs { detail["miniPeakMs"] = ms }
+        if let ms = pause.miniCrossedMs { detail["miniCrossedMs"] = ms }
         deps.record("pause", detail)
     }
 

@@ -817,9 +817,13 @@ every 30 s), `silent-input` (digital silence: a closed lid, a muted input),
 the reply), and `echo` per reply the client played through echo cancellation
 (how much still sounded like speech, `firstSpeechMs`, peak level, ducks,
 cut-ins), and `pause` per pause in a dictation: Smart Turn's answer,
-turn-1-mini's at the pause and its peak through it (and when), how long the
-silence lasted, and whether they carried on (`resumed`) or it ended the
-dictation — the data for setting both models' thresholds on this user's
+turn-1-mini's at the pause, its peak through it (and when), and when it first
+reached its threshold (`miniCrossedMs`, when it would have ended the turn), how
+long the silence lasted, and whether they carried on (`resumed`) or it ended
+the dictation; `started` and `ended` per dictation, with when its speech
+started and ended (wall time, the quiet that ended it not counted) and, on
+`started`, the gap since the last one's speech ended and what ended that one —
+a short gap after a `finished` is Smart Turn ending a turn too early — the data for setting both models' thresholds on this user's
 speech. turn-1-mini (p99lab, Apache-2.0, "turn-1-mini by p99lab",
 huggingface.co/p99lab/turn-1-mini) runs on trial beside Smart Turn:
 `TurnOneMini`, a streaming model fed the whole dictation in 160 ms steps. Echo leaking through always starts at about the same `intoReplyMs`;

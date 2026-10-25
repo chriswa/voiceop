@@ -295,8 +295,24 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(pause?["smartTurn"] as? Double, 0.1)
         XCTAssertGreaterThan(pause?["miniPeak"] as? Double ?? 0, 0.5)
         XCTAssertNotNil(pause?["silenceMs"])
+        XCTAssertNotNil(pause?["miniCrossedMs"], "when it first reached its threshold")
+        XCTAssertLessThan(pause?["miniCrossedMs"] as? Int ?? .max, pause?["miniPeakMs"] as? Int ?? 0)
         h.hear(Sound.quiet(4000))
         XCTAssertEqual(h.recorded("pause").last?["outcome"] as? String, "silence")
+    }
+
+    func testRecordsWhenEachDictationsSpeechStartedAndEndedAndTheGapBetweenThem() {
+        let h = harness { $0.turn = { 0.9 }; $0.heard = { _ in "Control, more" } }
+        h.hear(Sound.quiet(1500), Sound.speech(2000), Sound.quiet(800))
+        let ended = h.recorded("ended").last
+        XCTAssertEqual(ended?["reason"] as? String, "finished")
+        XCTAssertEqual(Double(ended?["speechMs"] as? Int ?? 0), 2000, accuracy: 250)
+        // Straight on again, in the window: the gap says the last one was ended too early.
+        h.hear(Sound.quiet(1200), Sound.speech(1500), Sound.quiet(800))
+        let started = h.recorded("started").last
+        XCTAssertEqual(started?["previousEndedBy"] as? String, "finished")
+        XCTAssertEqual(Double(started?["gapFromPreviousMs"] as? Int ?? 0), 2000, accuracy: 250, "the 0.8 s pause that ended it, then 1.2 s")
+        XCTAssertNil(h.recorded("started").first?["gapFromPreviousMs"])
     }
 
     func testAsksExactlyOnceHalfASecondIntoEachPause() {

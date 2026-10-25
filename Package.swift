@@ -19,6 +19,9 @@ let package = Package(
         // On-device Parakeet speech recognition (CoreML, Apple Silicon): the
         // Parakeet transcription provider.
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
+        // ONNX Runtime: hands-free's speech detector (Silero VAD) and end-of-turn
+        // model (Smart Turn), the same model files Spaceterm ran on onnxruntime-node.
+        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager.git", exact: "1.24.2"),
     ],
     targets: [
         // Vendored libopus (prebuilt universal static lib + public headers) for
@@ -47,6 +50,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHPACK", package: "swift-nio-http2"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
             ],
             path: "Sources/VoiceOperator",
             linkerSettings: [

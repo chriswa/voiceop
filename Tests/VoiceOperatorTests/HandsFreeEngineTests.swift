@@ -304,7 +304,8 @@ final class HandsFreeEngineTests: XCTestCase {
             for frame in stride(from: 0, to: pcm.count - 319, by: 320) {
                 let loud = pcm[frame..<frame + 320].contains { abs(Int($0)) > 1000 }
                 quiet = loud ? 0 : quiet + 1
-                out.append(min(1, Float(quiet) / 50))
+                // Its threshold about 180 ms into a silence, whatever the threshold.
+                out.append(min(1, Float(quiet) / 9 * Float(TurnOneMini.threshold)))
             }
             return out
         }
@@ -317,14 +318,14 @@ final class HandsFreeEngineTests: XCTestCase {
         var gauge: HandsFreeEngine.Gauge?
         for e in h.events.reversed() { if case .gauge(let g) = e.event { gauge = g; break } }
         XCTAssertNotNil(gauge?.mini)
-        XCTAssertGreaterThan(gauge?.miniPeak ?? 0, 0.17, "it climbed through the pause")
+        XCTAssertGreaterThan(gauge?.miniPeak ?? 0, TurnOneMini.threshold, "it climbed through the pause")
         XCTAssertEqual(gauge?.miniThreshold, TurnOneMini.threshold)
         XCTAssertEqual(h.transcripts.count, 0, "crossed, and held")
         h.hear(Sound.speech(500))
         let pause = h.recorded("pause").last
         XCTAssertEqual(pause?["outcome"] as? String, "resumed")
         XCTAssertEqual(pause?["smartTurn"] as? Double, 0.1)
-        XCTAssertGreaterThan(pause?["miniPeak"] as? Double ?? 0, 0.17)
+        XCTAssertGreaterThan(pause?["miniPeak"] as? Double ?? 0, TurnOneMini.threshold)
         XCTAssertNotNil(pause?["silenceMs"])
         XCTAssertNotNil(pause?["miniCrossedMs"], "when it first reached its threshold")
         XCTAssertLessThan(pause?["miniCrossedMs"] as? Int ?? .max, pause?["miniPeakMs"] as? Int ?? 0)

@@ -24,11 +24,12 @@ enum TurnOneMini {
     static let sha256 = "aab623c3df7a494710a9bf650df29b292b76ee2fe0e85b616a57c871d0b993b4"
     /// 160 ms of 16 kHz audio: one step.
     static let step = 2560
-    /// The model card's operating point for 5% false cut-offs on its benchmark
-    /// (eot-bench English, float32): the threshold drawn on the gauge. Its scores
-    /// are not calibrated — 0.06 is its 300 ms point, 0.16 its 600 ms one — so
-    /// this is for looking at, until our own pauses say where it belongs.
-    static let threshold = 0.17
+    /// The answer that ends a dictation (after `HandsFreeEngine.miniHoldMs`), and
+    /// the line on the gauge. Its scores are not calibrated: the model card's
+    /// operating points are 0.06 (300 ms), 0.16 (600 ms) and 0.17 (5% false
+    /// cut-offs). 0.5 for now, a trial at the user's asking (October 25), to see
+    /// how it does; 0.17 was the model card's choice.
+    static let threshold = 0.5
 
     /// The state the graph carries from step to step, and its fixed shapes.
     static let states: [(name: String, shape: [Int])] = [

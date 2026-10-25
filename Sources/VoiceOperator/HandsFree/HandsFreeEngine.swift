@@ -758,7 +758,7 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     /// turn-1-mini decides when the dictation ends (October 25, after Smart Turn
     /// cut the user off too often): the first time in a silence its answer reaches
-    /// its threshold (0.17, its model card's point for 5% false cut-offs), the
+    /// its threshold (`TurnOneMini.threshold`; 0.5 on trial for now), the
     /// dictation ends `miniHoldMs` later — unless speech comes back first, which
     /// cancels the ending and listening goes on. After the trigger word alone the
     /// ending waits, as Smart Turn did: "Control." and a breath is not the end.

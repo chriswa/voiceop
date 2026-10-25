@@ -557,6 +557,18 @@ public final class VoiceAudioEngine {
             return Started(player: player, voiceProcessing: false, voiceProcessingError: nil, sampleRate: 0, ms: ms())
         }
         options.formUnion([.defaultToSpeaker, .allowBluetooth])
+        /**
+         * A dictation asks for the AirPods' high-quality recording in its one
+         * category change, before activating, rather than in a second one
+         * after seeing 48 kHz. The second cost about two seconds and swung the
+         * route to the earpiece on the way (October 25, 19:00:55); re-activating
+         * for 24 kHz instead cost about 2.3 s a try, flipping Spotify in and out
+         * each time — three tries took 11 s (19:02:39). A tap's microphone must
+         * come up at once, at whatever rate the AirPods pick. (Asked for this way
+         * on October 12, a hands-free start that followed came up dead; hands-free
+         * now sets its own category without it, and never takes 48 kHz.)
+         */
+        if plan.dictation, #available(iOS 26.0, *) { options.insert(.bluetoothHighQualityRecording) }
         try session.setCategory(.playAndRecord, mode: .default, options: options)
         // iOS silences haptics while recording unless told otherwise; hands-free's cue is one.
         try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
@@ -574,15 +586,13 @@ public final class VoiceAudioEngine {
          * recorded with whether other audio was playing either side of it, since
          * too many deactivations may be what leaves Spotify paused. Still wide,
          * the start is refused (`WideBluetooth`), and `broughtUp` tries again
-         * shortly. A dictation is re-activated the same way — far quicker
-         * than asking for high-quality recording, whose second category change
-         * took two seconds and swung the route to the earpiece on the way
-         * (October 25, 19:00:55) — and only if it is still at 48 kHz after that
-         * does it take the wide link, asking for high-quality recording (below):
-         * nobody is listening to music through a dictation.
+         * shortly. Each re-activation takes the AirPods back to their music
+         * link and out again — about 2.3 s, Spotify flipping in and out — so
+         * this is for hands-free, which is worth waiting for. A dictation takes
+         * whichever link comes up (see the category above).
          */
         var rateTries: [[String: Any]] = []
-        if plan.microphone, isBluetooth(session.currentRoute.inputs.first) {
+        if plan.microphone, !plan.dictation, isBluetooth(session.currentRoute.inputs.first) {
             while session.sampleRate > Self.voiceProcessingRate, rateTries.count < Self.quickRateRetries {
                 let rate = session.sampleRate
                 let otherBefore = session.isOtherAudioPlaying
@@ -599,7 +609,7 @@ public final class VoiceAudioEngine {
                     "route": describeRoute(session.currentRoute),
                 ])
             }
-            if session.sampleRate > Self.voiceProcessingRate, !plan.dictation {
+            if session.sampleRate > Self.voiceProcessingRate {
                 throw WideBluetooth(rate: session.sampleRate, tries: rateTries)
             }
         }
@@ -619,22 +629,7 @@ public final class VoiceAudioEngine {
             highQuality["supportedAtActivation"] = bluetooth.highQualityRecording.isSupported
             highQuality["enabledAtActivation"] = bluetooth.highQualityRecording.isEnabled
         }
-        if plan.dictation, #available(iOS 26.0, *), session.sampleRate > Self.voiceProcessingRate,
-           isBluetooth(session.currentRoute.inputs.first) {
-            highQuality["asked"] = true
-            highQuality["rateBefore"] = session.sampleRate
-            do {
-                try session.setCategory(.playAndRecord, mode: .default, options: options.union(.bluetoothHighQualityRecording))
-                try session.setActive(true)
-            } catch {
-                highQuality["refused"] = error.localizedDescription
-            }
-            if let port = session.currentRoute.inputs.first, let bluetooth = port.bluetoothMicrophoneExtension {
-                highQuality["supported"] = bluetooth.highQualityRecording.isSupported
-                highQuality["enabled"] = bluetooth.highQualityRecording.isEnabled
-            }
-            highQuality["rateAfter"] = session.sampleRate
-        }
+        if plan.dictation, #available(iOS 26.0, *) { highQuality["asked"] = true }
         let input = engine.inputNode
         /**
          * Voice processing over a Bluetooth route faster than 24 kHz sent only

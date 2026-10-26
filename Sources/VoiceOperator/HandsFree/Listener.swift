@@ -17,9 +17,9 @@ import Foundation
 // took. Everything else is forgotten as it scrolls out of the buffer; nothing
 // is kept, transcribed or sent.
 //
-// After the wake word (`UtteranceEndpointer`): has the user paused — time to
-// ask the turn model whether they sound finished — and has the pause gone on
-// long enough to end it regardless?
+// After the wake word (`UtteranceEndpointer`): has the user paused — a pause
+// the record keeps, with what the turn model made of it — and has the pause
+// gone on long enough to end it regardless?
 //
 // Pure: scored frames in, events out, time measured in samples. No clock, no
 // microphone, no model — so every threshold is testable with synthetic frames.
@@ -28,14 +28,13 @@ import Foundation
 // Ported from Spaceterm's `src/mobile/wake-listener.ts`; same thresholds and
 // semantics.
 
-/// Every threshold hands-free listening uses, in milliseconds (`turnThreshold`
-/// is a probability). `standard` is the only set; there is no tuning file.
+/// Every threshold hands-free listening uses, in milliseconds. `standard` is
+/// the only set; there is no tuning file.
 struct HandsFreeTuning: Sendable, Equatable {
     var noSpeechBeforeMs: Double
     var onsetWindowMs: Double
     var wordMinMs: Double
     var pauseCheckMs: Double
-    var turnThreshold: Double
     var wakeWordOnlyMs: Double
     var afterWakeWordMs: Double
     var endSilenceMinMs: Double
@@ -49,11 +48,8 @@ struct HandsFreeTuning: Sendable, Equatable {
         noSpeechBeforeMs: 700,
         onsetWindowMs: 1000,
         wordMinMs: 250,
-        // Smart Turn is asked once a pause has lasted this long, so it can end a turn no sooner.
-        // Its training data ends turns in about 200 ms of silence (more is fine); at 0.2 s it cut the
-        // user off too quickly (October 25).
+        // A pause is reported, and its line in the record begun, once the quiet has lasted this long.
         pauseCheckMs: 500,
-        turnThreshold: 0.75,
         wakeWordOnlyMs: 1500,
         // Capped at 4 s, like the silence timeout below (October 25): five felt endless.
         afterWakeWordMs: 4000,
@@ -417,12 +413,11 @@ enum UtteranceEndReason: String, Sendable {
 }
 
 enum UtteranceEvent: Equatable, Sendable {
-    /// Quiet for `pauseCheckMs`: ask whether they sound finished. Once per
-    /// pause. `wakeWordOnly`: nothing has been said yet but the wake word —
-    /// "Control." and a breath — which the turn model would hear as finished;
-    /// don't ask.
+    /// Quiet for `pauseCheckMs`: a pause. Once per pause. `wakeWordOnly`:
+    /// nothing has been said yet but the wake word — "Control." and a breath —
+    /// which the turn model would hear as finished; its ending waits.
     case pause(talkMs: Int, wakeWordOnly: Bool)
-    /// Speech again, after a pause was reported: whatever was asked about it no
+    /// Speech again, after a pause was reported: whatever was made of it no
     /// longer holds.
     case resumed
     /// The quiet outlasted `endSilenceFor`, or the whole thing reached
@@ -438,7 +433,7 @@ enum UtteranceEvent: Equatable, Sendable {
 /// A first pause after less than `wakeWordOnlyMs` of actual speech — counting
 /// `alreadySpokeMs` from before it started — is the pause after "Control." on
 /// its own: until speech resumes, it waits at least `afterWakeWordMs`, and the
-/// pause is not one to ask the turn model about. Speech, not time: the check
+/// turn model does not end it. Speech, not time: the check
 /// may have taken a second, which is not the speaker talking. Only when the
 /// utterance began with the wake word (`wakeWordStart`): in the conversation
 /// window, a short "yes" and a pause is the whole answer.

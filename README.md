@@ -212,8 +212,7 @@ and asks, and nothing outlives that connection. While it is on:
   (p99lab, Apache-2.0), decides when you have finished — half a second after
   its score first reaches its threshold in a pause, unless you speak again
   first. A silence timeout (3 s, 4 s at most in a long dictation) is the
-  fallback. [Smart Turn](https://github.com/pipecat-ai/smart-turn) is asked
-  too, once per pause, for comparison only. The transcript goes to the client.
+  fallback. The transcript goes to the client.
 - After that, a **conversation window** lets you reply without the trigger word
   until both sides have been quiet for 15 seconds. "Stop listening" (or
   "<trigger>, stop listening") closes it at once, as if the 15 seconds had run
@@ -228,8 +227,8 @@ It listens on the Mac's microphone (your Fn dictation always takes priority, and
 it does not listen while Voice Operator speaks on the Mac's speakers, so
 barge-in on the Mac needs a headset) or on audio a client streams in — a phone,
 through the iOS SDK. Detecting speech (Silero VAD), checking the trigger word
-(Apple's on-device model, macOS 26) and both end-of-turn models all run on the
-Mac (the two models, about 14 MB, download from Hugging Face on first use);
+(Apple's on-device model, macOS 26) and the end-of-turn model all run on the
+Mac (the model, about 6 MB, downloads from Hugging Face on first use);
 the transcription uses your chosen provider. While hands-free holds the Mac's
 microphone, speech does not turn other audio down (doing so tore the
 microphone down at every reply). A Voice Operator restart leaves a client's

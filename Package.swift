@@ -20,7 +20,7 @@ let package = Package(
         // Parakeet transcription provider.
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
         // ONNX Runtime: hands-free's speech detector (Silero VAD) and end-of-turn
-        // model (Smart Turn), the same model files Spaceterm ran on onnxruntime-node.
+        // model (turn-1-mini).
         .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager.git", exact: "1.24.2"),
     ],
     targets: [

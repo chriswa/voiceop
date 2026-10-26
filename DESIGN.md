@@ -791,8 +791,8 @@ and nothing outlives the connection that asked.
 sources), `HandsFreeEngine` (one source's state machine, ported from Spaceterm's
 `src/mobile/hands-free.ts`), `Listener` (speech gate, wake listener, utterance
 endpointer — `wake-listener.ts`), `Phrases` (trigger words, filler, shutdown
-phrases), `SileroVAD` and `SmartTurn` (the same ONNX models Spaceterm ran,
-on ONNX Runtime), `HandsFreeRecord` (the decision record). Live-test it with
+phrases), `SileroVAD` (the same ONNX model Spaceterm ran) and `TurnOneMini`
+(the end-of-turn model), on ONNX Runtime, `HandsFreeRecord` (the decision record). Live-test it with
 `--hands-free-test [text]`, which streams `say`-made speech as a phone would.
 
 **Sources.** The Mac's microphone — a second reader on `AudioRecorder`'s tap
@@ -819,26 +819,24 @@ goes to a client.
 
 **Debugging it.** `hands-free/decisions.jsonl` in Application Support has a
 line per decision, with the clip it was made on in `clips/`: `check` (what
-Apple's model heard), `turn` (Smart Turn), `dictation`, `levels` (the room,
+Apple's model heard), `dictation`, `levels` (the room,
 every 30 s), `silent-input` (digital silence: a closed lid, a muted input),
 `interrupt` (what cut the client's voice off, and `intoReplyMs` — how far into
 the reply), and `echo` per reply the client played through echo cancellation
 (how much still sounded like speech, `firstSpeechMs`, peak level, ducks,
-cut-ins), and `pause` per pause in a dictation: Smart Turn's answer,
-turn-1-mini's at the pause, its peak through it (and when), and when it first
-reached its threshold (`miniCrossedMs`, when it would have ended the turn), how
+cut-ins), and `pause` per pause in a dictation: turn-1-mini's answer at the pause, its peak through it (and when), and when it first
+reached its threshold (`miniCrossedMs`), how
 long the silence lasted, and whether they carried on (`resumed`) or it ended
 the dictation; `started` and `ended` per dictation, with when its speech
 started and ended (wall time, the quiet that ended it not counted) and, on
 `started`, the gap since the last one's speech ended and what ended that one —
-a short gap after a `finished` is Smart Turn ending a turn too early — the data for setting both models' thresholds on this user's
+a short gap after a `mini` is turn-1-mini ending a turn too early — the data for setting its threshold on this user's
 speech; and `mini-ending` for each time turn-1-mini crossed its threshold in a
 silence, then `ended` the dictation half a second later or was `cancelled` by
-speech in that half second (when, and Smart Turn's answer beside it).
+speech in that half second (and when).
 turn-1-mini (p99lab, Apache-2.0, "turn-1-mini by p99lab",
 huggingface.co/p99lab/turn-1-mini) decides when a dictation ends: `TurnOneMini`,
-a streaming model fed the whole dictation in 160 ms steps. Smart Turn runs
-beside it for comparison only; the silence timeout is the fallback. Echo leaking through always starts at about the same `intoReplyMs`;
+a streaming model fed the whole dictation in 160 ms steps; the silence timeout is the fallback. Echo leaking through always starts at about the same `intoReplyMs`;
 a person interrupting does not.
 
 ### Protocol (version 1)
@@ -877,7 +875,7 @@ dictation was under way: it is history, not the user talking now.
 | --- | --- |
 | `session {source, session?}` / `session-ended {why}` | On / off: `off`, `shutdown` (said by voice), `replaced`, `lost`, `restarting` (Voice Operator is quitting — a client may keep hands-free on and start it again when it is back), `incognito`, `unsupported_audio`. |
 | `state {phase, conversation, closesAt, checking, pending}` | `phase`: `off`, `listening`, `hearing` (the user is being dictated — hold your own voice), `sending`. `closesAt` (wall ms) when the window closes if nobody speaks; null while held open. `pending`: speech that needs the trigger word is undecided — play a "deciding" beep while true. Sent on change. |
-| `gauge {quietSince, patienceMs, turn, threshold, sampling, mini, miniPeak, miniThreshold}` | While dictating: the quiet since `quietSince` (wall ms; null while they talk) ends it at `patienceMs`; `turn` is Smart Turn's one answer about this pause (asked once, 0.5 s in) against its `threshold` — shown and recorded, deciding nothing since October 25; `sampling` while it is being asked. `mini` is turn-1-mini's latest answer and `miniPeak` its highest since the pause began (null while they talk), against `miniThreshold` (0.5 on trial; the model card's points are 0.06–0.17): it ends the dictation, 0.5 s after it first reaches the threshold in a silence unless speech comes back first. Data points, sent on change — animate between them. |
+| `gauge {quietSince, patienceMs, mini, miniPeak, miniThreshold}` | While dictating: the quiet since `quietSince` (wall ms; null while they talk) ends it at `patienceMs`. `mini` is turn-1-mini's latest answer and `miniPeak` its highest since the pause began (null while they talk), against `miniThreshold` (0.5 on trial; the model card's points are 0.06–0.17): it ends the dictation, 0.5 s after it first reaches the threshold in a silence unless speech comes back first. Data points, sent on change — animate between them. |
 | `cue {name, haptic?}` | `ready`, `dictationStart` (tap), `dictationEnd` (double), `notWakeWord` (three in a row at most, and none after "stop listening", until the trigger word opens the window again), `conversationClosed` (triple; the window ran out, or "stop listening" — whose `transcript` is empty), `shutdown`, `error`. The client decides how each sounds or feels. |
 | `duck {on}` | Turn the client's voice down (someone is talking over it) or back up. |
 | `cut-in {msAgo, at}` | The user cut the client's voice off: they began `msAgo` ms ago (`at`, wall ms), which is as far as they heard it. |

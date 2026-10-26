@@ -62,8 +62,7 @@ final class HandsFreeService: @unchecked Sendable {
     private var clients: [String: Client] = [:]
     private var mac: MacSource?
     private var streams: [String: StreamSession] = [:]
-    private let turnDetector = TurnDetector()
-    /// turn-1-mini, on trial beside Smart Turn: loaded at start, then set here on `queue`.
+    /// turn-1-mini, which ends dictations: loaded at start, then set here on `queue`.
     private let miniLoader = TurnOneMini.Loader()
     private var miniModel: TurnOneMini.Model?
     private let record = HandsFreeRecord.shared
@@ -128,8 +127,6 @@ final class HandsFreeService: @unchecked Sendable {
         }
         listener.start(queue: queue)
         self.listener = listener
-        // Fetched once and kept; loaded on the first pause anyone is asked about.
-        Task { [turnDetector] in await turnDetector.warm() }
         Task { [miniLoader, queue] in
             let model = await miniLoader.model()
             queue.async { [weak self] in self?.miniModel = model }
@@ -522,7 +519,6 @@ final class HandsFreeService: @unchecked Sendable {
                             emit: @escaping (HandsFreeEngine.Outgoing) -> Void) -> HandsFreeEngine {
         let queue = self.queue
         let record = self.record
-        let turnDetector = self.turnDetector
         let deps = HandsFreeEngine.Deps(
             check: { clip, done in
                 let pcm = Self.data(clip)
@@ -543,18 +539,6 @@ final class HandsFreeService: @unchecked Sendable {
             },
             beginDictation: { client, backlog in
                 HandsFreeTranscription(client: client, backlog: backlog, queue: queue, record: record)
-            },
-            turn: { audio, done in
-                let done = Unchecked(done)
-                Task {
-                    let started = Date()
-                    let p = await turnDetector.probability(audio)
-                    record.write("turn", ["p": p ?? NSNull(), "elapsedMs": Int(Date().timeIntervalSince(started) * 1000),
-                                          "source": sessionKey],
-                                 clip: Self.data(audio.map { Int16(max(-1, min(1, $0)) * 32767) }),
-                                 label: "turn-\(p.map { String(format: "%.2f", $0) } ?? "none")")
-                    queue.async { done.value(p) }
-                }
             },
             after: { ms, block in
                 let item = DispatchWorkItem(block: block)
@@ -608,7 +592,6 @@ final class HandsFreeService: @unchecked Sendable {
                     "closesAt": opt(closesAt), "checking": checking, "pending": pending]
         case .gauge(let g):
             return ["type": "gauge", "quietSince": opt(g.quietSince), "patienceMs": opt(g.patienceMs),
-                    "turn": opt(g.turn), "threshold": g.threshold, "sampling": g.sampling,
                     "mini": opt(g.mini), "miniPeak": opt(g.miniPeak), "miniThreshold": g.miniThreshold]
         case .cue(let cue):
             var message: [String: Any] = ["type": "cue", "name": cue.rawValue]

@@ -2,19 +2,19 @@ import Foundation
 
 /// The record of what hands-free heard and decided, kept for review: every
 /// trigger-word and words check (what Apple's model heard, and whether it
-/// counted), every Smart Turn verdict, every dictation's outcome, and the
-/// engine's own events — each with its time, and checks and verdicts with the
-/// audio they were decided on.
+/// counted), every pause and what turn-1-mini made of it, every dictation's
+/// outcome, and the engine's own events — each with its time, and checks with
+/// the audio they were decided on.
 ///
 /// `hands-free/decisions.jsonl` in Application Support holds one JSON object
 /// per line. Its `clip` names a WAV in `hands-free/clips/` (16 kHz mono): the
-/// clip checked for the trigger word, or the eight seconds Smart Turn heard.
+/// clip checked for the trigger word.
 /// Clips are pruned to the newest `maxClips`; the lines are kept.
 ///
 /// This is the one place hands-free keeps what was said, on purpose — so a
-/// "Control" heard as "patrol", or a finished sentence Smart Turn called
-/// unfinished, can be found and listened to afterwards. Spaceterm kept the same
-/// record in `~/.spaceterm/voice-decisions.jsonl` before hands-free moved here.
+/// "Control" heard as "patrol" can be found and listened to afterwards.
+/// Spaceterm kept the same record in `~/.spaceterm/voice-decisions.jsonl`
+/// before hands-free moved here.
 /// Incognito mode writes none of it.
 final class HandsFreeRecord: @unchecked Sendable {
     static let shared = HandsFreeRecord(directory: HistoryStore.supportDir.appendingPathComponent("hands-free"))

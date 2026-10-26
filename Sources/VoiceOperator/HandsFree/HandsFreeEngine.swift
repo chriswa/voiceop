@@ -19,9 +19,10 @@ import Foundation
 /// user's transcription provider, fed everything said since the first syllable
 /// out of the listener's buffer, then live — so nothing waits on the check.
 ///
-/// It ends at a pause, when the turn model (Smart Turn) says the speaker sounds
-/// finished, or when a pause outlasts a patience that grows with how long they
-/// have been talking (`UtteranceEndpointer`). The transcript goes to the client
+/// It ends at a pause, when the turn model (turn-1-mini, `TurnOneMini`) says the
+/// speaker has finished and the quiet holds (`checkMiniEnding`), or when a pause
+/// outlasts a patience that grows with how long they have been talking
+/// (`UtteranceEndpointer`). The transcript goes to the client
 /// whose trigger word it was, trigger word and all; the client strips it.
 ///
 /// After the trigger word, and as hands-free is turned on, a conversation window
@@ -101,17 +102,12 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     /// What may end the dictation, as the client draws it: quiet since
     /// `quietSince` (wall ms; nil while they talk) ends it at `patienceMs`;
-    /// `turn` is Smart Turn's one answer about this pause and the `threshold`
-    /// it was held to, `sampling` while it is being asked; `mini` is
-    /// turn-1-mini's latest answer (on trial, deciding nothing), `miniPeak` its
-    /// highest since this pause began (nil while they talk), and
-    /// `miniThreshold` its model card's operating point.
+    /// `mini` is turn-1-mini's latest answer, `miniPeak` its highest since
+    /// this pause began (nil while they talk), and `miniThreshold` the answer
+    /// that ends the dictation.
     struct Gauge: Equatable, Sendable {
         var quietSince: Double?
         var patienceMs: Double?
-        var turn: Double?
-        var threshold: Double
-        var sampling: Bool
         var mini: Double?
         var miniPeak: Double?
         var miniThreshold: Double = TurnOneMini.threshold
@@ -149,8 +145,6 @@ final class HandsFreeEngine: @unchecked Sendable {
         var check: (_ clip: [Int16], _ done: @escaping (CheckAnswer) -> Void) -> Void
         /// Open a dictation for `client`, fed `backlog` first.
         var beginDictation: (_ client: String, _ backlog: [Int16]) -> Dictation
-        /// The turn model's probability that the speaker has finished, or nil.
-        var turn: (_ audio: [Float], _ done: @escaping (Double?) -> Void) -> Void
         /// Run `block` on the engine's queue after `ms`.
         var after: (_ ms: Double, _ block: @escaping () -> Void) -> Timer
         /// Wall clock, ms since 1970: for the gauge and window data points.
@@ -233,9 +227,6 @@ final class HandsFreeEngine: @unchecked Sendable {
     private var notWakeWordRun = 0
     /// The dictation under way.
     private var utterance: Utterance?
-    /// Bumped at every pause, every resumption, and the dictation's end: a turn
-    /// verdict counts only for the pause it was asked about.
-    private var pauseNumber = 0
     private var lastState: Event?
     private var lastGauge: Event?
     private var heardSamples = 0
@@ -247,16 +238,15 @@ final class HandsFreeEngine: @unchecked Sendable {
     private var levels = (frames: 0, speechFrames: 0, sumDb: 0.0, maxDb: -120.0)
     private var firstLevels = true
 
-    /// One pause in a dictation, as the record keeps it: what each model made
+    /// One pause in a dictation, as the record keeps it: what turn-1-mini made
     /// of it, and what came of it — they carried on (`resumed`), or it ended
-    /// the dictation (`finished` by Smart Turn, `silence`, …). The data that
-    /// says where each model's threshold belongs on this user's speech.
+    /// the dictation (`mini`, `silence`, …). The data that says where its
+    /// threshold belongs on this user's speech.
     private struct PauseRecord {
         let talkMs: Int
         let wakeWordOnly: Bool
         /// Dictation audio when the pause was reported, in samples.
         let at: Int
-        var smartTurn: Double?
         var miniAtPause: Double?
         var miniPeak: Double?
         /// When the peak was reached, ms into the pause.
@@ -271,13 +261,11 @@ final class HandsFreeEngine: @unchecked Sendable {
         let dictation: Dictation
         let endpointer: UtteranceEndpointer
         let interrupted: Bool
-        /// Everything dictated so far, for the turn model's last eight seconds.
-        var audio: [Int16]
+        /// Samples dictated so far, the backlog included: where in the dictation a pause or an ending is.
+        var samples: Int
         /// Wall ms of the first syllable (the backlog's start, not the check's answer).
         var startedAt: Double = 0
         var backstop: Timer?
-        var turn: Double?
-        var sampling = false
         var ended = false
         /// turn-1-mini on this dictation, its latest answer, and its highest since the pause began.
         var mini: ContinuousTurn?
@@ -291,13 +279,13 @@ final class HandsFreeEngine: @unchecked Sendable {
         /// Endings cancelled by speech, in this dictation.
         var miniCancels = 0
         init(client: String, trigger: String?, dictation: Dictation, endpointer: UtteranceEndpointer,
-             interrupted: Bool, audio: [Int16]) {
+             interrupted: Bool, samples: Int) {
             self.client = client
             self.trigger = trigger
             self.dictation = dictation
             self.endpointer = endpointer
             self.interrupted = interrupted
-            self.audio = audio
+            self.samples = samples
         }
     }
 
@@ -458,7 +446,7 @@ final class HandsFreeEngine: @unchecked Sendable {
         tickConversation(state)
         if phase == .hearing, let utterance {
             utterance.dictation.append(frame.pcm)
-            utterance.audio.append(contentsOf: frame.pcm)
+            utterance.samples += frame.pcm.count
             feedMini(utterance, frame.pcm)
             for event in utterance.endpointer.push([frame]) {
                 switch event {
@@ -466,18 +454,15 @@ final class HandsFreeEngine: @unchecked Sendable {
                 case .resumed:
                     closePause(utterance, outcome: "resumed")
                     utterance.miniPeak = nil
-                    pauseOver()
                 case .pause(let talkMs, let wakeWordOnly):
-                    // The pause's line: what turn-1-mini says from here on, and Smart Turn's one answer.
-                    utterance.pause = PauseRecord(talkMs: talkMs, wakeWordOnly: wakeWordOnly, at: utterance.audio.count,
+                    // The pause's line: what turn-1-mini says from here on.
+                    utterance.pause = PauseRecord(talkMs: talkMs, wakeWordOnly: wakeWordOnly, at: utterance.samples,
                                                   miniAtPause: utterance.miniLatest, miniPeak: utterance.miniLatest,
                                                   miniPeakMs: utterance.miniLatest == nil ? nil : Int(tuning.pauseCheckMs))
                     utterance.miniPeak = utterance.miniLatest
                     if wakeWordOnly {
                         // "Control." and a breath: the turn model would call that finished. Wait for the rest.
-                        deps.log("pause after the trigger word alone: waiting for the rest, not asking the turn model")
-                    } else {
-                        samplePause(talkMs: Double(talkMs))
+                        deps.log("pause after the trigger word alone: waiting for the rest")
                     }
                 }
                 if self.utterance == nil { break }
@@ -588,7 +573,7 @@ final class HandsFreeEngine: @unchecked Sendable {
         let endpointer = UtteranceEndpointer(tuning: tuning, alreadyMs: backlogMs,
                                              alreadySpokeMs: Double(candidate.spokeMs), wakeWordStart: wakeWordStart)
         let utterance = Utterance(client: client, trigger: trigger, dictation: dictation, endpointer: endpointer,
-                                  interrupted: interrupted, audio: backlog)
+                                  interrupted: interrupted, samples: backlog.count)
         utterance.startedAt = deps.now() - backlogMs
         recordStart(utterance)
         utterance.mini = deps.continuousTurn()
@@ -602,8 +587,7 @@ final class HandsFreeEngine: @unchecked Sendable {
     }
 
     /// `mini`: turn-1-mini said they had finished, and they stayed quiet `miniHoldMs`.
-    /// `finished` was Smart Turn's, before turn-1-mini took over (October 25).
-    private enum EndReason: String { case mini, finished, silence, tooLong = "too-long", lost }
+    private enum EndReason: String { case mini, silence, tooLong = "too-long", lost }
 
     /// After turn-1-mini first reaches its threshold in a silence, how long the
     /// quiet must go on before the dictation ends: speech in it cancels the ending.
@@ -614,7 +598,6 @@ final class HandsFreeEngine: @unchecked Sendable {
         utterance.ended = true
         utterance.backstop?.cancel()
         closePause(utterance, outcome: reason.rawValue)
-        stopSampling()
         self.utterance = nil
         emit(utterance.client, .cue(.dictationEnd))
         // When the speech itself ended: the quiet that ended it is not part of it.
@@ -675,53 +658,6 @@ final class HandsFreeEngine: @unchecked Sendable {
                                            reason: "lost", shutdown: false))
     }
 
-    /// A pause: ask the turn model once, `pauseCheckMs` in (0.5 s: at the 0.2 s
-    /// its documentation suggests, it cut the user off too quickly). It was
-    /// trained on turns ending in at least 200 ms of silence. At or above the threshold the dictation ends
-    /// there; below it, it waits for the silence timeout, or for them to carry
-    /// on, when the next pause is asked about afresh. Asking again through the
-    /// pause, as this did until October 25, gave answers that jumped about
-    /// (0.67, 0.74, 0.68, 0.48, 0.30, 0.54, 0.94 in one pause), so most endings
-    /// after the first were chance. The one answer stays on the gauge until
-    /// they carry on. An answer arriving after they did is dropped.
-    private func samplePause(talkMs: Double) {
-        pauseOver()
-        guard let utterance else { return }
-        let pause = pauseNumber
-        utterance.sampling = true
-        publishGauge()
-        let window = Array(utterance.audio.suffix(SmartTurnWindow.samples)).map { Float($0) / 32768 }
-        deps.turn(window) { [weak self] p in
-            guard let self else { return }
-            let stillCurrent = pause == self.pauseNumber
-            self.deps.log(String(format: "pause after %.1fs: %@%@", talkMs / 1000,
-                                 p.map { String(format: "p(finished)=%.2f", $0) } ?? "no turn verdict",
-                                 stillCurrent ? "" : ", but it is over"))
-            // Shown and recorded, deciding nothing: turn-1-mini ends turns now (`checkMiniEnding`).
-            let wouldEnd = stillCurrent && p.map { $0 >= self.tuning.turnThreshold } == true
-            self.deps.record("turn", ["talkMs": Int(talkMs), "p": p ?? NSNull(),
-                                      "threshold": self.tuning.turnThreshold, "wouldEnd": wouldEnd,
-                                      "carriedOn": !stillCurrent])
-            guard stillCurrent, self.utterance === utterance else { return }
-            utterance.turn = p
-            utterance.pause?.smartTurn = p
-            utterance.sampling = false
-            self.publishGauge()
-        }
-    }
-
-    /// No more asking about this pause.
-    private func stopSampling() {
-        pauseNumber += 1
-        utterance?.sampling = false
-    }
-
-    /// The pause is over — they carried on: any verdict on it is moot.
-    private func pauseOver() {
-        stopSampling()
-        utterance?.turn = nil
-    }
-
     /// Feed turn-1-mini the dictation's audio; keep its latest answer, and its
     /// highest since the pause began. A model that fails is dropped for the
     /// rest of the dictation.
@@ -738,7 +674,7 @@ final class HandsFreeEngine: @unchecked Sendable {
         // The first frame at or over its threshold in this pause, timed to its own 20 ms frame.
         if var pause = utterance.pause, pause.miniCrossedMs == nil,
            let i = probs.firstIndex(where: { Double($0) >= TurnOneMini.threshold }) {
-            let endMs = HandsFreeAudio.ms(samples: utterance.audio.count - pause.at) + tuning.pauseCheckMs
+            let endMs = HandsFreeAudio.ms(samples: utterance.samples - pause.at) + tuning.pauseCheckMs
             pause.miniCrossedMs = max(0, Int(endMs) - (probs.count - 1 - i) * 20)
             utterance.pause = pause
         }
@@ -746,7 +682,7 @@ final class HandsFreeEngine: @unchecked Sendable {
             utterance.miniPeak = top
             if var pause = utterance.pause {
                 pause.miniPeak = top
-                pause.miniPeakMs = Int(HandsFreeAudio.ms(samples: utterance.audio.count - pause.at)) + Int(tuning.pauseCheckMs)
+                pause.miniPeakMs = Int(HandsFreeAudio.ms(samples: utterance.samples - pause.at)) + Int(tuning.pauseCheckMs)
                 utterance.pause = pause
             }
         }
@@ -756,11 +692,11 @@ final class HandsFreeEngine: @unchecked Sendable {
     private var lastDictation: (speechEndedAt: Double, endedBy: String)?
 
     /// A dictation's first syllable, and how soon after the last one's speech
-    /// ended — a gap of a second or two after one Smart Turn ended (`finished`)
+    /// ended — a gap of a second or two after one turn-1-mini ended (`mini`)
     /// says it ended the turn too early: they had not finished.
     private func recordStart(_ utterance: Utterance) {
         var detail: [String: Any] = ["client": utterance.client, "startedAt": Self.iso(utterance.startedAt),
-                                     "backlogMs": Int(HandsFreeAudio.ms(samples: utterance.audio.count))]
+                                     "backlogMs": Int(HandsFreeAudio.ms(samples: utterance.samples))]
         if let last = lastDictation {
             detail["gapFromPreviousMs"] = Int(utterance.startedAt - last.speechEndedAt)
             detail["previousEndedBy"] = last.endedBy
@@ -772,35 +708,33 @@ final class HandsFreeEngine: @unchecked Sendable {
         ISO8601DateFormatter.withFractions.string(from: Date(timeIntervalSince1970: ms / 1000))
     }
 
-    /// turn-1-mini decides when the dictation ends (October 25, after Smart Turn
-    /// cut the user off too often): the first time in a silence its answer reaches
-    /// its threshold (`TurnOneMini.threshold`; 0.5 on trial for now), the
-    /// dictation ends `miniHoldMs` later — unless speech comes back first, which
-    /// cancels the ending and listening goes on. After the trigger word alone the
-    /// ending waits, as Smart Turn did: "Control." and a breath is not the end.
+    /// turn-1-mini decides when the dictation ends: the first time in a silence
+    /// its answer reaches its threshold (`TurnOneMini.threshold`; 0.5 on trial
+    /// for now), the dictation ends `miniHoldMs` later — unless speech comes back
+    /// first, which cancels the ending and listening goes on. After the trigger
+    /// word alone the ending waits: "Control." and a breath is not the end.
     /// The silence timeout stays the fallback. Every crossing, ending and
     /// cancellation is recorded (`mini-ending`).
     private func checkMiniEnding(_ utterance: Utterance) {
         let quiet = utterance.endpointer.quietMs
         if let ending = utterance.miniEnding {
-            let heldMs = HandsFreeAudio.ms(samples: utterance.audio.count - ending.at)
+            let heldMs = HandsFreeAudio.ms(samples: utterance.samples - ending.at)
             if quiet == 0 {
                 utterance.miniEnding = nil
                 utterance.miniCancels += 1
                 deps.log(String(format: "turn-1-mini's ending cancelled: speech again %.0f ms after it crossed", heldMs))
                 deps.record("mini-ending", ["outcome": "cancelled", "p": ending.p, "crossedAtQuietMs": Int(ending.quietMs),
-                                            "afterMs": Int(heldMs), "smartTurn": utterance.turn ?? NSNull()])
+                                            "afterMs": Int(heldMs)])
             } else if heldMs >= Self.miniHoldMs {
                 if utterance.pause?.wakeWordOnly == true { return }
                 deps.log(String(format: "turn-1-mini: finished (%.2f at %.0f ms of quiet, held %.0f ms)",
                                 ending.p, ending.quietMs, heldMs))
                 deps.record("mini-ending", ["outcome": "ended", "p": ending.p, "crossedAtQuietMs": Int(ending.quietMs),
-                                            "afterMs": Int(heldMs), "smartTurn": utterance.turn ?? NSNull(),
-                                            "cancelledBefore": utterance.miniCancels])
+                                            "afterMs": Int(heldMs), "cancelledBefore": utterance.miniCancels])
                 end(.mini)
             }
         } else if quiet > 0, let p = utterance.miniLatest, p >= TurnOneMini.threshold {
-            utterance.miniEnding = (utterance.audio.count, p, quiet)
+            utterance.miniEnding = (utterance.samples, p, quiet)
             deps.log(String(format: "turn-1-mini crossed %.2f (%.2f) %.0f ms into the quiet: ending in %.0f ms unless they speak",
                             TurnOneMini.threshold, p, quiet, Self.miniHoldMs))
             deps.record("mini-ending", ["outcome": "crossed", "p": p, "crossedAtQuietMs": Int(quiet)])
@@ -813,10 +747,9 @@ final class HandsFreeEngine: @unchecked Sendable {
         utterance.pause = nil
         var detail: [String: Any] = [
             "talkMs": pause.talkMs, "outcome": outcome, "wakeWordOnly": pause.wakeWordOnly,
-            "silenceMs": Int(HandsFreeAudio.ms(samples: utterance.audio.count - pause.at)) + Int(tuning.pauseCheckMs),
-            "smartTurnThreshold": tuning.turnThreshold, "miniThreshold": TurnOneMini.threshold,
+            "silenceMs": Int(HandsFreeAudio.ms(samples: utterance.samples - pause.at)) + Int(tuning.pauseCheckMs),
+            "miniThreshold": TurnOneMini.threshold,
         ]
-        if let p = pause.smartTurn { detail["smartTurn"] = p }
         if let p = pause.miniAtPause { detail["miniAtPause"] = p }
         if let p = pause.miniPeak { detail["miniPeak"] = p }
         if let ms = pause.miniPeakMs { detail["miniPeakMs"] = ms }
@@ -1068,24 +1001,21 @@ final class HandsFreeEngine: @unchecked Sendable {
     private func publishGauge(keepingTurn ended: Utterance? = nil) {
         /// To two places: the client draws it, it need not hear every flicker.
         func round(_ p: Double?) -> Double? { p.map { ($0 * 100).rounded() / 100 } }
-        var gauge = Gauge(threshold: tuning.turnThreshold, sampling: false)
+        var gauge = Gauge()
         if let utterance {
             let quiet = utterance.endpointer.quietMs
             gauge.quietSince = quiet > 0 ? (deps.now() - quiet).rounded() : nil
             gauge.patienceMs = utterance.endpointer.patienceMs.rounded()
-            gauge.turn = utterance.turn
-            gauge.sampling = utterance.sampling
             gauge.mini = round(utterance.miniLatest)
             gauge.miniPeak = round(utterance.miniPeak)
             if case .gauge(let last)? = lastGauge,
-               (last.quietSince == nil) == (gauge.quietSince == nil), last.turn == gauge.turn,
-               last.sampling == gauge.sampling, last.mini == gauge.mini, last.miniPeak == gauge.miniPeak,
+               (last.quietSince == nil) == (gauge.quietSince == nil),
+               last.mini == gauge.mini, last.miniPeak == gauge.miniPeak,
                abs((last.patienceMs ?? 0) - (gauge.patienceMs ?? 0)) < HandsFreeAudio.frameMs * 4 {
                 return
             }
         } else if let ended {
             // Sending: what ended it stays shown.
-            gauge.turn = ended.turn
             gauge.mini = round(ended.miniLatest)
             gauge.miniPeak = round(ended.miniPeak)
         }
@@ -1098,9 +1028,4 @@ final class HandsFreeEngine: @unchecked Sendable {
     private func emit(_ client: String?, _ event: Event) {
         deps.emit(Outgoing(client: client, event: event))
     }
-}
-
-/// The turn model hears the last eight seconds.
-enum SmartTurnWindow {
-    static let samples = 8 * HandsFreeAudio.sampleRate
 }

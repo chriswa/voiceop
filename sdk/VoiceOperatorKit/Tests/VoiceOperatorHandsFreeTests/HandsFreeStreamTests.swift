@@ -282,7 +282,7 @@ final class HandsFreeStreamTests: XCTestCase {
     func testEventsAreParsed() {
         let t = FakeTransport()
         t.vo(["type": "state", "phase": "hearing", "conversation": true, "closesAt": NSNull(), "checking": false, "pending": true])
-        t.vo(["type": "gauge", "quietSince": 1000.5, "patienceMs": 1200, "turn": NSNull(), "threshold": 0.5, "sampling": true])
+        t.vo(["type": "gauge", "quietSince": 1000.5, "patienceMs": 1200, "mini": 0.31, "miniPeak": NSNull(), "miniThreshold": 0.5])
         t.vo(["type": "cue", "name": "dictationStart", "haptic": "tap"])
         t.vo(["type": "cue", "name": "ready"])
         t.vo(["type": "duck", "on": true])
@@ -294,7 +294,7 @@ final class HandsFreeStreamTests: XCTestCase {
         t.vo(["type": "something-new"])
         XCTAssertEqual(t.events, [
             .state(phase: "hearing", conversation: true, closesAt: nil, checking: false, pending: true),
-            .gauge(quietSince: 1000.5, patienceMs: 1200, turn: nil, threshold: 0.5, sampling: true),
+            .gauge(quietSince: 1000.5, patienceMs: 1200, mini: 0.31, miniPeak: nil, miniThreshold: 0.5),
             .cue(name: "dictationStart", haptic: "tap"),
             .cue(name: "ready", haptic: nil),
             .duck(true),

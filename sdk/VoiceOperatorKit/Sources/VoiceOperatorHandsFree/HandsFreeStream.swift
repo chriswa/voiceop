@@ -8,7 +8,9 @@ public enum HandsFreeEvent: Equatable, Sendable {
     /// Off: `off`, `replaced`, `lost`, `disconnected`, `incognito`, `unsupported_audio`, `no_client`.
     case ended(String)
     case state(phase: String, conversation: Bool, closesAt: Double?, checking: Bool, pending: Bool)
-    case gauge(quietSince: Double?, patienceMs: Double?, turn: Double?, threshold: Double, sampling: Bool)
+    /// What may end the dictation: quiet since `quietSince` ends it at `patienceMs`; `mini` is
+    /// turn-1-mini's latest answer, `miniPeak` its highest this pause, `miniThreshold` the one that ends it.
+    case gauge(quietSince: Double?, patienceMs: Double?, mini: Double?, miniPeak: Double?, miniThreshold: Double)
     case cue(name: String, haptic: String?)
     case duck(Bool)
     case cutIn(msAgo: Int, at: Double)
@@ -264,8 +266,8 @@ public final class HandsFreeStream {
             return .state(phase: m["phase"] as? String ?? "off", conversation: bool(m["conversation"]),
                           closesAt: double(m["closesAt"]), checking: bool(m["checking"]), pending: bool(m["pending"]))
         case "gauge":
-            return .gauge(quietSince: double(m["quietSince"]), patienceMs: double(m["patienceMs"]), turn: double(m["turn"]),
-                          threshold: double(m["threshold"]) ?? 0, sampling: bool(m["sampling"]))
+            return .gauge(quietSince: double(m["quietSince"]), patienceMs: double(m["patienceMs"]), mini: double(m["mini"]),
+                          miniPeak: double(m["miniPeak"]), miniThreshold: double(m["miniThreshold"]) ?? 0)
         case "cue":
             return .cue(name: m["name"] as? String ?? "", haptic: m["haptic"] as? String)
         case "duck":

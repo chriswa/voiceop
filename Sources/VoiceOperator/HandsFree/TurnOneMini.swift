@@ -2,17 +2,16 @@ import CryptoKit
 import Foundation
 import OnnxRuntimeBindings
 
-/// A second opinion on whether the speaker has finished, on trial beside Smart
-/// Turn: turn-1-mini (p99lab, Apache-2.0 — "turn-1-mini by p99lab",
-/// https://huggingface.co/p99lab/turn-1-mini). A 5.3M-parameter streaming
-/// model: fed every 160 ms of audio, it answers with the probability that the
-/// turn has ended for each 20 ms in it, carrying its own state (1.2 s of
-/// attention) from step to step. Smart Turn answers once per pause; this
-/// answers all the time, which is what its gauge on the hands-free button
-/// shows — the latest answer, and the highest since the pause began.
+/// Has the speaker finished their turn? turn-1-mini (p99lab, Apache-2.0 —
+/// "turn-1-mini by p99lab", https://huggingface.co/p99lab/turn-1-mini). A
+/// 5.3M-parameter streaming model: fed every 160 ms of audio, it answers with
+/// the probability that the turn has ended for each 20 ms in it, carrying its
+/// own state (1.2 s of attention) from step to step. It answers all the time,
+/// which is what its gauge on the hands-free button shows — the latest answer,
+/// and the highest since the pause began.
 ///
-/// For the record and the gauge only: nothing is decided on it yet
-/// (`HandsFreeEngine`, `pause` lines in the decision record).
+/// It ends hands-free dictations (`HandsFreeEngine.checkMiniEnding`); every
+/// pause's line in the decision record says what it made of it.
 ///
 /// The graph (`turn-1-mini.step.int8.onnx`, 6 MB: the benchmarked 8-bit
 /// weights, float arithmetic) carries the 4 kHz low-pass and the log-mel it

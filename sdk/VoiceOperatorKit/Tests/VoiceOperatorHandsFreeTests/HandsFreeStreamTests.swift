@@ -282,6 +282,8 @@ final class HandsFreeStreamTests: XCTestCase {
     func testEventsAreParsed() {
         let t = FakeTransport()
         t.vo(["type": "state", "phase": "hearing", "conversation": true, "closesAt": NSNull(), "checking": false, "pending": true])
+        t.vo(["type": "state", "phase": "listening", "conversation": false, "closesAt": NSNull(), "checking": false,
+              "pending": false, "standingAside": "speech"])
         t.vo(["type": "gauge", "quietSince": 1000.5, "patienceMs": 1200, "mini": 0.31, "miniPeak": NSNull(), "miniThreshold": 0.5])
         t.vo(["type": "cue", "name": "dictationStart", "haptic": "tap"])
         t.vo(["type": "cue", "name": "ready"])
@@ -294,6 +296,7 @@ final class HandsFreeStreamTests: XCTestCase {
         t.vo(["type": "something-new"])
         XCTAssertEqual(t.events, [
             .state(phase: "hearing", conversation: true, closesAt: nil, checking: false, pending: true),
+            .state(phase: "listening", conversation: false, closesAt: nil, checking: false, pending: false, standingAside: "speech"),
             .gauge(quietSince: 1000.5, patienceMs: 1200, mini: 0.31, miniPeak: nil, miniThreshold: 0.5),
             .cue(name: "dictationStart", haptic: "tap"),
             .cue(name: "ready", haptic: nil),
@@ -304,6 +307,6 @@ final class HandsFreeStreamTests: XCTestCase {
             .refused("no_client"),
             .error("bad_json"),
         ])
-        XCTAssertEqual(t.raw.count, 11, "every line but bookkeeping is forwarded raw, unknown ones too")
+        XCTAssertEqual(t.raw.count, 12, "every line but bookkeeping is forwarded raw, unknown ones too")
     }
 }

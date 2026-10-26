@@ -84,8 +84,10 @@ final class HandsFreeEngine: @unchecked Sendable {
         /// conversation window closes if nobody speaks; nil while it is held
         /// open or closed. `checking`: speech is being checked. `pending`:
         /// speech that needs the trigger word is undecided — the client's cue
-        /// for a repeating "deciding" beep.
-        case state(phase: Phase, conversation: Bool, closesAt: Double?, checking: Bool, pending: Bool)
+        /// for a repeating "deciding" beep. `standingAside`: listening, but not
+        /// to the microphone, and why.
+        case state(phase: Phase, conversation: Bool, closesAt: Double?, checking: Bool, pending: Bool,
+                   standingAside: StandAside? = nil)
         /// The end-of-dictation gauge, as data points the client animates from.
         case gauge(Gauge)
         case cue(Cue)
@@ -99,6 +101,13 @@ final class HandsFreeEngine: @unchecked Sendable {
         /// it was a phrase that ends the conversation.
         case transcript(text: String, trigger: String?, interrupted: Bool, reason: String, shutdown: Bool)
     }
+
+    /// Why hands-free is not listening to its source while it says it is:
+    /// `speech`, our own voice playing where the microphone hears it (Voice
+    /// Operator on the Mac's speakers, the client's voice on the phone's);
+    /// `sound`, the client's other sound (a cue); `dictation`, a Fn dictation
+    /// has the Mac's microphone.
+    enum StandAside: String, Sendable { case speech, sound, dictation }
 
     /// What may end the dictation, as the client draws it: quiet since
     /// `quietSince` (wall ms; nil while they talk) ends it at `patienceMs`;
@@ -157,12 +166,17 @@ final class HandsFreeEngine: @unchecked Sendable {
         var continuousTurn: () -> ContinuousTurn? = { nil }
     }
 
+    struct Deaf {
+        var why: String
+        var cause: StandAside
+    }
+
     /// What the host knows that the audio does not say, read every frame.
     struct SourceState {
         /// Not listening: Voice Operator's own voice is playing on speakers, the
         /// client is playing without echo cancellation, or a Fn dictation has
-        /// the microphone. The reason, for the record.
-        var deaf: String?
+        /// the microphone. The reason, for the record, and for the client.
+        var deaf: Deaf?
         /// The client's voice playing on the source's device, with echo
         /// cancellation: it is turned down for anyone speaking, and can be cut off.
         var clientSpeaking = false
@@ -217,7 +231,8 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// Of those, checks of candidates the listener handed out — not "let me turn
     /// this off" — which the pending beep waits on.
     private var candidatesChecking = 0
-    private var stoodAside = false
+    /// Why the listener stands aside, while it does.
+    private var standingAside: StandAside?
     private var ducked = false
     private var speechRun = 0
     private var quietRun = 0
@@ -472,15 +487,15 @@ final class HandsFreeEngine: @unchecked Sendable {
             return
         }
         guard phase == .listening else { return }
-        if let reason = state.deaf {
+        if let deaf = state.deaf {
             // Deaf to the trigger word until this ends.
-            if !stoodAside { deps.record("stood-aside", ["why": reason]) }
-            stoodAside = true
+            if standingAside == nil { deps.record("stood-aside", ["why": deaf.why]) }
+            standingAside = deaf.cause
             shutdownWatch = nil
             return
         }
-        if stoodAside {
-            stoodAside = false
+        if standingAside != nil {
+            standingAside = nil
             deps.record("listening-again", [:])
             listener.resume()
         }
@@ -987,10 +1002,11 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     /// The state, sent only when it changed.
     private func publishState() {
-        let pending = phase == .listening && live && !stoodAside && !conversation
+        let pending = phase == .listening && live && standingAside == nil && !conversation
             && (listener.undecided || candidatesChecking > 0)
         let state = Event.state(phase: phase, conversation: conversation, closesAt: closesAt,
-                                checking: checking > 0, pending: pending)
+                                checking: checking > 0, pending: pending,
+                                standingAside: phase == .listening && live ? standingAside : nil)
         guard state != lastState else { return }
         lastState = state
         emit(nil, state)

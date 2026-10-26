@@ -96,7 +96,7 @@ public final class HandsFreeSession {
         case .duck(let on):
             ducked = on
             engine.handle(command: "speech-duck", body: ["on": on])
-        case .state(let phase, _, _, _, _):
+        case .state(let phase, _, _, _, _, _):
             let now = phase == "hearing"
             if now != dictating {
                 dictating = now

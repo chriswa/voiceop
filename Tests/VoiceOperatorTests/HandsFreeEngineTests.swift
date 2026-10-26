@@ -169,7 +169,7 @@ private final class Harness {
         for e in events {
             switch e.event {
             case .cue(let cue): out.append(cue.rawValue)
-            case .state(_, _, _, _, let p) where p != pending:
+            case .state(_, _, _, _, let p, _) where p != pending:
                 pending = p
                 out.append("pending:\(p ? "on" : "off")")
             default: break
@@ -187,10 +187,20 @@ private final class Harness {
     var ducks: [Bool] { events.compactMap { if case .duck(let on) = $0.event { return on }; return nil } }
     var phase: HandsFreeEngine.Phase { engine.phase }
     var lastState: (conversation: Bool, closesAt: Double?)? {
-        for e in events.reversed() { if case .state(_, let c, let at, _, _) = e.event { return (c, at) } }
+        for e in events.reversed() { if case .state(_, let c, let at, _, _, _) = e.event { return (c, at) } }
         return nil
     }
     var conversation: Bool { lastState?.conversation ?? false }
+    /// Each change in why it stands aside, as the states sent said it ("-" for listening).
+    var standingAside: [String] {
+        var out: [String] = []
+        for e in events {
+            guard case .state(_, _, _, _, _, let aside) = e.event else { continue }
+            let now = aside?.rawValue ?? "-"
+            if out.last != now { out.append(now) }
+        }
+        return out
+    }
     func recorded(_ kind: String) -> [[String: Any]] { records.filter { $0.0 == kind }.map(\.1) }
 }
 
@@ -329,7 +339,7 @@ final class HandsFreeEngineTests: XCTestCase {
 
     func testDeafWhileTheSourceSaysSoAndNeedsAQuietSpellAfter() {
         let h = harness()
-        h.state.deaf = "playing"
+        h.state.deaf = .init(why: "playing", cause: .speech)
         h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(800))
         XCTAssertEqual(h.checks, [])
         h.state.deaf = nil
@@ -337,6 +347,31 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.checks, [])
         h.hear(Sound.quiet(1000), Sound.speech(1500))
         XCTAssertEqual(h.checks.count, 1)
+    }
+
+    func testTellsTheClientWhileItStandsAsideAndWhy() {
+        let h = harness()
+        h.hear(Sound.quiet(500))
+        h.state.deaf = .init(why: "Voice Operator speaking on speakers", cause: .speech)
+        h.hear(Sound.quiet(1000))
+        h.state.deaf = nil
+        h.hear(Sound.quiet(500))
+        h.state.deaf = .init(why: "a Fn dictation", cause: .dictation)
+        h.hear(Sound.quiet(500))
+        h.state.deaf = nil
+        h.hear(Sound.quiet(500))
+        XCTAssertEqual(h.standingAside, ["speech", "-", "dictation", "-"])
+        // Sent on change: one state each way, not one a frame.
+        XCTAssertEqual(h.events.filter { if case .state = $0.event { return true }; return false }.count, 4)
+    }
+
+    func testStandingAsideGoesOnTheWire() {
+        let aside = HandsFreeService.wire(.state(phase: .listening, conversation: false, closesAt: nil, checking: false,
+                                                 pending: false, standingAside: .speech))
+        XCTAssertEqual(aside["standingAside"] as? String, "speech")
+        let listening = HandsFreeService.wire(.state(phase: .listening, conversation: false, closesAt: nil,
+                                                     checking: false, pending: false))
+        XCTAssertTrue(listening["standingAside"] is NSNull)
     }
 
     func testTheTriggerAloneWaitsForMoreThenSendsIt() {

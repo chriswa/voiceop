@@ -217,10 +217,14 @@ final class HandsFreeService: @unchecked Sendable {
             streamAudio(on: connection, message)
         case (.stream, "playing"):
             guard let session = connection.session else { return }
+            let wasSpeech = session.playing && session.speech
             session.playing = message["on"] as? Bool ?? false
             session.speech = message["speech"] as? Bool ?? session.playing
             session.echoCancelled = message["echoCancelled"] as? Bool ?? false
-            if !session.playing { session.playingEndedAt = Date() }
+            if !session.playing {
+                session.playingEndedAt = Date()
+                session.endedOnSpeech = wasSpeech
+            }
         case (.stream, "stop"):
             if let session = connection.session { end(session, why: "off") }
         case (.speaker, "progress"):
@@ -364,12 +368,12 @@ final class HandsFreeService: @unchecked Sendable {
         let speaking = host.speaking
         state.voiceOperatorSpeaking = speaking
         if host.fnDictating {
-            state.deaf = "a Fn dictation"
+            state.deaf = .init(why: "a Fn dictation", cause: .dictation)
         } else if host.speakers, host.speakingOrRinging(tailMs: Self.playbackTailMs) {
             // Without a headset the microphone hears Voice Operator, and would take it for the user.
-            state.deaf = "Voice Operator speaking on speakers"
+            state.deaf = .init(why: "Voice Operator speaking on speakers", cause: .speech)
         } else if let playing = clients.values.first(where: { $0.connection.isPlaying(tailMs: Self.playbackTailMs) }) {
-            state.deaf = "\(playing.name) playing"
+            state.deaf = .init(why: "\(playing.name) playing", cause: .sound)
         }
         return state
     }
@@ -377,7 +381,7 @@ final class HandsFreeService: @unchecked Sendable {
     private func deliverMac(_ outgoing: HandsFreeEngine.Outgoing) {
         let targets = outgoing.client.map { [$0] } ?? (mac?.engine.clients ?? [])
         for name in targets { clients[name]?.connection.send(Self.wire(outgoing.event)) }
-        if case .state(let phase, _, _, _, _) = outgoing.event {
+        if case .state(let phase, _, _, _, _, _) = outgoing.event {
             setBusy("mac", phase == .hearing || phase == .sending)
         }
         // "Let me turn this off" ends hands-free hands-free: after the words and the cue have gone.
@@ -411,7 +415,7 @@ final class HandsFreeService: @unchecked Sendable {
         let engine = makeEngine(owner: client, trigger: registered.trigger, sessionKey: id) { [weak self] outgoing in
             guard let self, let session else { return }
             session.connection?.send(Self.wire(outgoing.event))
-            if case .state(let phase, _, _, _, _) = outgoing.event {
+            if case .state(let phase, _, _, _, _, _) = outgoing.event {
                 self.setBusy(id, phase == .hearing || phase == .sending)
             }
             if case .transcript(_, _, _, _, true) = outgoing.event {
@@ -480,7 +484,8 @@ final class HandsFreeService: @unchecked Sendable {
         let ringing = session.playing
             || (session.playingEndedAt.map { Date().timeIntervalSince($0) * 1000 < Self.playbackTailMs } ?? false)
         if ringing, !session.echoCancelled {
-            state.deaf = "\(session.device) playing"
+            let speech = session.playing ? session.speech : session.endedOnSpeech
+            state.deaf = .init(why: "\(session.device) playing", cause: speech ? .speech : .sound)
         } else if session.playing, session.speech {
             state.clientSpeaking = true
         }
@@ -587,9 +592,10 @@ final class HandsFreeService: @unchecked Sendable {
     static func wire(_ event: HandsFreeEngine.Event) -> [String: Any] {
         func opt(_ value: Double?) -> Any { value.map { $0 } ?? NSNull() }
         switch event {
-        case .state(let phase, let conversation, let closesAt, let checking, let pending):
+        case .state(let phase, let conversation, let closesAt, let checking, let pending, let standingAside):
             return ["type": "state", "phase": phase.rawValue, "conversation": conversation,
-                    "closesAt": opt(closesAt), "checking": checking, "pending": pending]
+                    "closesAt": opt(closesAt), "checking": checking, "pending": pending,
+                    "standingAside": standingAside.map { $0.rawValue as Any } ?? NSNull()]
         case .gauge(let g):
             return ["type": "gauge", "quietSince": opt(g.quietSince), "patienceMs": opt(g.patienceMs),
                     "mini": opt(g.mini), "miniPeak": opt(g.miniPeak), "miniThreshold": g.miniThreshold]
@@ -632,6 +638,8 @@ fileprivate final class StreamSession {
     var playing = false
     var speech = false
     var echoCancelled = false
+    /// What ended when `playing` last went off was the client's voice: its tail is speech too.
+    var endedOnSpeech = false
     var playingEndedAt: Date?
     var expiry: DispatchWorkItem?
     var droppedAt: Date?

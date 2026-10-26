@@ -53,6 +53,9 @@ final class AudioArbiter {
     var onCommand: ((String, DictationContext) -> Void)?
     var onDictationBegan: (() -> Void)?
     var onDictationEnded: (() -> Void)?
+    /// The microphone's stall watchdog, on the main thread — see
+    /// `AudioRecorder.checkDelivery`.
+    var onMicrophoneDelivery: ((AudioRecorder.Delivery) -> Void)?
     /// Which transcription path the last dictation took — fires on every
     /// transition, including the launch-time key check in `prewarm`.
     var onStreamHealth: ((StreamHealth) -> Void)?
@@ -148,6 +151,10 @@ final class AudioArbiter {
         commandHistory = loaded.commands
         sttDir = HistoryStore.supportDir.appendingPathComponent("stt-history", isDirectory: true)
         try? FileManager.default.createDirectory(at: sttDir, withIntermediateDirectories: true)
+        recorder.onDelivery = { [weak self] delivery in
+            // Delivered on the main thread by contract (see AudioRecorder).
+            MainActor.assumeIsolated { self?.onMicrophoneDelivery?(delivery) }
+        }
     }
 
     /// Warm the providers' connections, credentials and models, so the first
@@ -449,8 +456,16 @@ final class AudioArbiter {
 
     /// Capture command routing context at stop, not at key-down: this is the app
     /// the user intentionally had selected when they finished speaking.
-    func endDictation(context: DictationContext? = nil) {
-        guard recorder.isRecording else { return }
+    ///
+    /// `micStalled`: the microphone stopped delivering mid-dictation
+    /// (`AudioRecorder.Delivery.stalled`), and this stops it early, with the user
+    /// most likely still talking. What was captured is transcribed as usual, but
+    /// the closing cue is the long `microphoneStalled` alarm, played before
+    /// anything else so the user stops as soon as possible. Returns whether there
+    /// was a recording to end.
+    @discardableResult
+    func endDictation(context: DictationContext? = nil, micStalled: Bool = false) -> Bool {
+        guard recorder.isRecording else { return false }
         let live = self.live
         self.live = nil
         // Clear `live` first, then latch: resolving fires the observers registered
@@ -481,7 +496,7 @@ final class AudioArbiter {
             Log.log("recorder stop failed: \(error)")
             if let live { cancelStream(live) }
             live?.trace.flush()
-            muter.restore(); finishDictation(); return
+            muter.restore(); finishDictation(); return true
         }
         live?.trace.mark("recorder-stop")
         // Snapshot the un-encoded remainder now, synchronously. Reading it later
@@ -493,6 +508,12 @@ final class AudioArbiter {
         let peak = recorder.lastPeak
         let rms = recorder.lastRMS
         muter.restore()
+        if micStalled {
+            playClosingCue(.microphoneStalled, mode: mode)
+            Log.log(String(format: "dictation: WARNING stopped early — the microphone stalled after %.1fs of "
+                           + "audio, %.1fs into the dictation", duration, heldSeconds))
+            live?.trace.note("stopped early: microphone stalled")
+        }
 
         if let live { noteLeadingLevels(live, pcm: pcm) }
         // In memory only. Whether it is ever written down is `record`'s call.
@@ -514,35 +535,35 @@ final class AudioArbiter {
                 live?.trace.flush()
                 // Not `playClosingCue`: there is no closing to announce, and the
                 // start chirp this would silence never played either.
-                SoundEffect.captureFailed.play()
+                if !micStalled { SoundEffect.captureFailed.play() }
                 record(clip: nil, duration: heldSeconds, transcript: "", command: isCommand,
                        error: "the microphone captured no audio")
                 finishDictation()
-                return
+                return true
             }
             // A stray brush of the trigger key: stay completely quiet about it
             // unless the start cue already told the user we were listening.
             if duration <= Self.accidentalTapSeconds {
                 live?.trace.note(String(format: "discarded silent %.2fs tap", duration))
                 live?.trace.flush()
-                if announcedListening { playClosingCue(.silenceSkipped, mode: mode) }
+                if announcedListening, !micStalled { playClosingCue(.silenceSkipped, mode: mode) }
                 finishDictation()
-                return
+                return true
             }
-            playClosingCue(.silenceSkipped, mode: mode)
+            if !micStalled { playClosingCue(.silenceSkipped, mode: mode) }
             live?.trace.note("no speech detected")
             live?.trace.flush()
             record(clip: clip, duration: duration, transcript: "", command: isCommand,
                    error: "no speech detected")
             finishDictation()
-            return
+            return true
         }
 
         // Say it at the moment it starts costing: a stream that has already
         // failed means this dictation goes the long way round, so the finish
         // cue carries a low tail instead of ending clean (see StreamHealth).
         let slow = live?.leg?.isBroken ?? false
-        playClosingCue(slow ? mode.slowFinishCue : mode.finishCue, mode: mode)
+        if !micStalled { playClosingCue(slow ? mode.slowFinishCue : mode.finishCue, mode: mode) }
         onStatus?(.transcribing)
         startTranscriptionProgressCue()
         // Bind the routing context to *this* dictation rather than reading shared
@@ -589,6 +610,7 @@ final class AudioArbiter {
             }
             self.finishDictation()
         }
+        return true
     }
 
     /// Finish the live session if we have one; it falls back to the provider's
@@ -1027,6 +1049,8 @@ final class AudioArbiter {
             self.speechSessionID = nil
             self.playbackControls = PlaybackControls(rate: PlaybackPreferences().rate)
             self.tts.stop()
+            // Tearing the speech engine down touches the output device too.
+            self.recorder.speechEnded()
             // The speech engine is gone; get the capture engine it left unable
             // to open AirPods replaced before the next dictation needs it.
             self.recorder.replaceEngineIfStale()
@@ -1054,7 +1078,10 @@ final class AudioArbiter {
             wordOverlay.hide()
             if !isDictating { onStatus?(.idle) }
         }
-        if wasSpeaking && !active { onSpeechIdle?() }
+        if wasSpeaking && !active {
+            recorder.speechEnded()
+            onSpeechIdle?()
+        }
         onPlaybackControlsChanged?()
     }
     /// Duck other audio under narration — except on a Bluetooth output. Voice

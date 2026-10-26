@@ -289,6 +289,8 @@ final class HotkeyMonitor: @unchecked Sendable {
     private var stopTimer: Timer?
 
     private var thread: Thread?
+    /// The hotkey thread's run loop, for `dictationEndedElsewhere`. Under `stateLock`.
+    private var runLoop: CFRunLoop?
 
     private enum Gesture: Equatable {
         /// Not dictating.
@@ -342,6 +344,7 @@ final class HotkeyMonitor: @unchecked Sendable {
             guard let self, let tap = self.tap else { return }
             let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            self.stateLock.withLock { self.runLoop = CFRunLoopGetCurrent() }
             CGEvent.tapEnable(tap: tap, enable: true)
             // Serviced forever. The source keeps this run loop alive, and the
             // lock-window timer is scheduled here too, so neither can be held up
@@ -614,6 +617,20 @@ final class HotkeyMonitor: @unchecked Sendable {
         // stops: mic open, audio uploading, system output muted, indefinitely.
         RunLoop.current.add(timer, forMode: .common)
         stopTimer = timer
+    }
+
+    /// The dictation was stopped by something other than the key (the
+    /// microphone stalled). Forget the gesture, so a locked dictation's next
+    /// press starts a new one instead of stopping one that has already ended.
+    /// From any thread; applied on the hotkey thread, where the gesture lives.
+    func dictationEndedElsewhere() {
+        guard let loop = stateLock.withLock({ runLoop }) else { return }
+        CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue) { [weak self] in
+            guard let self, self.gesture != .idle else { return }
+            self.cancelStopTimer()
+            self.gesture = .idle
+        }
+        CFRunLoopWakeUp(loop)
     }
 
     private func cancelStopTimer() {

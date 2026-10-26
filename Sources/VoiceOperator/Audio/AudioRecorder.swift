@@ -119,6 +119,24 @@ final class AudioRecorder: @unchecked Sendable {
     /// The listener's first buffer has been logged (raw and converted levels).
     private var listenerSawAudio = false
 
+    /// What the open microphone has delivered since it was opened, for the
+    /// stall watchdog — see `checkDelivery`.
+    private var delivery = DeliveryWatch()
+    /// The watchdog has reported a stall that no buffer has yet answered.
+    private var deliveryStalled = false
+    /// A recording's engine stalled: it is swapped for a fresh one once that
+    /// recording stops, never under it.
+    private var replaceAfterStop = false
+    /// Stall rebuilds inside the current `stallWindow`, and when it opened.
+    private var stallRebuilds = 0
+    private var stallWindowStart: Date?
+    /// Out of stall rebuilds: the watchdog says so once and stops. Re-armed by
+    /// anything that wants the microphone afresh — `start()`, `setListener`,
+    /// `setAlwaysOn`.
+    private var stallGaveUp = false
+    private var deliveryHandler: (@Sendable (Delivery) -> Void)?
+    private var watchdog: DispatchSourceTimer?
+
     /// Duration (seconds) of the most recently stopped clip.
     private(set) var lastDurationSeconds: Double = 0
     /// Peak amplitude and RMS energy of the most recently stopped clip (0…1).
@@ -135,6 +153,11 @@ final class AudioRecorder: @unchecked Sendable {
         NotificationCenter.default.addObserver(
             self, selector: #selector(configurationChanged),
             name: .AVAudioEngineConfigurationChange, object: engine)
+        let timer = DispatchSource.makeTimerSource(queue: engineQueue)
+        timer.schedule(deadline: .now() + Self.watchdogInterval, repeating: Self.watchdogInterval)
+        timer.setEventHandler { [weak self] in self?.checkDelivery() }
+        timer.resume()
+        watchdog = timer
     }
 
     // MARK: - Engines that go stale
@@ -184,8 +207,16 @@ final class AudioRecorder: @unchecked Sendable {
         let open = micIsOpen
         lock.unlock()
         guard !open, starts != engineBuiltAtOutputStart, OutputDevice.isWireless else { return }
+        let ms = installFreshEngine()
+        Log.log(String(format: "recorder: rebuilt the capture engine after speech playback (%.0f ms) — %@",
+                       ms, OutputDevice.summary))
+    }
 
+    /// Swap `engine` for a brand-new one, returning how long that took in
+    /// milliseconds. Only with the microphone shut. **engineQueue only.**
+    private func installFreshEngine() -> Double {
         let began = Date()
+        let starts = Self.outputStartCount
         let fresh = AVAudioEngine()
         // The slow part. Done before the swap so `start()`, which reads the input
         // format on the caller's thread, never meets an engine that has not paid it.
@@ -199,11 +230,13 @@ final class AudioRecorder: @unchecked Sendable {
         engine = fresh
         engineBuiltAtOutputStart = starts
         lock.unlock()
-        Log.log(String(format: "recorder: rebuilt the capture engine after speech playback (%.0f ms) — %@",
-                       Date().timeIntervalSince(began) * 1000, OutputDevice.summary))
+        return Date().timeIntervalSince(began) * 1000
     }
 
-    deinit { NotificationCenter.default.removeObserver(self) }
+    deinit {
+        watchdog?.cancel()
+        NotificationCenter.default.removeObserver(self)
+    }
 
     /// Fired once per recording, on the audio thread, when the first buffer
     /// containing frames arrives. Set it before `start()`.
@@ -220,6 +253,25 @@ final class AudioRecorder: @unchecked Sendable {
     var onStartFailed: (@Sendable (String) -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return startFailureHandler }
         set { lock.lock(); startFailureHandler = newValue; lock.unlock() }
+    }
+
+    /// What the stall watchdog saw, delivered **on the main thread**. See
+    /// `checkDelivery`.
+    enum Delivery: Sendable, Equatable {
+        /// The open microphone stopped handing over audio. A recording in
+        /// progress is expected to be stopped at once: the fresh engine comes
+        /// after it. With no recording, a fresh engine is already on its way.
+        case stalled
+        /// Audio is arriving again after a stall.
+        case resumed
+        /// Fresh engines did not bring a held microphone back; the watchdog has
+        /// stopped trying until something wants the microphone afresh.
+        case gaveUp
+    }
+
+    var onDelivery: (@Sendable (Delivery) -> Void)? {
+        get { lock.withLock { deliveryHandler } }
+        set { lock.withLock { deliveryHandler = newValue } }
     }
 
     /// The recording currently being captured. A tap buffer or a queued graph
@@ -315,6 +367,7 @@ final class AudioRecorder: @unchecked Sendable {
         // an hour ago must not be why this dictation gives up on its microphone.
         rebuildCount = 0
         rebuildWindowStart = nil
+        rearmWatchdogLocked()
         converter = conv
         inputSampleRate = format.sampleRate
         tapFormat = format
@@ -372,6 +425,7 @@ final class AudioRecorder: @unchecked Sendable {
         holdSuspended = false
         rebuildCount = 0
         rebuildWindowStart = nil
+        rearmWatchdogLocked()
         let recording = capturing
         let keep = alwaysOn
         lock.unlock()
@@ -401,6 +455,7 @@ final class AudioRecorder: @unchecked Sendable {
         holdSuspended = false
         rebuildCount = 0
         rebuildWindowStart = nil
+        rearmWatchdogLocked()
         let recording = capturing
         let listening = listener != nil
         lock.unlock()
@@ -518,6 +573,13 @@ final class AudioRecorder: @unchecked Sendable {
                 self?.handleTap(buffer, tap: tap)
             }
         }
+        // The watchdog's clock for a freshly opened microphone starts here.
+        defer {
+            lock.withLock {
+                guard micIsOpen, !alreadyInstalled else { return }
+                delivery.opened(at: Self.uptime())
+            }
+        }
         if engine.isRunning {
             lock.lock(); micIsOpen = true; lock.unlock()
             return nil
@@ -633,6 +695,126 @@ final class AudioRecorder: @unchecked Sendable {
         openMicAfterSettling()
     }
 
+    // MARK: - Stall watchdog
+
+    /// How often the watchdog looks. How long it waits is `DeliveryWatch`'s.
+    private static let watchdogInterval: DispatchTimeInterval = .milliseconds(100)
+    /// Fresh engines the watchdog will build for a held microphone in
+    /// `stallWindow` before giving up.
+    private static let stallWindow: TimeInterval = 30
+    private static let maxStallRebuildsPerWindow = 2
+
+    /// The microphone is open, something wants its audio, and it has run dry
+    /// for longer than `DeliveryWatch` allows.
+    ///
+    /// **Core Audio can stop feeding a running engine without saying so.** No
+    /// `AVAudioEngineConfigurationChange`, `isRunning` still true, the tap simply
+    /// never called again — seen on the EPOS BTD 800 when another process opened
+    /// and closed the same input (2026-10-26). Hands-free went deaf while still
+    /// showing itself listening, and the engine stayed that way: re-opening it
+    /// for each dictation delivered nothing, or a couple of seconds and then
+    /// nothing, until the app restarted. A new engine is what the restart fixed.
+    ///
+    /// During a recording the stall is only reported (`.stalled`): the owner
+    /// stops the recording there and then, so the user hears about it while
+    /// they are still talking, and `stop()` builds the fresh engine. Without
+    /// one, the held microphone is rebuilt here on a fresh engine, at most
+    /// `maxStallRebuildsPerWindow` times in `stallWindow` before `.gaveUp`.
+    /// **engineQueue only.**
+    private func checkDelivery() {
+        lock.lock()
+        let wanted = capturing || listener != nil || alwaysOn
+        let (silentFor, limit) = delivery.silence(at: Self.uptime(), recording: capturing)
+        guard micIsOpen, wanted, !stallGaveUp, silentFor >= limit else { lock.unlock(); return }
+        let what = [capturing ? "dictating" : nil, listener != nil ? "hands-free" : nil,
+                    alwaysOn ? "always-on" : nil].compactMap { $0 }.joined(separator: ", ")
+        let trace = self.trace
+        let handler = deliveryHandler
+
+        if capturing {
+            // Once per recording; its owner is stopping it.
+            guard !replaceAfterStop else { lock.unlock(); return }
+            replaceAfterStop = true
+            deliveryStalled = true
+            lock.unlock()
+            Log.log(String(format: "recorder: WARNING the microphone has delivered no audio for %.2fs (%@) — "
+                           + "stopping the dictation; a fresh capture engine follows. %@",
+                           silentFor, what, OutputDevice.summary))
+            trace?.note(String(format: "microphone stalled after %.2fs silent", silentFor))
+            Self.deliver(.stalled, to: handler)
+            return
+        }
+
+        let date = Date()
+        if let start = stallWindowStart, date.timeIntervalSince(start) < Self.stallWindow {
+            stallRebuilds += 1
+        } else {
+            stallWindowStart = date
+            stallRebuilds = 1
+        }
+        let giveUp = stallRebuilds > Self.maxStallRebuildsPerWindow
+        if giveUp { stallGaveUp = true }
+        let firstReport = !deliveryStalled
+        deliveryStalled = true
+        lock.unlock()
+
+        if giveUp {
+            Log.log(String(format: "recorder: WARNING the microphone has delivered no audio for %.1fs (%@) and "
+                           + "%d fresh engines in %ds did not bring it back — giving up until something "
+                           + "wants it afresh. %@", silentFor, what, Self.maxStallRebuildsPerWindow,
+                           Int(Self.stallWindow), OutputDevice.summary))
+            Self.deliver(.gaveUp, to: handler)
+            return
+        }
+        Log.log(String(format: "recorder: WARNING the microphone has delivered no audio for %.2fs (%@) — "
+                       + "rebuilding it on a fresh engine. %@", silentFor, what, OutputDevice.summary))
+        if firstReport { Self.deliver(.stalled, to: handler) }
+        replaceEngine()
+        openMicNow()
+    }
+
+    /// Our own speech just stopped playing. **On the EPOS BTD 800 that is what
+    /// killed a held microphone** (2026-10-26, from the system audio log): about
+    /// 0.1 s after a reply finished, Core Audio stopped both of the device's
+    /// streams, and restarting them failed for the aggregate our input runs
+    /// through, which never delivered again. A held microphone is watched
+    /// closely for a while after it (`DeliveryWatch.speechEnded`), so it is
+    /// rebuilt before the user starts their answer.
+    /// From any thread.
+    func speechEnded() {
+        let now = Self.uptime()
+        let open = lock.withLock {
+            delivery.speechEnded(at: now)
+            return micIsOpen
+        }
+        if open { Log.log("recorder: speech ended with the microphone open — watching it closely") }
+    }
+
+    /// Close the microphone and swap in a brand-new engine. **engineQueue only.**
+    private func replaceEngine() {
+        closeMic()
+        let ms = installFreshEngine()
+        Log.log(String(format: "recorder: fresh capture engine built (%.0f ms)", ms))
+    }
+
+    /// A fresh reason to want the microphone gets a fresh watchdog budget.
+    /// **The caller must already hold `lock`.**
+    private func rearmWatchdogLocked() {
+        stallGaveUp = false
+        stallRebuilds = 0
+        stallWindowStart = nil
+    }
+
+    /// Seconds on the monotonic clock the watchdog keeps time by.
+    private static func uptime() -> TimeInterval {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+    }
+
+    private static func deliver(_ delivery: Delivery, to handler: (@Sendable (Delivery) -> Void)?) {
+        guard let handler else { return }
+        DispatchQueue.main.async { handler(delivery) }
+    }
+
     /// Hand a failed device start back to the caller on the main thread, unless a
     /// newer recording has already superseded this one.
     private func reportStartFailure(_ reason: String, generation: Int) {
@@ -652,6 +834,15 @@ final class AudioRecorder: @unchecked Sendable {
         // the microphone is held open between dictations — every buffer that
         // belongs to no recording at all. Neither reaches the converter.
         guard tap == tapNumber else { lock.unlock(); return }
+        if buffer.frameLength > 0 {
+            delivery.delivered(Double(buffer.frameLength) / buffer.format.sampleRate, at: Self.uptime())
+            if deliveryStalled {
+                deliveryStalled = false
+                trace?.note("microphone audio resumed")
+                Log.log("recorder: microphone audio resumed")
+                Self.deliver(.resumed, to: deliveryHandler)
+            }
+        }
         // Handed over outside the lock, after the recording has had the buffer.
         let listener = self.listener
         let heard = listener == nil ? Data() : convertForListenerLocked(buffer)
@@ -719,6 +910,15 @@ final class AudioRecorder: @unchecked Sendable {
         // been turned on *during* this dictation.
         engineQueue.async { [weak self] in
             guard let self else { return }
+            let stalled = self.lock.withLock {
+                defer {
+                    // Nobody is left waiting for this microphone to come back.
+                    if self.replaceAfterStop, !keepOpen { self.deliveryStalled = false }
+                    self.replaceAfterStop = false
+                }
+                return self.replaceAfterStop
+            }
+            if stalled { self.replaceEngine() }
             if keepOpen { self.openMicNow() } else { self.closeMic() }
         }
 

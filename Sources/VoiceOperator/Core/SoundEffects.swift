@@ -23,6 +23,7 @@ enum SoundEffect: CaseIterable {
     case pasted
     case silenceSkipped             // recording had no speech — transcription skipped
     case captureFailed              // the microphone delivered no audio at all
+    case microphoneStalled          // the microphone stopped mid-dictation — stop talking
     case surfaceRaised              // a voice tool matched + ran
     case unrecognized               // command matched no tool ("sad")
     case transcriptionFailed        // transcription request errored
@@ -74,6 +75,14 @@ enum SoundEffect: CaseIterable {
         // having produced nothing at all, which is the one dictation failure
         // that otherwise passes in complete silence.
         case .captureFailed: return [(196, 0.20), (0, 0.07), (196, 0.30)]
+        // An alarm: five quick rising whole-tone runs (E5→B♭5) and a held C6,
+        // about 1.65 s at `speedup`. It plays while the user is still talking
+        // into a microphone that has stopped hearing them, so it has to be long
+        // and insistent enough to cut through their own speech. Stepwise and
+        // repeated, so it does not read as `pasted`'s single arpeggio.
+        case .microphoneStalled:
+            let run: [(freq: Double, dur: Double)] = [(659, 0.12), (740, 0.12), (831, 0.12), (932, 0.12), (0, 0.06)]
+            return Array(repeating: run, count: 5).flatMap { $0 } + [(1047, 0.60)]
         // Rising three-tone "swoop" — a voice tool matched + ran.
         case .surfaceRaised: return [(700, 0.06), (950, 0.06), (1300, 0.11)]
         // Descending low two-tone — "sad": command matched no tool.
@@ -158,6 +167,7 @@ enum SoundEffect: CaseIterable {
         case .pasted:                   return "Pasted"
         case .silenceSkipped:           return "Silence skipped (no speech)"
         case .captureFailed:            return "Capture failed (no microphone audio)"
+        case .microphoneStalled:        return "Microphone stalled mid-dictation"
         case .surfaceRaised:            return "Surface raised (tool ran)"
         case .unrecognized:             return "Unrecognized (no match)"
         case .transcriptionFailed:      return "Transcription failed"

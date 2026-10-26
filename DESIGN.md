@@ -805,11 +805,13 @@ its own. One session per client: starting one ends its other.
 Operator speaks on the built-in speakers (and `playbackTailMs` after), because
 the microphone would hear it; while a client says it is `playing`. On a
 stream: while the device plays without `echoCancelled`, which the SDK reports
-only when the sound goes into an ear (AirPods, any headset). On the phone's
+always when the sound goes into an ear (AirPods, any headset). On the phone's
 own speaker its echo cancellation let the start of Control's replies through
 as the user cutting in (October 25), so there, as on the Mac's speakers,
-hands-free does not listen while the phone plays, and cutting in by voice
-needs a headset. Voice cut-in on the
+hands-free does not listen while Control speaks (and its tail), and cutting in
+by voice needs a headset. Cues and the pending beep still count as cancelled
+there: the beep plays while the user says "Control", and going deaf for it cut
+the word off after a blip. Voice cut-in on the
 Mac therefore needs a headset, as it did in Spaceterm.
 
 **Incognito** ends every session and refuses new ones: what hands-free hears

@@ -535,6 +535,14 @@ On a stall:
   straight away. More than two rebuilds in 30 s and it gives up (`.gaveUp`) until
   something wants the microphone afresh.
 
+Every push-to-talk recording logs how close it came, on its `recorder: stopped`
+line and its trace (`RecordingDelivery`): `delivery: longest gap 0.12s of 0.75s
+allowed, 0.1% short (29.80s of 29.83s)`. The longest gap is measured the way the
+watchdog measures it, including the one a stalled recording stopped in. The
+shortfall is the audio missing between the first and last buffers: a healthy
+EPOS BTD 800 stays within about ±0.3%, but it has spent hours at a time 1.2–1.5%
+short (2026-10-19, -20/21, -26) with no single gap anywhere near the limit.
+
 Hands-free stops the Mac source while the microphone is stalled (clients see it
 stop listening), starts it again when audio resumes, and ends the session on
 give-up (`session-ended`, why `microphone`).

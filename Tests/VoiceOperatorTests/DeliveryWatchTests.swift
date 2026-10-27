@@ -56,4 +56,45 @@ final class DeliveryWatchTests: XCTestCase {
         XCTAssertFalse(watch.isStalled(at: 11, recording: true))
         XCTAssertEqual(watch.silence(at: 11, recording: true).limit, DeliveryWatch.firstBufferAllowance)
     }
+
+    func testDeliveredReportsTheDrySpellItEnds() {
+        var watch = DeliveryWatch()
+        watch.opened(at: 0)
+        XCTAssertEqual(watch.delivered(0.1, at: 0.5), 0)
+        XCTAssertEqual(watch.delivered(0.1, at: 0.6), 0)
+        XCTAssertEqual(watch.delivered(0.1, at: 1.4), 0.7, accuracy: 1e-9)
+        XCTAssertEqual(watch.dry(at: 1.7), 0.2, accuracy: 1e-9)
+    }
+
+    func testARecordingReportsItsLongestGapAndShortfall() {
+        var watch = DeliveryWatch()
+        var recording = RecordingDelivery()
+        watch.opened(at: 0)
+        var t = 0.1
+        func deliver(_ seconds: Double) {
+            recording.buffer(seconds, dry: watch.delivered(seconds, at: t), at: t)
+        }
+        for _ in 0..<50 { deliver(0.1); t += 0.1 }
+        // 0.6 s of audio never arrives: the device went dry, then carried on.
+        t += 0.6
+        for _ in 0..<44 { deliver(0.1); t += 0.1 }
+        let summary = recording.summary(dryAtStop: watch.dry(at: t - 0.1))
+        XCTAssertEqual(summary?.longestDry ?? 0, 0.6, accuracy: 1e-6)
+        XCTAssertEqual(summary?.delivered ?? 0, 9.4, accuracy: 1e-6)
+        XCTAssertEqual(summary?.expected ?? 0, 10.0, accuracy: 1e-6)
+        XCTAssertEqual(summary?.shortfallPercent ?? 0, 6, accuracy: 1e-4)
+    }
+
+    func testARecordingStoppedByAStallCountsTheStallAsItsLongestGap() {
+        var watch = DeliveryWatch()
+        var recording = RecordingDelivery()
+        watch.opened(at: 0)
+        recording.buffer(0.1, dry: watch.delivered(0.1, at: 0.1), at: 0.1)
+        recording.buffer(0.1, dry: watch.delivered(0.1, at: 0.2), at: 0.2)
+        XCTAssertEqual(recording.summary(dryAtStop: watch.dry(at: 1.08))?.longestDry ?? 0, 0.78, accuracy: 1e-9)
+    }
+
+    func testARecordingThatHeardNothingHasNoSummary() {
+        XCTAssertNil(RecordingDelivery().summary(dryAtStop: 3))
+    }
 }

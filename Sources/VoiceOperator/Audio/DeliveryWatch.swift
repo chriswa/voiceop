@@ -39,9 +39,20 @@ struct DeliveryWatch: Equatable {
         coveredUntil = nil
     }
 
-    /// A buffer of `seconds` of audio arrived at `now`.
-    mutating func delivered(_ seconds: TimeInterval, at now: TimeInterval) {
+    /// A buffer of `seconds` of audio arrived at `now`. Returns how long the
+    /// microphone had been dry when it came, measured as `silence` measures it
+    /// (zero for the first buffer since opening, which `firstBufferAllowance`
+    /// covers instead).
+    @discardableResult
+    mutating func delivered(_ seconds: TimeInterval, at now: TimeInterval) -> TimeInterval {
+        let dry = coveredUntil.map { max(0, now - $0) } ?? 0
         coveredUntil = max(coveredUntil ?? now, now) + seconds
+        return dry
+    }
+
+    /// How long the microphone has been dry at `now`, however long it is allowed.
+    func dry(at now: TimeInterval) -> TimeInterval {
+        coveredUntil.map { max(0, now - $0) } ?? 0
     }
 
     /// Our own speech stopped playing at `now`. On the EPOS BTD 800 that once
@@ -55,15 +66,52 @@ struct DeliveryWatch: Equatable {
     /// How long the microphone has been dry at `now` and the limit it is held
     /// to, given whether a recording is under way.
     func silence(at now: TimeInterval, recording: Bool) -> (seconds: TimeInterval, limit: TimeInterval) {
-        guard let coveredUntil else { return (now - openedAt, Self.firstBufferAllowance) }
+        guard coveredUntil != nil else { return (now - openedAt, Self.firstBufferAllowance) }
         // A dictation is never cut short for it: the user is talking, and a
         // false alarm costs them the whole dictation.
         let closely = !recording && now < watchCloselyUntil
-        return (max(0, now - coveredUntil), closely ? Self.stallAfterSpeech : Self.stallAfter)
+        return (dry(at: now), closely ? Self.stallAfterSpeech : Self.stallAfter)
     }
 
     func isStalled(at now: TimeInterval, recording: Bool) -> Bool {
         let (seconds, limit) = silence(at: now, recording: recording)
         return seconds >= limit
+    }
+}
+
+/// How well one recording's microphone kept up, for its trace line: the
+/// longest dry spell, against `DeliveryWatch.stallAfter`, and how much audio
+/// is missing between its first and last buffers. Logging only; nothing acts
+/// on it. Times are seconds on `DeliveryWatch`'s clock, audio is seconds at
+/// the device's own rate.
+struct RecordingDelivery: Equatable {
+    /// When the audio of the recording's first buffer began.
+    private var firstAt: TimeInterval?
+    private var lastAt: TimeInterval = 0
+    private var delivered: TimeInterval = 0
+    private var longestDry: TimeInterval = 0
+
+    /// A buffer of `seconds` arrived at `now`, after the microphone had been
+    /// dry for `dry` (`DeliveryWatch.delivered`).
+    mutating func buffer(_ seconds: TimeInterval, dry: TimeInterval, at now: TimeInterval) {
+        if firstAt == nil { firstAt = now - seconds } else { longestDry = max(longestDry, dry) }
+        lastAt = now
+        delivered += seconds
+    }
+
+    struct Summary: Equatable {
+        /// Includes the dry spell the recording stopped in.
+        var longestDry: TimeInterval
+        /// Audio the span from the first buffer to the last should have held.
+        var expected: TimeInterval
+        var delivered: TimeInterval
+        var shortfallPercent: Double { expected > 0 ? (expected - delivered) / expected * 100 : 0 }
+    }
+
+    /// The recording stopped with the microphone dry for `dryAtStop`; nil if no
+    /// audio ever arrived.
+    func summary(dryAtStop: TimeInterval) -> Summary? {
+        guard let firstAt else { return nil }
+        return Summary(longestDry: max(longestDry, dryAtStop), expected: lastAt - firstAt, delivered: delivered)
     }
 }

@@ -123,6 +123,8 @@ final class AudioRecorder: @unchecked Sendable {
     /// What the open microphone has delivered since it was opened, for the
     /// stall watchdog — see `checkDelivery`.
     private var delivery = DeliveryWatch()
+    /// The current recording's share of what `delivery` sees, for its trace line.
+    private var recordingDelivery = RecordingDelivery()
     /// The watchdog has reported a stall that no buffer has yet answered.
     private var deliveryStalled = false
     /// A recording's engine stalled: it is swapped for a fresh one once that
@@ -375,6 +377,7 @@ final class AudioRecorder: @unchecked Sendable {
         captured = Data()
         sawFirstAudio = false
         meteringStartByte = 0
+        recordingDelivery = RecordingDelivery()
         capturing = true
         self.trace = trace
         let alreadyOpen = micIsOpen
@@ -836,7 +839,10 @@ final class AudioRecorder: @unchecked Sendable {
         // belongs to no recording at all. Neither reaches the converter.
         guard tap == tapNumber else { lock.unlock(); return }
         if buffer.frameLength > 0 {
-            delivery.delivered(Double(buffer.frameLength) / buffer.format.sampleRate, at: Self.uptime())
+            let seconds = Double(buffer.frameLength) / buffer.format.sampleRate
+            let now = Self.uptime()
+            let dry = delivery.delivered(seconds, at: now)
+            if capturing { recordingDelivery.buffer(seconds, dry: dry, at: now) }
             if deliveryStalled {
                 deliveryStalled = false
                 trace?.note("microphone audio resumed")
@@ -893,6 +899,8 @@ final class AudioRecorder: @unchecked Sendable {
         capturing = false
         convertAndStoreLocked(nil)     // flush the converter's resampling tail
         converter = nil
+        let delivered = recordingDelivery.summary(dryAtStop: delivery.dry(at: Self.uptime()))
+        trace?.note(Self.deliveryNote(delivered))
         trace = nil
         let keepOpen = alwaysOn || listener != nil
         if !keepOpen { tapFormat = nil }
@@ -925,11 +933,21 @@ final class AudioRecorder: @unchecked Sendable {
 
         lastDurationSeconds = Double(samples.count / 2) / Double(Self.asrSampleRate)
         (lastPeak, lastRMS) = Self.levels(pcm16: samples, from: meteringStart)
-        Log.log(String(format: "recorder: stopped — %.2fs, peak %.4f, rms %.4f (metered from %.2fs)",
+        Log.log(String(format: "recorder: stopped — %.2fs, peak %.4f, rms %.4f (metered from %.2fs), ",
                        lastDurationSeconds, lastPeak, lastRMS,
-                       Double(meteringStart / 2) / Double(Self.asrSampleRate)))
+                       Double(meteringStart / 2) / Double(Self.asrSampleRate)) + Self.deliveryNote(delivered))
 
         return samples
+    }
+
+    /// How well the microphone kept up with one recording, for its trace and
+    /// `stopped` lines: the longest dry spell against the stall limit, and the
+    /// audio missing between its first and last buffers. Logging only.
+    private static func deliveryNote(_ summary: RecordingDelivery.Summary?) -> String {
+        guard let summary else { return "delivery: no audio" }
+        return String(format: "delivery: longest gap %.2fs of %.2fs allowed, %.1f%% short (%.2fs of %.2fs)",
+                      summary.longestDry, DeliveryWatch.stallAfter, summary.shortfallPercent,
+                      summary.delivered, summary.expected)
     }
 
     /// RMS of the opening `bins × binMS` of a clip, one value per bin (0…1).

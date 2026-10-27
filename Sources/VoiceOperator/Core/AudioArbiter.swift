@@ -90,7 +90,7 @@ final class AudioArbiter {
     }
 
     /// Hands-free's ear on the microphone — see `AudioRecorder.setListener`.
-    nonisolated func setHandsFreeListener(_ handler: (@Sendable (Data) -> Void)?) {
+    nonisolated func setHandsFreeListener(_ handler: (@Sendable (Data, UInt64) -> Void)?) {
         recorder.setListener(handler)
     }
 

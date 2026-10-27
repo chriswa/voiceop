@@ -53,6 +53,8 @@ private final class Harness {
     var engine: HandsFreeEngine!
     /// turn-1-mini's stand-in, when a test wants one.
     var miniFactory: (() -> HandsFreeEngine.ContinuousTurn)?
+    /// What counts as our own voice, heard through it.
+    var isEcho: (String) -> Bool = { _ in false }
 
     final class FakeDictation: HandsFreeEngine.Dictation {
         let backlogSeconds: Double
@@ -106,7 +108,8 @@ private final class Harness {
             emit: { [unowned self] in events.append($0) },
             record: { [unowned self] kind, detail in records.append((kind, detail)) },
             log: { _ in },
-            continuousTurn: { [unowned self] in miniFactory?() })
+            continuousTurn: { [unowned self] in miniFactory?() },
+            isEcho: { [unowned self] in isEcho($0) })
         engine = HandsFreeEngine(owner: "spaceterm", trigger: "control", scorer: FakeDetector(), deps: deps)
         engine.sourceState = { [unowned self] in state }
         engine.sourceStarted()
@@ -751,5 +754,76 @@ final class HandsFreeEngineTests: XCTestCase {
         h.engine.addClient("home", trigger: "jarvis")
         h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
         XCTAssertEqual(h.events.first { if case .transcript = $0.event { return true }; return false }?.client, "home")
+    }
+
+    // MARK: Through our own voice (the echo experiment)
+
+    func testThroughOurVoiceTheWindowStillNeedsTheTriggerWord() {
+        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Yes, and tell Evan" } }
+        inConversation(h)
+        h.state.voiceOperatorSpeaking = true
+        h.state.throughEcho = true
+        h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(800))
+        XCTAssertEqual(h.dictations.count, 1, "words without the trigger started a dictation through our own voice")
+        XCTAssertEqual(h.cutIns, [])
+        XCTAssertEqual(h.recorded("check").last?["throughEcho"] as? Bool, true)
+    }
+
+    func testThroughOurVoiceSpeechThatIsNotForTheClientGetsNoCue() {
+        let h = harness { $0.heard = { _ in "It is under control" } }
+        h.state.voiceOperatorSpeaking = true
+        h.state.throughEcho = true
+        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(800))
+        XCTAssertEqual(h.checks.count, 1)
+        XCTAssertEqual(h.cues, [])
+        XCTAssertFalse(h.sounds.contains("pending:on"), "the deciding beep played for our own voice")
+    }
+
+    func testThroughOurVoiceTheTriggerWordCutsIn() {
+        let h = harness { $0.heard = { _ in "Control, stop" } }
+        h.state.voiceOperatorSpeaking = true
+        h.state.throughEcho = true
+        h.hear(Sound.quiet(1500), Sound.speech(1500))
+        XCTAssertEqual(h.cutIns.count, 1)
+        XCTAssertEqual(h.recorded("interrupt").first?["throughEcho"] as? Bool, true)
+    }
+
+    func testThroughOurVoiceWhatItJustSaidIsEcho() {
+        let h = harness {
+            $0.heard = { _ in "Control is waiting" }
+            $0.isEcho = { $0 == "Control is waiting" }
+        }
+        h.state.voiceOperatorSpeaking = true
+        h.state.throughEcho = true
+        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(800))
+        XCTAssertEqual(h.cutIns, [])
+        XCTAssertEqual(h.dictations.count, 0)
+        XCTAssertEqual(h.recorded("echo-rejected").count, 1)
+        XCTAssertEqual(h.cues, [])
+    }
+
+    func testWithoutTheExperimentWhatItJustSaidIsNotAsked() {
+        // A headset: the echo check is the experiment's alone.
+        let h = harness {
+            $0.heard = { _ in "Control is waiting" }
+            $0.isEcho = { _ in XCTFail("asked whether it was echo without the experiment"); return true }
+        }
+        h.state.voiceOperatorSpeaking = true
+        h.hear(Sound.quiet(1500), Sound.speech(1500))
+        XCTAssertEqual(h.cutIns.count, 1)
+        XCTAssertTrue(h.recorded("echo-rejected").isEmpty)
+    }
+
+    func testThroughOurVoiceTheReplyIsRecordedAsEchoWithNothingToDuck() {
+        let h = harness { $0.heard = { _ in "Something else" } }
+        h.state.voiceOperatorSpeaking = true
+        h.state.throughEcho = true
+        h.hear(Sound.quiet(700), Sound.speech(1500), Sound.quiet(500))
+        h.state = .init()
+        h.hear(Sound.quiet(100))
+        let echo = h.recorded("echo").first
+        XCTAssertEqual(echo?["throughEcho"] as? Bool, true)
+        XCTAssertGreaterThan(echo?["speechPercent"] as? Int ?? 0, 40)
+        XCTAssertEqual(h.ducks, [])
     }
 }

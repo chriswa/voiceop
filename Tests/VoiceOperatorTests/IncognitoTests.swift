@@ -81,6 +81,12 @@ final class IncognitoTests: XCTestCase {
         }
     }
 
+    func testEchoCapturesAreNotSaved() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("echo-\(UUID().uuidString)/mic.wav")
+        XCTAssertThrowsError(try EchoCapture.save([1, 2, 3], to: url)) { assertBlocked($0) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
     func testHistoryIsNotSaved() {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("vo-history-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }

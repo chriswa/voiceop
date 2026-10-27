@@ -857,7 +857,50 @@ hands-free does not listen while Control speaks (and its tail), and cutting in
 by voice needs a headset. Cues and the pending beep still count as cancelled
 there: the beep plays while the user says "Control", and going deaf for it cut
 the word off after a blip. Voice cut-in on the
-Mac therefore needs a headset, as it did in Spaceterm.
+Mac therefore needs a headset, as it did in Spaceterm — unless the echo
+experiment below is on.
+
+**Echo cancellation experiment (2026-10-26).** A menu checkbox, **Hands-Free:
+Hear Me Over Speakers (Experimental)** (`EchoExperiment`, off by default). Off,
+everything above holds, unchanged. On, it acts only where our voice plays into
+the room — the `open` route: the Mac's built-in speakers, the phone's own
+speaker with its voice processing on — and there hands-free listens through our
+voice instead of standing aside (`SourceState.throughEcho`):
+
+- The first `EchoExperiment.settleMs` (1 s) of each reply is still stood aside
+  for: echo cancellation leaked the start of replies before adapting.
+- Only the trigger word cuts in, even in the conversation window; speech whose
+  first words are a run of what our voice said in the last minute
+  (`RecentSpeech`, noted per sentence on the Mac and per sentence sent to a
+  device) is taken for echo (`echo-rejected`); nothing heard gets a cue or the
+  pending beep. `check`, `interrupt` and `echo` lines carry `throughEcho`.
+- **Mac:** the microphone goes through SpeexDSP's echo canceller and residual
+  echo suppressor (`EchoCanceller`, vendored in `Sources/CSpeexDSP`), fed what
+  Voice Operator played: each speech player taps its mixer while the experiment
+  is on (`EchoReference`), stamped with host time plus output latency, and the
+  microphone's tap carries the host time of its first sample
+  (`AudioRecorder.setListener`); `MacEchoPath` lines them up, the reference
+  60 ms early inside a 300 ms filter. Headsets and every non-`open` route never
+  go through it.
+- **Phone:** the phone's own voice processing is trusted (it was always on, on
+  the speaker); Voice Operator just stops standing aside for it.
+
+Where the sound goes is a `route`: `ear` (headphones, AirPods, a Bluetooth or
+USB device with a microphone of its own, like the EPOS dongle), `open`, or
+`unsure` (a monitor's speakers, a Bluetooth or USB speaker, AirPlay, a car).
+The Mac's is `OutputDevice.route`; the phone's comes from the SDK (`route`
+message). Both go to the client in `setup`, for the hands-free button's badge.
+
+The recording kit tests it offline. From the app bundle's binary
+(`build/Voice Operator.app/Contents/MacOS/VoiceOperator`): `--echo-capture
+[dir]` plays six replies through the real speech path while recording the
+microphone, and saves `mic.wav`, the reference lined up with it, the cancelled
+microphone (`aec.wav`) and `capture.json` with levels per reply;
+`--echo-capture phrases [dir]` records the user's cut-in phrases; `--echo-replay
+<capture> [phrases]` runs the speech detector over each reply raw and
+cancelled, lays each phrase over each reply, and asks the trigger-word check
+what it hears. Captures go to `echo-captures/` in Application Support, and are
+refused in incognito.
 
 **Incognito** ends every session and refuses new ones: what hands-free hears
 goes to a client.
@@ -909,6 +952,7 @@ hands-free:
 | `{"type":"resume","session":<id>}` | After a dropout, within 10 s: `resumed {session, at}` — send audio from sample `at` (16 kHz). Otherwise `session-ended {why:"lost"}`. |
 | `{"type":"audio","at":<n>,"data":<base64 s16le mono>}` | `at` is the 16 kHz sample position of the chunk's first sample (at the stream's own rate it is converted). Overlap with what was received is dropped; a hole resets listening. Acked about once a second: `ack {at}` — the SDK may forget audio before it. |
 | `{"type":"playing","on":bool,"speech":bool,"echoCancelled":bool}` | The device is playing; `speech`: the client's voice, which hands-free turns down for the user and can cut off; `echoCancelled`: the microphone does not hear it. |
+| `{"type":"route","route":"ear"\|"open"\|"unsure","voiceProcessing":bool}` | Where the device's sound goes, and whether its echo cancellation is on. Sent on change and after a resume. The echo experiment acts only on `open` with `voiceProcessing`. |
 | `{"type":"stop"}` | Off. |
 
 Audio a resumed stream replays from more than 2 s ago resets listening unless a
@@ -925,6 +969,7 @@ dictation was under way: it is history, not the user talking now.
 | `duck {on}` | Turn the client's voice down (someone is talking over it) or back up. |
 | `cut-in {msAgo, at}` | The user cut the client's voice off: they began `msAgo` ms ago (`at`, wall ms), which is as far as they heard it. |
 | `transcript {text, trigger, interrupted, reason, shutdown}` | The dictation, trigger word included — strip it yourself. Empty when nothing was caught; `interrupted`: it cut the client's voice off (with empty text: say you had not finished, and carry on). `shutdown`: "let me turn this off" or "<trigger>, shutdown" — hands-free turns itself off: `session-ended {why:"shutdown"}` follows. |
+| `setup {route, echoExperiment}` | Where the source's sound goes (`ear`, `open`, `unsure`; null until a stream says), and the echo experiment there: `off` (the checkbox is off), `standby` (on, not acting on this route), `active` (listening through our own voice when it plays). Sent as a session starts or resumes and whenever either changes. |
 | `ack {at}`, `resumed {session, at}` | Stream bookkeeping, above. |
 
 ## Speech on a device (2026-10-25)

@@ -75,6 +75,8 @@ public final class VoiceAudioEngine {
     public var captureObserver: ((Data) -> Void)?
     /// What the player is playing has changed: see `playback`. `HandsFreeSession`'s.
     public var onPlaybackChange: (() -> Void)?
+    /// Where the sound goes, or whether echo cancellation is on, may have changed: see `setup`. `HandsFreeSession`'s.
+    public var onSetupChange: (() -> Void)?
     /// Each sentence of speech `started`, `finished` or `failed`, as the host is told it,
     /// for a second listener beside the host — `SpeakerSession`'s.
     public var speechObserver: ((_ id: String, _ index: Int, _ event: String) -> Void)?
@@ -1149,6 +1151,7 @@ public final class VoiceAudioEngine {
     // MARK: - To the page
 
     private func sendState() {
+        onSetupChange?()
         // `speech`: this app plays Control's voice itself, while running — an older one does not.
         // `awake`: the engine is up without the microphone, and plays it all the same.
         // Whether the engine *is* running, not what it was brought up for: iOS stops it under the app, and
@@ -1526,6 +1529,30 @@ public final class VoiceAudioEngine {
             spared = voiceProcessing && !speaking
         }
         return Playback(on: on, speech: speaking, echoCancelled: spared)
+    }
+
+    /// Where the sound goes, as far as the microphone is concerned, for Voice Operator's `route`:
+    /// `ear` (AirPods, any Bluetooth or wired headphones — what `playback` already counts as spared),
+    /// `open` (the phone's own speaker or earpiece, which the microphone hears), or `unsure` (a car,
+    /// AirPlay, anything else). And whether this engine runs with echo cancellation (voice processing).
+    /// Voice Operator shows the route on the hands-free button, and its echo experiment listens
+    /// through Control's voice only on `open` with voice processing on.
+    public struct Setup: Equatable, Sendable {
+        public var route: String
+        public var voiceProcessing: Bool
+    }
+
+    public var setup: Setup {
+        let route = AVAudioSession.sharedInstance().currentRoute
+        let word: String
+        if sessionOnHeadphones || Self.headphones(route) {
+            word = "ear"
+        } else if route.outputs.contains(where: { [.builtInSpeaker, .builtInReceiver].contains($0.portType) }) {
+            word = "open"
+        } else {
+            word = "unsure"
+        }
+        return Setup(route: word, voiceProcessing: running && voiceProcessing)
     }
 
     /// Cues scheduled and not yet heard to their end, by number.

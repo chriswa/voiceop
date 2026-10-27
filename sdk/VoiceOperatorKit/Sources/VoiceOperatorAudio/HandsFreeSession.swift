@@ -49,6 +49,7 @@ public final class HandsFreeSession {
         self.engine = engine
         engine.captureObserver = { [weak self] pcm in self?.stream?.audio(pcm) }
         engine.onPlaybackChange = { [weak self] in self?.reportPlayback() }
+        engine.onSetupChange = { [weak self] in self?.reportSetup() }
     }
 
     /// Hands-free on: the microphone held (if it is not already), and the stream started.
@@ -67,6 +68,7 @@ public final class HandsFreeSession {
         }
         stream?.start(sampleRate: HandsFreeStream.sampleRate)
         reportPlayback()
+        reportSetup()
     }
 
     /// Hands-free off: the stream stopped, and the microphone let go if this took it and nothing else holds it.
@@ -124,6 +126,11 @@ public final class HandsFreeSession {
             tookMicrophone = false
             if !microphoneHeldElsewhere() { engine.handle(command: "stop", body: [:]) }
         }
+    }
+
+    private func reportSetup() {
+        let now = engine.setup
+        stream?.route(now.route, voiceProcessing: now.voiceProcessing)
     }
 
     private func reportPlayback() {

@@ -276,6 +276,8 @@ final class DeviceSpeech: @unchecked Sendable {
             return false
         }
         job.audio[index] = Audio(seconds: clip.wav.duration, words: clip.words)
+        // For hands-free's echo experiment: what the device's microphone hears of this is not the user.
+        RecentSpeech.shared.note(job.segments[index].text)
         device.send([
             "type": "sentence", "id": id, "index": index, "count": job.segments.count,
             "sampleRate": clip.wav.sampleRate, "pcm": clip.wav.samples.base64EncodedString(),

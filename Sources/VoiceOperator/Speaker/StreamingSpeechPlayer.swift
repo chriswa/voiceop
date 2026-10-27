@@ -104,6 +104,11 @@ final class StreamingSpeechPlayer {
         }
         try engine.start()
         if !manualRendering { AudioRecorder.noteOutputEngineStarted() }
+        // Hands-free's echo experiment (or `--echo-capture`): what this plays, for the echo canceller.
+        if !manualRendering, EchoReference.shared.wanted {
+            let latency = outputLatency
+            EchoReference.shared.tap(engine) { latency }
+        }
     }
 
     /// The output device or its format changed under us — AirPods connecting, a

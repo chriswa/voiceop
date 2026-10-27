@@ -184,11 +184,24 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             applyMicrophonePolicy(reason: "menu")
             return AudioPreferences.keepMicrophoneOpenForWireless
         }
+        menuBar.echoExperimentState = { EchoExperiment.isOn }
+        menuBar.onToggleEchoExperiment = {
+            EchoExperiment.isOn.toggle()
+            let on = EchoExperiment.isOn
+            HandsFreeService.shared.host.echoExperiment = on
+            HandsFreeService.shared.setupChanged()
+            if !on { EchoReference.shared.clear() }
+            Log.log("hands-free: echo experiment \(on ? "ON — listening through our own voice on speakers" : "off — standing aside for our own voice, as always")")
+            HandsFreeRecord.shared.write("echo-experiment", ["on": on])
+            return on
+        }
         // AirPods arriving or leaving is what drives the rule; recompute on every
         // output change rather than sampling it at dictation time, so the headset
         // is already in the profile it will stay in before the key is pressed.
         outputWatcher.onChange = { [weak self] in
             HandsFreeService.shared.host.speakers = OutputDevice.isSpeakers
+            HandsFreeService.shared.host.route = OutputDevice.route
+            HandsFreeService.shared.setupChanged()
             MainActor.assumeIsolated {
                 self?.applyMicrophonePolicy(reason: "output device changed")
                 self?.arbiter.outputDeviceChanged()
@@ -274,6 +287,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func startHandsFree() {
         let handsFree = HandsFreeService.shared
         handsFree.host.speakers = OutputDevice.isSpeakers
+        handsFree.host.route = OutputDevice.route
+        handsFree.host.echoExperiment = EchoExperiment.isOn
         let arbiter = self.arbiter
         handsFree.setMicrophoneListener = { handler in arbiter.setHandsFreeListener(handler) }
         do { try handsFree.start() } catch { Log.log("hands-free: could not start: \(error)") }

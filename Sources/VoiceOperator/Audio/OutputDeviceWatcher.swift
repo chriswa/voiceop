@@ -47,6 +47,25 @@ enum OutputDevice {
         return fourCC(value) != "hdpn"
     }
 
+    /// Where the Mac's sound goes, for hands-free's button and its echo
+    /// experiment (`AudioRoute`). The built-in speakers are `open`, the one
+    /// route hands-free stands aside for (`isSpeakers`). The headphone jack is
+    /// `ear`, and so is a Bluetooth or USB device that has a microphone too —
+    /// AirPods, a headset dongle like the EPOS. Without one (a Bluetooth or USB
+    /// speaker), or anything else — a monitor's speakers, AirPlay — it is
+    /// `unsure`: the transport cannot say whether the microphone hears it.
+    static var route: AudioRoute {
+        guard let device = defaultOutput() else { return .unsure }
+        switch transport(device) {
+        case kAudioDeviceTransportTypeBuiltIn:
+            return isSpeakers ? .open : .ear
+        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeUSB:
+            return hasInput(device) ? .ear : .unsure
+        default:
+            return .unsure
+        }
+    }
+
     /// `name (transport)` for the log — the one line that explains why the
     /// microphone just opened or closed on its own.
     static var summary: String {
@@ -71,6 +90,17 @@ enum OutputDevice {
         let status = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
         return status == noErr && id != kAudioObjectUnknown ? id : nil
+    }
+
+    private static func hasInput(_ device: AudioObjectID) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectHasProperty(device, &addr),
+              AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr else { return false }
+        return size > 0
     }
 
     private static func transport(_ device: AudioObjectID) -> UInt32 {

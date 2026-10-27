@@ -339,6 +339,8 @@ actor SpeechJobManager {
             // the difference between a silent shortcut and a diagnosable one.
             Log.log("speech job \(id): handing sentence \(job.next + 1)/\(job.segments.count) to playback, voice=\(segment.voice) — \(Log.clip(segment.text))")
             openSynthesisWindow(for: job)
+            // For hands-free's echo experiment: what it hears through this is not the user.
+            RecentSpeech.shared.note(segment.text)
             Task { [weak self] in
                 // Positional callbacks: first audible sample, then audio fully
                 // in hand. See the `play` property for why they are unlabelled.

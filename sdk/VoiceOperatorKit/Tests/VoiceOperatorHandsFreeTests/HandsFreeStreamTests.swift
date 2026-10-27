@@ -189,6 +189,30 @@ final class HandsFreeStreamTests: XCTestCase {
         XCTAssertEqual(after[0]["echoCancelled"] as? Bool, false)
     }
 
+    func testRouteSentOnChangeAndAgainAfterResume() {
+        let t = FakeTransport()
+        t.stream.route("open", voiceProcessing: true)
+        t.stream.transportOpened()
+        t.stream.start()
+        XCTAssertEqual(t.types(t.take()), ["hello", "start"], "the route waits for a session")
+        t.vo(["type": "session", "source": "stream", "session": "s1"])
+        let first = t.take()
+        XCTAssertEqual(t.types(first), ["route"])
+        XCTAssertEqual(first[0]["route"] as? String, "open")
+        XCTAssertEqual(first[0]["voiceProcessing"] as? Bool, true)
+        t.stream.route("open", voiceProcessing: true)
+        XCTAssertTrue(t.take().isEmpty, "unchanged")
+        t.stream.route("ear", voiceProcessing: false)
+        XCTAssertEqual(t.types(t.take()), ["route"])
+        t.stream.transportClosed()
+        t.stream.transportOpened()
+        _ = t.take()
+        t.vo(["type": "resumed", "session": "s1", "at": 0])
+        let after = t.take()
+        XCTAssertEqual(t.types(after), ["route"])
+        XCTAssertEqual(after[0]["route"] as? String, "ear")
+    }
+
     func testSessionEndedClearsTheSession() {
         let t = FakeTransport()
         t.stream.transportOpened()
@@ -293,6 +317,8 @@ final class HandsFreeStreamTests: XCTestCase {
         t.vo(["type": "transcript", "text": "", "trigger": NSNull(), "interrupted": true, "reason": "silence", "shutdown": true])
         t.vo(["type": "refused", "error": "no_client", "detail": "x"])
         t.vo(["type": "error", "error": "bad_json"])
+        t.vo(["type": "setup", "route": "open", "echoExperiment": "active"])
+        t.vo(["type": "setup", "route": NSNull(), "echoExperiment": "off"])
         t.vo(["type": "something-new"])
         XCTAssertEqual(t.events, [
             .state(phase: "hearing", conversation: true, closesAt: nil, checking: false, pending: true),
@@ -306,7 +332,9 @@ final class HandsFreeStreamTests: XCTestCase {
             .transcript(text: "", trigger: nil, interrupted: true, reason: "silence", shutdown: true),
             .refused("no_client"),
             .error("bad_json"),
+            .setup(route: "open", echoExperiment: "active"),
+            .setup(route: nil, echoExperiment: "off"),
         ])
-        XCTAssertEqual(t.raw.count, 12, "every line but bookkeeping is forwarded raw, unknown ones too")
+        XCTAssertEqual(t.raw.count, 14, "every line but bookkeeping is forwarded raw, unknown ones too")
     }
 }

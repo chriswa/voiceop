@@ -94,6 +94,25 @@ if CommandLine.arguments.contains("--summarize-test") {
     await DebugCLI.runSummarizeTest()
     exit(0)
 }
+// The echo experiment's recording kit (see EchoCapture): `--echo-capture [dir]`,
+// `--echo-capture phrases [dir]`, `--echo-replay <capture dir> [phrases dir]`.
+if let i = CommandLine.arguments.firstIndex(of: "--echo-capture") {
+    var rest = Array(CommandLine.arguments[(i + 1)...])
+    let phrases = rest.first == "phrases"
+    if phrases { rest.removeFirst() }
+    let dir = rest.first.map { URL(fileURLWithPath: $0) }
+    if phrases { await EchoCapture.capturePhrases(into: dir) } else { await EchoCapture.capture(into: dir) }
+    exit(0)
+}
+if let i = CommandLine.arguments.firstIndex(of: "--echo-replay") {
+    let rest = Array(CommandLine.arguments[(i + 1)...])
+    guard let dir = rest.first else {
+        FileHandle.standardError.write(Data("usage: --echo-replay <capture dir> [phrases dir]\n".utf8))
+        exit(2)
+    }
+    await EchoCapture.replay(URL(fileURLWithPath: dir), phrases: rest.dropFirst().first.map { URL(fileURLWithPath: $0) })
+    exit(0)
+}
 if CommandLine.arguments.contains("--tts-test") {
     await DebugCLI.runTTSTest(
         text: CommandLine.arguments.last.flatMap { $0 == "--tts-test" ? nil : $0 }

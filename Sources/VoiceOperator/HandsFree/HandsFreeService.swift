@@ -50,7 +50,7 @@ final class HandsFreeService: @unchecked Sendable {
     let host = Host()
     /// The microphone, handed in by `AppCoordinator`: `setListener` on
     /// `AudioRecorder`, through the arbiter.
-    var setMicrophoneListener: (@Sendable ((@Sendable (Data) -> Void)?) -> Void)?
+    var setMicrophoneListener: (@Sendable ((@Sendable (Data, UInt64) -> Void)?) -> Void)?
     /// Whether anything is being dictated hands-free right now — a restart waits.
     var isBusy: Bool { busyLock.withLock { busyCount > 0 } }
     /// Called (on any thread) when the last busy session goes idle.
@@ -84,7 +84,10 @@ final class HandsFreeService: @unchecked Sendable {
         private var _fnDictating = false
         private var _speaking = false
         private var _speechEndedAt: Date?
+        private var _speechStartedAt: Date?
         private var _speakers = false
+        private var _route = AudioRoute.unsure
+        private var _echoExperiment = false
 
         var fnDictating: Bool {
             get { lock.withLock { _fnDictating } }
@@ -93,12 +96,36 @@ final class HandsFreeService: @unchecked Sendable {
         /// Voice Operator speaking.
         var speaking: Bool {
             get { lock.withLock { _speaking } }
-            set { lock.withLock { if _speaking && !newValue { _speechEndedAt = Date() }; _speaking = newValue } }
+            set {
+                lock.withLock {
+                    if _speaking && !newValue { _speechEndedAt = Date() }
+                    if !_speaking && newValue { _speechStartedAt = Date() }
+                    _speaking = newValue
+                }
+            }
         }
         /// The output is the Mac's speakers, which the microphone hears.
         var speakers: Bool {
             get { lock.withLock { _speakers } }
             set { lock.withLock { _speakers = newValue } }
+        }
+        /// Where the Mac's sound goes (`OutputDevice.route`): for the client's button.
+        var route: AudioRoute {
+            get { lock.withLock { _route } }
+            set { lock.withLock { _route = newValue } }
+        }
+        /// The echo experiment's checkbox (`EchoExperiment.isOn`). Tell hands-free with `setupChanged`.
+        var echoExperiment: Bool {
+            get { lock.withLock { _echoExperiment } }
+            set { lock.withLock { _echoExperiment = newValue } }
+        }
+        /// Voice Operator has been speaking at least `ms`, or is not speaking:
+        /// past the start of a reply, which echo cancellation is not trusted with.
+        func speechSettled(afterMs ms: Double) -> Bool {
+            lock.withLock {
+                guard _speaking, let started = _speechStartedAt else { return true }
+                return Date().timeIntervalSince(started) * 1000 >= ms
+            }
         }
         /// Voice Operator speaking, or stopped within `tailMs`.
         func speakingOrRinging(tailMs: Double) -> Bool {
@@ -186,9 +213,11 @@ final class HandsFreeService: @unchecked Sendable {
             }
             for session in streams.values {
                 sessions.append(["client": session.client, "source": "stream", "device": session.device,
-                                 "phase": session.engine.phase.rawValue, "connected": session.connection != nil])
+                                 "phase": session.engine.phase.rawValue, "connected": session.connection != nil,
+                                 "route": session.route?.rawValue ?? "unknown"])
             }
-            return ["clients": clients.keys.sorted(), "sessions": sessions]
+            return ["clients": clients.keys.sorted(), "sessions": sessions, "echoExperiment": host.echoExperiment,
+                    "macRoute": host.route.rawValue]
         }
     }
 
@@ -241,10 +270,16 @@ final class HandsFreeService: @unchecked Sendable {
             session.playing = message["on"] as? Bool ?? false
             session.speech = message["speech"] as? Bool ?? session.playing
             session.echoCancelled = message["echoCancelled"] as? Bool ?? false
+            if !wasSpeech, session.playing, session.speech { session.speechStartedAt = Date() }
             if !session.playing {
                 session.playingEndedAt = Date()
                 session.endedOnSpeech = wasSpeech
             }
+        case (.stream, "route"):
+            guard let session = connection.session else { return }
+            session.route = (message["route"] as? String).flatMap(AudioRoute.init(rawValue:))
+            session.voiceProcessing = message["voiceProcessing"] as? Bool ?? false
+            sendSetup(session)
         case (.stream, "stop"):
             if let session = connection.session { end(session, why: "off") }
         case (.speaker, "progress"):
@@ -350,6 +385,7 @@ final class HandsFreeService: @unchecked Sendable {
             guard !mac.engine.clients.contains(client) else { return }
             mac.engine.addClient(client, trigger: registered.trigger)
             registered.connection.send(["type": "session", "source": "mac"])
+            sendMacSetup()
             Log.log("hands-free: \(client) listening on the Mac's microphone too")
             return
         }
@@ -361,13 +397,14 @@ final class HandsFreeService: @unchecked Sendable {
         registered.connection.send(["type": "session", "source": "mac"])
         Log.log("hands-free: \(client) turned it on, on the Mac's microphone")
         let queue = self.queue
-        setMicrophoneListener?({ [weak self, weak engine] data in
+        setMicrophoneListener?({ [weak self, weak engine] data, hostTime in
             queue.async {
                 guard let self, let engine, self.mac?.engine === engine else { return }
-                engine.push(Self.samples(data))
+                engine.push(self.macAudio(Self.samples(data), hostTime: hostTime))
             }
         })
         engine.sourceStarted()
+        sendMacSetup()
     }
 
     private func stopMac(_ client: String, why: String) {
@@ -390,12 +427,36 @@ final class HandsFreeService: @unchecked Sendable {
         if host.fnDictating {
             state.deaf = .init(why: "a Fn dictation", cause: .dictation)
         } else if host.speakers, host.speakingOrRinging(tailMs: Self.playbackTailMs) {
-            // Without a headset the microphone hears Voice Operator, and would take it for the user.
-            state.deaf = .init(why: "Voice Operator speaking on speakers", cause: .speech)
+            if host.echoExperiment, host.speechSettled(afterMs: EchoExperiment.settleMs) {
+                // The echo experiment: listened through, the echo canceller taking Voice Operator out (`macAudio`).
+                state.throughEcho = true
+            } else if host.echoExperiment {
+                state.deaf = .init(why: "the start of Voice Operator's speech on speakers", cause: .speech)
+            } else {
+                // Without a headset the microphone hears Voice Operator, and would take it for the user.
+                state.deaf = .init(why: "Voice Operator speaking on speakers", cause: .speech)
+            }
         } else if let playing = clients.values.first(where: { $0.connection.isPlaying(tailMs: Self.playbackTailMs) }) {
             state.deaf = .init(why: "\(playing.name) playing", cause: .sound)
         }
         return state
+    }
+
+    /// The Mac's microphone as hands-free hears it: through the echo canceller
+    /// while the echo experiment is on and Voice Operator plays on the speakers
+    /// the microphone hears; otherwise as it came, the canceller let go.
+    private var macEcho: MacEchoPath?
+
+    private func macAudio(_ pcm: [Int16], hostTime: UInt64) -> [Int16] {
+        guard host.echoExperiment, host.speakers else {
+            macEcho = nil
+            return pcm
+        }
+        if macEcho == nil {
+            macEcho = MacEchoPath()
+            Log.log("hands-free: the Mac's microphone goes through the echo canceller (echo experiment, \(OutputDevice.summary))")
+        }
+        return macEcho?.process(pcm, hostTime: hostTime) ?? pcm
     }
 
     private func deliverMac(_ outgoing: HandsFreeEngine.Outgoing) {
@@ -456,6 +517,7 @@ final class HandsFreeService: @unchecked Sendable {
         connection.send(["type": "session", "source": "stream", "session": id])
         Log.log("hands-free: \(client) turned it on, streaming from \(connection.device)")
         engine.sourceStarted()
+        sendSetup(created)
     }
 
     private func resumeStream(on connection: Connection, _ message: [String: Any]) {
@@ -472,6 +534,7 @@ final class HandsFreeService: @unchecked Sendable {
         session.droppedAt = nil
         Log.log(String(format: "hands-free: %@ resumed its stream after %.1fs", session.device, away / 1000))
         connection.send(["type": "resumed", "session": id, "at": session.received])
+        sendSetup(session)
         session.engine.sourceStarted(reopened: true)
         if away > Self.lateAudioMs, session.engine.phase != .hearing { session.engine.gap() }
     }
@@ -505,7 +568,19 @@ final class HandsFreeService: @unchecked Sendable {
             || (session.playingEndedAt.map { Date().timeIntervalSince($0) * 1000 < Self.playbackTailMs } ?? false)
         if ringing, !session.echoCancelled {
             let speech = session.playing ? session.speech : session.endedOnSpeech
-            state.deaf = .init(why: "\(session.device) playing", cause: speech ? .speech : .sound)
+            let speaking = session.playing && session.speech
+            if speech, echoExperimentActive(session) {
+                // The echo experiment: the phone's own echo cancellation trusted, past the start of each reply.
+                if speaking, let started = session.speechStartedAt,
+                   Date().timeIntervalSince(started) * 1000 < EchoExperiment.settleMs {
+                    state.deaf = .init(why: "the start of \(session.device)'s speech", cause: .speech)
+                } else {
+                    state.throughEcho = true
+                    state.clientSpeaking = speaking
+                }
+            } else {
+                state.deaf = .init(why: "\(session.device) playing", cause: speech ? .speech : .sound)
+            }
         } else if session.playing, session.speech {
             state.clientSpeaking = true
         }
@@ -536,6 +611,40 @@ final class HandsFreeService: @unchecked Sendable {
         session.connection?.session = nil
         setBusy(session.id, false)
         Log.log("hands-free: off on \(session.device) (\(why))")
+    }
+
+    // MARK: - Setup: where the sound goes, and the echo experiment
+
+    /// The route or the echo experiment's checkbox changed: tell every
+    /// session's client, for its button. From any thread.
+    func setupChanged() {
+        queue.async { [self] in
+            if mac != nil { sendMacSetup() } else { macEcho = nil }
+            for session in streams.values { sendSetup(session) }
+        }
+    }
+
+    /// `off`: the checkbox is off. `standby`: on, but not acting here (a headset, or a route it cannot
+    /// tell). `active`: listening through our own voice on this source when it plays.
+    private func echoExperimentWord(active: Bool) -> String {
+        host.echoExperiment ? (active ? "active" : "standby") : "off"
+    }
+
+    private func echoExperimentActive(_ session: StreamSession) -> Bool {
+        host.echoExperiment && session.route == .open && session.voiceProcessing
+    }
+
+    private func sendMacSetup() {
+        guard let mac else { return }
+        let route = host.route
+        let message: [String: Any] = ["type": "setup", "route": route.rawValue,
+                                      "echoExperiment": echoExperimentWord(active: host.speakers)]
+        for client in mac.engine.clients { clients[client]?.connection.send(message) }
+    }
+
+    private func sendSetup(_ session: StreamSession) {
+        session.connection?.send(["type": "setup", "route": session.route?.rawValue ?? NSNull(),
+                                  "echoExperiment": echoExperimentWord(active: echoExperimentActive(session))])
     }
 
     // MARK: - Engines
@@ -578,7 +687,8 @@ final class HandsFreeService: @unchecked Sendable {
                 record.write(kind, detail)
             },
             log: { Log.log("hands-free: \($0)") },
-            continuousTurn: { [weak self] in self?.miniModel?.stream() })
+            continuousTurn: { [weak self] in self?.miniModel?.stream() },
+            isEcho: { RecentSpeech.shared.isEcho($0) })
         let engine = HandsFreeEngine(owner: owner, trigger: trigger, scorer: EnergyScorer(), deps: deps)
         if let url = SileroVAD.bundledModelURL() {
             do { engine.setScorer(try SileroVAD(modelURL: url)) } catch {
@@ -661,6 +771,11 @@ fileprivate final class StreamSession {
     /// What ended when `playing` last went off was the client's voice: its tail is speech too.
     var endedOnSpeech = false
     var playingEndedAt: Date?
+    /// When the client's voice last began to play: the start of a reply, which the echo experiment does not listen to.
+    var speechStartedAt: Date?
+    /// Where the device's sound goes, and whether its echo cancellation is on (`route`); nil until it says.
+    var route: AudioRoute?
+    var voiceProcessing = false
     var expiry: DispatchWorkItem?
     var droppedAt: Date?
     init(id: String, client: String, device: String, engine: HandsFreeEngine, resampler: PCM16Resampler) {

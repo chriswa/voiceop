@@ -164,6 +164,8 @@ final class HandsFreeEngine: @unchecked Sendable {
         var log: (String) -> Void
         /// A fresh turn-1-mini stream for a dictation, or nil while it is unavailable.
         var continuousTurn: () -> ContinuousTurn? = { nil }
+        /// Whether what was heard through our own voice is that voice: words it just said (`RecentSpeech`).
+        var isEcho: (_ heard: String) -> Bool = { _ in false }
     }
 
     struct Deaf {
@@ -183,6 +185,12 @@ final class HandsFreeEngine: @unchecked Sendable {
         /// Voice Operator speaking for a client (on the Mac): cut off by the
         /// trigger word too, and holding the window open.
         var voiceOperatorSpeaking = false
+        /// The echo experiment (`EchoExperiment`): our own voice is playing, or
+        /// ringing out, where the microphone hears it, and is listened through
+        /// rather than stood aside for. Only the trigger word counts then, even
+        /// in the conversation window; what matches what was just said is
+        /// echo; nothing heard gets a cue.
+        var throughEcho = false
     }
 
     // MARK: - Tunables beyond `HandsFreeTuning`
@@ -233,6 +241,8 @@ final class HandsFreeEngine: @unchecked Sendable {
     private var candidatesChecking = 0
     /// Why the listener stands aside, while it does.
     private var standingAside: StandAside?
+    /// Listening through our own voice (`SourceState.throughEcho`), as of the last frame.
+    private var throughEcho = false
     private var ducked = false
     private var speechRun = 0
     private var quietRun = 0
@@ -457,7 +467,8 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     private func routeFrame(_ frame: ScoredFrame) {
         let state = sourceState()
-        trackPlayback(frame, speaking: state.clientSpeaking)
+        throughEcho = state.throughEcho
+        trackPlayback(frame, speaking: state.clientSpeaking, echoing: state.throughEcho)
         tickConversation(state)
         if phase == .hearing, let utterance {
             utterance.dictation.append(frame.pcm)
@@ -501,20 +512,23 @@ final class HandsFreeEngine: @unchecked Sendable {
         }
         for candidate in listener.push([frame]) {
             // In the conversation window any words will do; otherwise they must start with a trigger word.
-            let window = conversation
+            // Through our own voice, only the trigger word: what leaks through is words too.
+            let window = conversation && !state.throughEcho
+            let throughEcho = state.throughEcho
             deps.log("speech after \(candidate.noSpeechBeforeMs)ms without speech — checking its start "
                      + (window ? "for words" : "for a trigger word"))
             let overVoice = state.clientSpeaking || state.voiceOperatorSpeaking
             checking += 1
             candidatesChecking += 1
             deps.check(candidate.clip) { [weak self] answer in
-                self?.checked(candidate, window: window, overVoice: overVoice, answer: answer)
+                self?.checked(candidate, window: window, overVoice: overVoice, throughEcho: throughEcho, answer: answer)
             }
         }
         watchForShutdown()
     }
 
-    private func checked(_ candidate: WakeCandidate, window: Bool, overVoice: Bool, answer: CheckAnswer) {
+    private func checked(_ candidate: WakeCandidate, window: Bool, overVoice: Bool, throughEcho: Bool = false,
+                         answer: CheckAnswer) {
         checking -= 1
         candidatesChecking -= 1
         // Decided: the pending beep stops now, before a dictation's chirp or the sad tune.
@@ -530,15 +544,23 @@ final class HandsFreeEngine: @unchecked Sendable {
         let client: String? = window
             ? (verdict.trigger.flatMap(clientFor) ?? conversationClient ?? owner)
             : verdict.trigger.flatMap(clientFor)
-        let match = window ? verdict.words : client != nil
+        var match = window ? verdict.words : client != nil
+        if match, throughEcho, deps.isEcho(heard) {
+            deps.log("\"\(heard)\" is what our own voice just said: echo, not the user")
+            deps.record("echo-rejected", ["heard": heard])
+            match = false
+        }
         deps.log(match
             ? (window ? "words, in the conversation window: dictating from its start"
                       : "it starts with \"\(verdict.trigger ?? "")\": dictating from its start")
             : (window ? "not words (a cough, filler, nothing)" : "not a trigger word"))
-        deps.record("check", ["match": match, "mode": window ? "speech" : "wake-word",
-                              "wakeWord": verdict.trigger != nil, "noSpeechBeforeMs": candidate.noSpeechBeforeMs,
-                              "spokeMs": candidate.spokeMs, "overVoice": overVoice])
-        if !match, !window, phase == .listening, live {
+        var checkDetail: [String: Any] = ["match": match, "mode": window ? "speech" : "wake-word",
+                                          "wakeWord": verdict.trigger != nil, "noSpeechBeforeMs": candidate.noSpeechBeforeMs,
+                                          "spokeMs": candidate.spokeMs, "overVoice": overVoice]
+        if throughEcho { checkDetail["throughEcho"] = true }
+        deps.record("check", checkDetail)
+        // Through our own voice, nothing that was not for the client gets a cue: it was most likely that voice.
+        if !match, !window, phase == .listening, live, !throughEcho {
             if verdict.shutdown != nil {
                 // Perhaps "let me turn this off", which needs no trigger word: wait for it to end, then check the whole of it.
                 deps.log("it may be \"let me turn this off\": checking the whole of it once it ends")
@@ -560,6 +582,7 @@ final class HandsFreeEngine: @unchecked Sendable {
             let msAgo = Int(listener.msSince(candidate.start).rounded())
             deps.log("\(window ? "words" : "the trigger word") over the client's voice: cutting it off as of \(msAgo)ms ago")
             var detail: [String: Any] = ["mode": window ? "speech" : "wake-word", "cutInMsAgo": msAgo, "heard": heard]
+            if throughEcho { detail["throughEcho"] = true }
             // How far into the reply they began: echo leaking through cancellation starts early, and the same each time.
             if let e = echo { detail["intoReplyMs"] = max(0, Int(Double(e.frames) * HandsFreeAudio.frameMs) - msAgo) }
             echo?.cutIns += 1
@@ -899,14 +922,24 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     /// Every frame while the client's voice plays with echo cancellation:
     /// anyone speaking turns it down at once, and quiet brings it back once no
-    /// check is pending.
-    private func trackPlayback(_ frame: ScoredFrame, speaking: Bool) {
-        guard speaking else {
+    /// check is pending. `echoing`: listening through our own voice
+    /// (`SourceState.throughEcho`) — recorded as a reply's echo, and turned down
+    /// only if it is the client's (`speaking`).
+    private func trackPlayback(_ frame: ScoredFrame, speaking: Bool, echoing: Bool = false) {
+        guard speaking || echoing else {
             if let echo { recordEcho(echo) }
             echo = nil
             setDuck(false)
             speechRun = 0
             quietRun = 0
+            return
+        }
+        if echoing, echo == nil { echo = Echo(throughEcho: true) }
+        guard speaking else {
+            setDuck(false)
+            speechRun = 0
+            quietRun = 0
+            noteEcho(frame)
             return
         }
         if frame.p >= SpeechGate.start {
@@ -938,6 +971,8 @@ final class HandsFreeEngine: @unchecked Sendable {
         var maxDb = -120.0
         var ducks = 0
         var cutIns = 0
+        /// Heard through the echo experiment, not a headset's or the phone's own cancellation alone.
+        var throughEcho = false
     }
     private var echo: Echo?
 
@@ -969,6 +1004,7 @@ final class HandsFreeEngine: @unchecked Sendable {
             "ducks": e.ducks, "cutIns": e.cutIns,
         ]
         if let first = e.firstSpeechFrame { detail["firstSpeechMs"] = ms(first) }
+        if e.throughEcho { detail["throughEcho"] = true }
         deps.record("echo", detail)
         if e.speechFrames > 0 {
             deps.log("the client's voice played \(detail["seconds"] ?? 0)s through echo cancellation: "
@@ -1002,7 +1038,7 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     /// The state, sent only when it changed.
     private func publishState() {
-        let pending = phase == .listening && live && standingAside == nil && !conversation
+        let pending = phase == .listening && live && standingAside == nil && !conversation && !throughEcho
             && (listener.undecided || candidatesChecking > 0)
         let state = Event.state(phase: phase, conversation: conversation, closesAt: closesAt,
                                 checking: checking > 0, pending: pending,

@@ -20,6 +20,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let typeInsteadOfPaste = NSMenuItem(title: "Type Text Instead of Pasting", action: #selector(toggleTypeInsteadOfPaste), keyEquivalent: "")
     private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
     private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
+    private let echoExperiment = NSMenuItem(title: "Hands-Free: Hear Me Over Speakers (Experimental)", action: #selector(toggleEchoExperiment), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
     /// Which provider transcribes, and which shadows it — rebuilt on every open.
@@ -95,6 +96,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onToggleKeepMicOpen: (() -> Bool)?
     var keepMicOpenForWirelessState: (() -> Bool)?
     var onToggleKeepMicOpenForWireless: (() -> Bool)?
+    /// Reads and flips hands-free's echo experiment (`EchoExperiment`). Off is
+    /// how hands-free has always behaved; the flip returns the state afterwards.
+    var echoExperimentState: (() -> Bool)?
+    var onToggleEchoExperiment: (() -> Bool)?
     var sttHistoryProvider: (() -> [STTHistoryEntry])?
     var commandHistoryProvider: (() -> [CommandHistoryEntry])?
     var onRetrySTT: ((UUID) -> Void)?
@@ -200,6 +205,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         // a rule under the switch it drives.
         keepMicOpenForWireless.indentationLevel = 1
         keepMicOpenForWireless.target = self; menu.addItem(keepMicOpenForWireless)
+        echoExperiment.toolTip = "Off: hands-free does not listen while our voice plays on a speaker the microphone hears. "
+            + "On: it listens through echo cancellation, and only \"Control\" cuts in. Headsets are never affected."
+        echoExperiment.target = self; menu.addItem(echoExperiment)
         let copyPath = NSMenuItem(title: "Copy Log Path", action: #selector(copyLogPath), keyEquivalent: "")
         copyPath.target = self; menu.addItem(copyPath)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -280,6 +288,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         typeInsteadOfPaste.state = (typeInsteadOfPasteState?() ?? false) ? .on : .off
         keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
         keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
+        echoExperiment.state = (echoExperimentState?() ?? false) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT,
                 copyRaw: onCopyRawSTT, copyShadow: onCopyShadowSTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand,
@@ -440,6 +449,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func toggleMuteSystemAudio() { muteSystemAudio.state = (onToggleMuteSystemAudio?() ?? true) ? .on : .off }
     @objc private func toggleTypeInsteadOfPaste() { typeInsteadOfPaste.state = (onToggleTypeInsteadOfPaste?() ?? false) ? .on : .off }
     @objc private func toggleKeepMicOpen() { keepMicOpen.state = (onToggleKeepMicOpen?() ?? false) ? .on : .off }
+    @objc private func toggleEchoExperiment() {
+        echoExperiment.state = (onToggleEchoExperiment?() ?? false) ? .on : .off
+    }
+
     @objc private func toggleKeepMicOpenForWireless() {
         keepMicOpenForWireless.state = (onToggleKeepMicOpenForWireless?() ?? false) ? .on : .off
         // The rule just took the manual checkbox over (or handed it back), so the

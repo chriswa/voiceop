@@ -113,8 +113,9 @@ final class AudioRecorder: @unchecked Sendable {
     /// converted to 16 kHz s16le with its own converter and handed over on the
     /// audio thread. While set, the microphone is held open as if always-on.
     /// A recording beside it is unaffected — the two never share a converter
-    /// or a buffer. See `setListener`.
-    private var listener: (@Sendable (Data) -> Void)?
+    /// or a buffer. See `setListener`. With each buffer, the host time of its
+    /// first sample, for lining it up with what was playing (`MacEchoPath`).
+    private var listener: (@Sendable (Data, UInt64) -> Void)?
     private var listenerConverter: AVAudioConverter?
     /// The listener's first buffer has been logged (raw and converted levels).
     private var listenerSawAudio = false
@@ -416,7 +417,7 @@ final class AudioRecorder: @unchecked Sendable {
     /// Hand every buffer the microphone delivers to `handler`, as 16 kHz s16le
     /// mono, until called with nil. Holds the microphone open meanwhile, whatever
     /// the always-on preference says, and a dictation records alongside as usual.
-    func setListener(_ handler: (@Sendable (Data) -> Void)?) {
+    func setListener(_ handler: (@Sendable (Data, UInt64) -> Void)?) {
         lock.lock()
         let had = listener != nil
         listener = handler
@@ -569,8 +570,8 @@ final class AudioRecorder: @unchecked Sendable {
             let tap = tapNumber
             lock.unlock()
             input.removeTap(onBus: 0)
-            input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
-                self?.handleTap(buffer, tap: tap)
+            input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, when in
+                self?.handleTap(buffer, tap: tap, hostTime: when.isHostTimeValid ? when.hostTime : mach_absolute_time())
             }
         }
         // The watchdog's clock for a freshly opened microphone starts here.
@@ -828,7 +829,7 @@ final class AudioRecorder: @unchecked Sendable {
 
     /// One tap buffer. Runs on the audio thread; the first-audio callback is
     /// invoked outside the lock and must get off this thread promptly.
-    private func handleTap(_ buffer: AVAudioPCMBuffer, tap: Int) {
+    private func handleTap(_ buffer: AVAudioPCMBuffer, tap: Int, hostTime: UInt64) {
         lock.lock()
         // Dropped here: buffers from a tap we have since torn down, and — while
         // the microphone is held open between dictations — every buffer that
@@ -851,7 +852,7 @@ final class AudioRecorder: @unchecked Sendable {
             let converted = Self.levels(pcm16: heard)
             Log.log(Self.firstBufferSummary(buffer) + String(format: " → hands-free %d bytes, peak %.4f", heard.count, converted.peak))
         }
-        defer { if let listener, !heard.isEmpty { listener(heard) } }
+        defer { if let listener, !heard.isEmpty { listener(heard, hostTime) } }
         guard capturing else { lock.unlock(); return }
         let isFirstAudio = !sawFirstAudio && buffer.frameLength > 0
         if isFirstAudio { sawFirstAudio = true }

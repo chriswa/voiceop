@@ -28,6 +28,21 @@ let package = Package(
         // Opus encoding on the Wispr flow-request paths. See Sources/COpus/README.
         .systemLibrary(name: "COpus", path: "Sources/COpus"),
 
+        // Vendored SpeexDSP echo canceller, for hands-free's experimental echo
+        // cancellation on the Mac. See Sources/CSpeexDSP/README.md.
+        .target(
+            name: "CSpeexDSP",
+            path: "Sources/CSpeexDSP",
+            exclude: ["COPYING", "README.md"],
+            sources: ["src"],
+            cSettings: [
+                .define("FLOATING_POINT"),
+                .define("USE_KISS_FFT"),
+                .define("EXPORT", to: ""),
+                .unsafeFlags(["-Wno-everything"]),
+            ]
+        ),
+
         // Generated Swift for Wispr's flow_api.v1 (messages via swift-protobuf,
         // gRPC client via grpc-swift 1.x) from proto/flow_api_v1.proto.
         // Pre-generated — regenerate via scripts/gen-proto.sh.
@@ -44,6 +59,7 @@ let package = Package(
             name: "VoiceOperator",
             dependencies: [
                 "COpus",
+                "CSpeexDSP",
                 "FlowAPI",
                 .product(name: "GRPC", package: "grpc-swift"),
                 .product(name: "NIOCore", package: "swift-nio"),

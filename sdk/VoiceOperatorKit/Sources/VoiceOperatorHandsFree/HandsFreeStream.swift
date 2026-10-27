@@ -21,6 +21,10 @@ public enum HandsFreeEvent: Equatable, Sendable {
     /// The hello was refused (`protocol`, `invalid_client`, `no_client`, …); Voice Operator closes the connection.
     case refused(String)
     case error(String)
+    /// Where this device's sound goes as Voice Operator understands it (`ear`, `open`, `unsure`; nil
+    /// until the device says), and its echo experiment here: `off`, `standby` (on, not acting on
+    /// this route), `active` (listening through the client's voice).
+    case setup(route: String?, echoExperiment: String)
 }
 
 /**
@@ -74,6 +78,8 @@ public final class HandsFreeStream {
 
     private struct Playing: Equatable { var on: Bool; var speech: Bool; var echoCancelled: Bool }
     private var playingNow = Playing(on: false, speech: false, echoCancelled: false)
+    private struct Route: Equatable { var route: String; var voiceProcessing: Bool }
+    private var routeNow: Route?
 
     public init(client: String, device: String, sendLine: @escaping (String) -> Void) {
         self.client = client
@@ -123,6 +129,7 @@ public final class HandsFreeStream {
             trim(before: at)
             sendBuffered(from: at)
             if playingNow != Playing(on: false, speech: false, echoCancelled: false) { sendPlaying() }
+            if routeNow != nil { sendRoute() }
             return
         case "session":
             awaitingSession = false
@@ -130,6 +137,7 @@ public final class HandsFreeStream {
                 sessionID = id
                 sendBuffered(from: 0)
                 if playingNow.on { sendPlaying() }
+                if routeNow != nil { sendRoute() }
             }
         case "session-ended":
             // Too late to resume (Voice Operator kept it 10 s; the way back took longer — a
@@ -195,6 +203,16 @@ public final class HandsFreeStream {
         if live { sendPlaying() }
     }
 
+    /// Where the device's sound goes — `ear`, `open` (its own speaker, which the microphone hears) or
+    /// `unsure` — and whether its echo cancellation is on: for the hands-free button, and Voice
+    /// Operator's echo experiment. Sent when it changes, and again after a resume.
+    public func route(_ route: String, voiceProcessing: Bool) {
+        let now = Route(route: route, voiceProcessing: voiceProcessing)
+        guard now != routeNow else { return }
+        routeNow = now
+        if live { sendRoute() }
+    }
+
     // MARK: - Inside
 
     /// Audio can go now: connected, a session, and not waiting on a resume.
@@ -238,6 +256,11 @@ public final class HandsFreeStream {
 
     private func sendAudio(at: Int, _ pcm: Data) {
         send(["type": "audio", "at": at, "data": pcm.base64EncodedString()])
+    }
+
+    private func sendRoute() {
+        guard let routeNow else { return }
+        send(["type": "route", "route": routeNow.route, "voiceProcessing": routeNow.voiceProcessing])
     }
 
     private func sendPlaying() {
@@ -286,6 +309,8 @@ public final class HandsFreeStream {
             return .refused(m["error"] as? String ?? "")
         case "error":
             return .error(m["error"] as? String ?? "")
+        case "setup":
+            return .setup(route: m["route"] as? String, echoExperiment: m["echoExperiment"] as? String ?? "off")
         default:
             return nil
         }

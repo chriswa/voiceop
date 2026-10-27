@@ -155,6 +155,26 @@ final class HandsFreeService: @unchecked Sendable {
         }
     }
 
+    /// The Mac's microphone stopped delivering audio, or came back — the
+    /// recorder's stall watchdog (`AudioRecorder.Delivery`). While it is
+    /// stalled the source is not live, so clients see hands-free stop listening
+    /// rather than an idle button over a deaf microphone; a watchdog that has
+    /// given up ends the session. From any thread.
+    func microphoneDelivery(_ delivery: AudioRecorder.Delivery) {
+        queue.async { [self] in
+            guard let mac else { return }
+            switch delivery {
+            case .stalled:
+                Log.log("hands-free: the Mac's microphone stalled — not listening until its audio is back")
+                mac.engine.sourceStopped(final: false)
+            case .resumed:
+                mac.engine.sourceStarted(reopened: true)
+            case .gaveUp:
+                for client in mac.engine.clients { stopMac(client, why: "microphone") }
+            }
+        }
+    }
+
     /// For `/v1/status`: sessions by client.
     func snapshot() -> [String: Any] {
         queue.sync {

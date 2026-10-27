@@ -494,6 +494,51 @@ closing the microphone and logging loudly — after more than
 `maxRebuildsPerWindow` rebuilds in `rebuildWindow` seconds. `setAlwaysOn` clears
 that, so an AirPod going back in the ear re-arms it.
 
+### Stall watchdog (2026-10-26)
+
+Core Audio can stop feeding a running capture engine with no configuration
+change at all: `isRunning` stays true and the tap is simply never called again.
+On the EPOS BTD 800, with hands-free holding the microphone, it happened about
+0.1 s after Voice Operator finished speaking a reply: Core Audio stopped both of
+the device's streams, restarting the aggregate our input runs through failed,
+and the input never delivered again. Hands-free went deaf while still showing as
+listening, and the engine stayed broken across re-opens (dictations captured
+nothing, or 2 s of an 85 s hold) until the app restarted.
+
+`AudioRecorder.checkDelivery` runs every 100 ms on the graph queue. When the
+microphone is open, something wants it (a dictation, hands-free, always-on), and
+it has run dry for longer than `DeliveryWatch` allows, it logs a `WARNING the
+microphone has delivered no audio` line and reports
+`AudioRecorder.Delivery.stalled`. `DeliveryWatch` allows:
+
+- **3 s for the first buffer** after the microphone opens. Right after our own
+  speech, on a wireless headset, the capture engine is a fresh one and the first
+  buffer takes up to 1.6 s (11 of 152 such dictations took over 0.75 s, and all
+  then captured normally); a warm engine delivers within ~0.1 s.
+- **0.75 s once the delivered audio runs out.** Silence counts from the end of
+  the audio delivered so far, not from when it arrived: the same headset hands
+  over its first 0.7 s in one burst.
+- **0.4 s for a held microphone with no dictation** in the 3 s after our own
+  speech ends (`speechEnded`), so it is rebuilt before the user answers. Never
+  for a dictation: a false alarm there throws away what the user is saying, and
+  pressing the trigger key over our speech is how they interrupt it.
+
+On a stall:
+
+- **During a dictation** the dictation stops at once (`endDictation(micStalled:)`):
+  the long `microphoneStalled` alarm (repeated rising runs) plays first, so the user stops talking, and
+  what was captured is transcribed and pasted as usual. The trigger key's gesture
+  is reset, so the next press starts a new dictation. Once the recording has
+  stopped, the capture graph is rebuilt on a brand-new `AVAudioEngine` (what the
+  restart fixed).
+- **With no dictation** the held microphone is rebuilt on a fresh engine
+  straight away. More than two rebuilds in 30 s and it gives up (`.gaveUp`) until
+  something wants the microphone afresh.
+
+Hands-free stops the Mac source while the microphone is stalled (clients see it
+stop listening), starts it again when audio resumes, and ends the session on
+give-up (`session-ended`, why `microphone`).
+
 ### Trigger key
 - Wispr uses Fn (keycode 63) via a "Keyboard Service" push-to-talk (`Ptt action down`).
 - **Ours**: default to **Right Shift (keycode 60)** during development via a `CGEventTap` on

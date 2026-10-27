@@ -207,6 +207,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
         hotkey.onStart = { [weak self] mode, trace in self?.arbiter.beginDictation(mode: mode, trace: trace) }
         hotkey.onStop = { [weak self] in self?.arbiter.endDictation(context: Self.frontmostContext()) }
+        // The microphone stalled: a dictation stops there and then, before the
+        // user loses any more of what they are saying (see AudioRecorder.checkDelivery).
+        arbiter.onMicrophoneDelivery = { [weak self] delivery in
+            HandsFreeService.shared.microphoneDelivery(delivery)
+            guard let self, delivery == .stalled,
+                  self.arbiter.endDictation(context: Self.frontmostContext(), micStalled: true) else { return }
+            self.hotkey.dictationEndedElsewhere()
+        }
         hotkey.onCycleStyle = { [weak self] in self?.arbiter.cycleTranscriptStyle() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast(using: .clipboard) }
         hotkey.onRetype = { [weak self] in self?.arbiter.repasteLast(using: .keystrokes) }

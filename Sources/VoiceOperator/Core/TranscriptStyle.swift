@@ -72,6 +72,17 @@ struct TranscriptStyle: Equatable, Sendable {
         }
     }
 
+    /// Where a finished transcript goes. The discard check comes first, so it
+    /// holds for commands as well as dictation.
+    func delivery(of transcript: String, command: Bool) -> TranscriptDelivery {
+        // Emptiness is judged on the transcript, not on the styled text: the
+        // style adds spaces, and " " must not paste as if it were speech.
+        if discard || transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .none }
+        // A command is spoken to the router, not written into a document, so the
+        // fragment-shaping the style does would only confuse it.
+        return command ? .route(transcript) : .paste(apply(to: transcript))
+    }
+
     /// Terminal punctuation the trim flag removes. `!` and `?` are included at the
     /// user's request: they are as much an artefact of the formatter's
     /// sentence-shaping as the full stop is.
@@ -124,4 +135,14 @@ struct TranscriptStyle: Equatable, Sendable {
         if head == "I" { return false }                                      // the pronoun, and I'll/I'm/I've
         return true
     }
+}
+
+/// What becomes of a finished transcript: see `TranscriptStyle.delivery`.
+enum TranscriptDelivery: Equatable {
+    /// Nothing was said, or the user discarded it: record it, send it nowhere.
+    case none
+    /// A command's text, unshaped, for the router.
+    case route(String)
+    /// Styled text to paste into the focused app.
+    case paste(String)
 }

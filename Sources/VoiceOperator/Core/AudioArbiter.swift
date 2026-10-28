@@ -583,19 +583,16 @@ final class AudioArbiter {
             do {
                 let transcript = try await self.transcribe(live, clip: clip)
                 self.stopTranscriptionProgressCue()
-                // A command is spoken to the router, not written into a document,
-                // so the fragment-shaping the style does would only confuse it.
                 let text = isCommand ? transcript.text : style.apply(to: transcript.text)
                 self.record(clip: clip, duration: duration, transcript: text, raw: transcript.raw,
                             command: isCommand, error: nil, id: entryID)
-                // Emptiness is judged on the transcript, not on the styled text:
-                // the style adds spaces, and " " must not paste as if it were speech.
-                if transcript.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // Nothing was said — nothing to paste or route.
-                } else if isCommand {
-                    if let routingContext { self.onCommand?(text, routingContext) }
-                } else if !style.discard {
-                    self.pasteAndRemember(text)
+                switch style.delivery(of: transcript.text, command: isCommand) {
+                case .none:
+                    if style.discard { live?.trace.note("discarded") }
+                case .route(let command):
+                    if let routingContext { self.onCommand?(command, routingContext) }
+                case .paste(let styled):
+                    self.pasteAndRemember(styled)
                 }
                 live?.trace.mark("done")
             } catch {

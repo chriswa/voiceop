@@ -583,19 +583,16 @@ final class AudioArbiter {
             do {
                 let transcript = try await self.transcribe(live, clip: clip)
                 self.stopTranscriptionProgressCue()
-                // A command is spoken to the router, not written into a document,
-                // so the fragment-shaping the style does would only confuse it.
                 let text = isCommand ? transcript.text : style.apply(to: transcript.text)
                 self.record(clip: clip, duration: duration, transcript: text, raw: transcript.raw,
                             command: isCommand, error: nil, id: entryID)
-                // Emptiness is judged on the transcript, not on the styled text:
-                // the style adds spaces, and " " must not paste as if it were speech.
-                if transcript.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // Nothing was said — nothing to paste or route.
-                } else if isCommand {
-                    if let routingContext { self.onCommand?(text, routingContext) }
-                } else if !style.discard {
-                    self.pasteAndRemember(text)
+                switch style.delivery(of: transcript.text, command: isCommand) {
+                case .none:
+                    if style.discard { live?.trace.note("discarded") }
+                case .route(let command):
+                    if let routingContext { self.onCommand?(command, routingContext) }
+                case .paste(let styled):
+                    self.pasteAndRemember(styled)
                 }
                 live?.trace.mark("done")
             } catch {
@@ -1084,24 +1081,40 @@ final class AudioArbiter {
         }
         onPlaybackControlsChanged?()
     }
-    /// Duck other audio under narration — except on a Bluetooth output. Voice
-    /// Processing I/O opens the microphone and runs echo cancellation, which puts
-    /// AirPods and every other Bluetooth headset into its call profile: low-rate,
-    /// distorted playback, with the canceller working against our own speech.
+    /// Whether narration ducks other audio, and if not, why. The one decision
+    /// behind both starting the ducker (`applyDucking`) and holding a session's
+    /// first audio until it is up (`duckingStartGate`).
+    private enum DuckingDecision: Equatable {
+        case duck
+        /// Voice Processing I/O opens the microphone and runs echo cancellation,
+        /// which puts AirPods and every other Bluetooth headset into its call
+        /// profile: low-rate, distorted playback, with the canceller working
+        /// against our own speech.
+        case offBluetooth
+        /// Hands-free holds the microphone. The ducker's Voice Processing I/O graph
+        /// takes the input device as it starts and stops: every reply was two
+        /// configuration changes, each tearing the held microphone down (its light
+        /// going off, audio cutting out), and three in 30 s stood the hold down
+        /// altogether. Listening through speech matters more than ducking other audio.
+        case offHandsFree
+    }
+
+    private var duckingDecision: DuckingDecision {
+        if OutputDevice.isWireless { return .offBluetooth }
+        if recorder.hasListener { return .offHandsFree }
+        return .duck
+    }
+
     private func applyDucking(announce: Bool) {
-        if OutputDevice.isWireless {
+        switch duckingDecision {
+        case .duck:
+            narrationDucker.start()
+        case .offBluetooth:
             narrationDucker.stop()
             if announce { Log.log("tts ducking: off on Bluetooth output — \(OutputDevice.summary)") }
-        } else if recorder.hasListener {
-            // Hands-free holds the microphone. The ducker's Voice Processing I/O graph
-            // takes the input device as it starts and stops: every reply was two
-            // configuration changes, each tearing the held microphone down (its light
-            // going off, audio cutting out), and three in 30 s stood the hold down
-            // altogether. Listening through speech matters more than ducking other audio.
+        case .offHandsFree:
             narrationDucker.stop()
             if announce { Log.log("tts ducking: off while hands-free holds the microphone") }
-        } else {
-            narrationDucker.start()
         }
     }
 
@@ -1114,15 +1127,15 @@ final class AudioArbiter {
     }
 
     /// Starting the ducker's Voice Processing I/O graph reconfigures the output
-    /// device. On the built-in output that is inaudible (and on Bluetooth the
-    /// ducker never starts — see `applyDucking`);
-    /// on a USB headset dongle (EPOS BTD 800) it is a cut-out that, unheld, lands
-    /// on the first second or two of speech, because the graph takes about as
-    /// long to start as the first sentence takes to synthesize. There, the first
-    /// audio waits for ducking to be up. Elsewhere speech starts as soon as it
-    /// can.
+    /// device, which is an audible cut-out on the built-in speakers and on a USB
+    /// headset dongle (EPOS BTD 800) alike. The graph takes about a second to
+    /// start, so unheld, the cut-out lands on the first words of speech: always
+    /// when the first sentence is cached (a replay, a recurring "Isaac here."),
+    /// and on any output whose first sentence synthesizes faster than that. So
+    /// whenever the ducker is starting, a session's first audio waits for it.
+    /// When the first sentence must be synthesized, the wait mostly overlaps it.
     private func duckingStartGate() -> (@MainActor () async -> Void)? {
-        guard !OutputDevice.isBuiltIn, !OutputDevice.isWireless else { return nil }
+        guard duckingDecision == .duck else { return nil }
         let ducker = narrationDucker
         return {
             let began = ContinuousClock.now

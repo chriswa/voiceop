@@ -25,12 +25,6 @@ enum OutputDevice {
         }
     }
 
-    /// Whether the default output is the Mac's own (speakers, headphone jack).
-    static var isBuiltIn: Bool {
-        guard let device = defaultOutput() else { return false }
-        return transport(device) == kAudioDeviceTransportTypeBuiltIn
-    }
-
     /// Whether the default output is the Mac's own speakers — where what Voice
     /// Operator says reaches the microphone. The headphone jack is the same
     /// built-in device with a different data source ('hdpn').

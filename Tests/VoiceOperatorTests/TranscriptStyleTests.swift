@@ -25,6 +25,26 @@ final class TranscriptStyleTests: XCTestCase {
         XCTAssertEqual(discard.accessibilityLabel, "discard transcript")
     }
 
+    // MARK: - Delivery
+
+    func testDiscardSendsNothingInEitherMode() {
+        XCTAssertEqual(discard.delivery(of: "Open the logs.", command: false), .none)
+        XCTAssertEqual(discard.delivery(of: "Open the logs.", command: true), .none)
+    }
+
+    func testACommandIsRoutedUnshaped() {
+        XCTAssertEqual(both.delivery(of: "Open the logs.", command: true), .route("Open the logs."))
+    }
+
+    func testDictationIsPastedShaped() {
+        XCTAssertEqual(trim.delivery(of: "The cat sat.", command: false), .paste("The cat sat "))
+    }
+
+    func testABlankTranscriptGoesNowhere() {
+        XCTAssertEqual(lower.delivery(of: " ", command: false), .none)
+        XCTAssertEqual(TranscriptStyle.normal.delivery(of: "", command: true), .none)
+    }
+
     // MARK: - Normal
 
     func testNormalIsAnExactNoOp() {

@@ -69,9 +69,8 @@ final class AudioRecorder: @unchecked Sendable {
     /// The bus format the live tap is delivering, recorded when the tap was
     /// installed. Held here rather than captured into a queue block:
     /// `AVAudioFormat` is not `Sendable`, and this class already takes
-    /// responsibility for its own state via `lock`. It seeds the converter for a
-    /// dictation that reuses a held-open tap; `rebuildConverterIfNeededLocked`
-    /// is what keeps the converter honest if it turns out to be stale.
+    /// responsibility for its own state via `lock`. Only reported; the converter
+    /// follows the buffers themselves (`converterLocked`).
     private var tapFormat: AVAudioFormat?
 
     /// Whether the capture graph is held open between dictations — the "Keep
@@ -153,6 +152,15 @@ final class AudioRecorder: @unchecked Sendable {
 
     init() {
         engineBuiltAtOutputStart = Self.outputStartCount
+        // Build the input node now, on the graph queue ahead of anything else
+        // queued there, so it never comes into being while `NarrationDucker`'s
+        // Voice Processing I/O graph holds the microphone or is letting it go.
+        // An input node built then is broken for the life of its engine: it
+        // claims the built-in microphone's usual 1 channel, delivers 3 channels
+        // of near-silence, and every dictation fails until the app restarts. The
+        // first dictation after a launch used to build it, so barging in on
+        // speech that began right after a launch could do this.
+        engineQueue.async { [engine] in _ = engine.inputNode }
         NotificationCenter.default.addObserver(
             self, selector: #selector(configurationChanged),
             name: .AVAudioEngineConfigurationChange, object: engine)
@@ -341,27 +349,9 @@ final class AudioRecorder: @unchecked Sendable {
         if auth != .authorized {
             Log.log("recorder: mic not authorized (status \(auth.rawValue)) — capture will be silent")
         }
-        lock.lock()
-        let openFormat = micIsOpen ? tapFormat : nil
-        let engine = self.engine
-        lock.unlock()
-        // With the microphone already held open, the running tap's format is the
-        // one buffers will actually arrive in — ask the node again and a device
-        // that has since changed underneath it answers for the wrong hardware.
-        // (If `openMic` swaps in a fresh engine, this may describe the old one;
-        // `rebuildConverterIfNeededLocked` corrects it on the first buffer.)
-        let format = openFormat ?? engine.inputNode.inputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            Log.log("recorder: ERROR invalid input format — no microphone input available")
-            throw RecorderError.conversionFailed
-        }
-        guard let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                            sampleRate: Double(Self.asrSampleRate),
-                                            channels: 1, interleaved: true),
-              let conv = AVAudioConverter(from: format, to: outFormat) else {
-            Log.log("recorder: ERROR cannot build \(format.sampleRate)Hz→16kHz converter")
-            throw RecorderError.conversionFailed
-        }
+        // Nothing here touches the engine: that is `engineQueue`'s alone (see
+        // `init`). The converter is built from the first buffer the tap hands
+        // over (`converterLocked`), so there is no format to ask the node for.
         lock.lock()
         generation += 1
         let recording = generation
@@ -371,9 +361,7 @@ final class AudioRecorder: @unchecked Sendable {
         rebuildCount = 0
         rebuildWindowStart = nil
         rearmWatchdogLocked()
-        converter = conv
-        inputSampleRate = format.sampleRate
-        tapFormat = format
+        converter = nil
         captured = Data()
         sawFirstAudio = false
         meteringStartByte = 0
@@ -864,7 +852,7 @@ final class AudioRecorder: @unchecked Sendable {
         if isFirstAudio { sawFirstAudio = true }
         let trace = self.trace
         let handler = isFirstAudio ? firstAudioHandler : nil
-        rebuildConverterIfNeededLocked(for: buffer.format)
+        converterLocked(for: buffer.format)
         convertAndStoreLocked(buffer)
         lock.unlock()
 
@@ -994,20 +982,32 @@ final class AudioRecorder: @unchecked Sendable {
         init(_ buffer: AVAudioPCMBuffer?) { self.buffer = buffer }
     }
 
-    /// Rebuild the converter when the tap starts delivering a format it was not
-    /// built for. A held-open tap outlives any one input device, so a headset
-    /// swapped mid-capture would otherwise have its samples reinterpreted at the
-    /// old rate — audible as a chipmunked or slurred transcript rather than as an
+    /// The ASR wire format, as `AVAudioConverter` wants it.
+    private static let asrFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                                 sampleRate: Double(asrSampleRate),
+                                                 channels: 1, interleaved: true)!
+
+    /// Make sure the converter is built for the format the tap is delivering:
+    /// built on a recording's first buffer, and rebuilt when the format changes.
+    /// A held-open tap outlives any one input device, so a headset swapped
+    /// mid-capture would otherwise have its samples reinterpreted at the old
+    /// rate — audible as a chipmunked or slurred transcript rather than as an
     /// error. **The caller must already hold `lock`.**
-    private func rebuildConverterIfNeededLocked(for format: AVAudioFormat) {
-        guard let current = converter,
-              format.sampleRate != current.inputFormat.sampleRate
-                || format.channelCount != current.inputFormat.channelCount,
-              let rebuilt = AVAudioConverter(from: format, to: current.outputFormat) else { return }
-        Log.log(String(format: "recorder: input format changed mid-capture %.0fHz/%dch → %.0fHz/%dch — converter rebuilt",
-                       current.inputFormat.sampleRate, current.inputFormat.channelCount,
-                       format.sampleRate, format.channelCount))
-        converter = rebuilt
+    private func converterLocked(for format: AVAudioFormat) {
+        if let current = converter,
+           format.sampleRate == current.inputFormat.sampleRate,
+           format.channelCount == current.inputFormat.channelCount { return }
+        guard let built = AVAudioConverter(from: format, to: Self.asrFormat) else {
+            Log.log(String(format: "recorder: ERROR cannot build a %.0fHz/%dch → 16kHz converter",
+                           format.sampleRate, format.channelCount))
+            return
+        }
+        if let current = converter {
+            Log.log(String(format: "recorder: input format changed mid-capture %.0fHz/%dch → %.0fHz/%dch — converter rebuilt",
+                           current.inputFormat.sampleRate, current.inputFormat.channelCount,
+                           format.sampleRate, format.channelCount))
+        }
+        converter = built
         inputSampleRate = format.sampleRate
     }
 

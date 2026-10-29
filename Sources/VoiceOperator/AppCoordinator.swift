@@ -292,6 +292,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         let arbiter = self.arbiter
         handsFree.setMicrophoneListener = { handler in arbiter.setHandsFreeListener(handler) }
         do { try handsFree.start() } catch { Log.log("hands-free: could not start: \(error)") }
+        // Claude Code voice mode, attached before this launch, is picked up again.
+        VoiceMode.shared.onChange = { [weak self] in self?.menuBar.update(voiceMode: VoiceMode.shared.menuTitle) }
+        VoiceMode.shared.restore(VoiceMode.loadSaved())
+        menuBar.update(voiceMode: VoiceMode.shared.menuTitle)
+        menuBar.onDetachVoiceMode = { VoiceMode.shared.detach(.menu) }
     }
 
     /// The Text to Speech submenu: the local Kokoro service.

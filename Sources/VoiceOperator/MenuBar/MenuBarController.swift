@@ -10,6 +10,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let secureInputWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     /// Shown only while dictation is on the slow fallback path — see `update(streamHealth:)`.
     private let streamWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    /// Claude Code voice mode: what it is attached to, and a way out. Hidden while detached.
+    private let voiceMode = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let voiceModeDetach = NSMenuItem(title: "Turn Off Claude Voice Mode", action: #selector(detachVoiceMode), keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let incognitoItem = NSMenuItem(title: "Incognito Mode", action: #selector(toggleIncognito), keyEquivalent: "")
     /// What incognito means, under its checkbox while it is on.
@@ -126,6 +129,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// shortcuts the global tap watches for, and AppKit fires them itself while
     /// the menu is open, so the tap must stand down for exactly that window.
     var onMenuOpenChanged: ((Bool) -> Void)?
+    var onDetachVoiceMode: (() -> Void)?
     private var muted = false
     private var currentStatus: OperatorStatus = .idle
     private var currentStyle: TranscriptStyle = .normal
@@ -138,6 +142,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         menu.addItem(secureInputWarning)
         streamWarning.isEnabled = false; streamWarning.isHidden = true
         menu.addItem(streamWarning)
+        voiceMode.isEnabled = false; voiceMode.isHidden = true; menu.addItem(voiceMode)
+        voiceModeDetach.target = self; voiceModeDetach.indentationLevel = 1; voiceModeDetach.isHidden = true
+        menu.addItem(voiceModeDetach)
         mute.keyEquivalent = "b"; mute.keyEquivalentModifierMask = [.command, .control]
         mute.target = self; menu.addItem(mute)
         incognitoItem.target = self; menu.addItem(incognitoItem)
@@ -267,6 +274,13 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         }
         refreshIcon()
     }
+    /// Claude Code voice mode attached (its line), or not (nil).
+    func update(voiceMode title: String?) {
+        voiceMode.title = title ?? ""
+        voiceMode.isHidden = title == nil
+        voiceModeDetach.isHidden = title == nil
+    }
+    @objc private func detachVoiceMode() { onDetachVoiceMode?() }
     /// Incognito swaps the icon's megaphone for sunglasses, in every state, so
     /// it is never on without showing.
     func update(incognito on: Bool) {

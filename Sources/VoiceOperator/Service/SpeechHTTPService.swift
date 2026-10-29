@@ -26,8 +26,10 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// again (custom TTS servers are gone); 16 added hands-free — the
     /// `hands_free_socket` here and `hands_free` in `/v1/status` (see
     /// `HandsFreeService`); 17 added speech on a device — `client` and
-    /// `device` on `POST /v1/speech`, and `ds_` job ids (see `DeviceSpeech`).
-    static let discoveryVersion = 17
+    /// `device` on `POST /v1/speech`, and `ds_` job ids (see `DeviceSpeech`);
+    /// 18 added Claude Code voice mode — `/v1/voice-mode/…` and `voice_mode`
+    /// in `/v1/status` (see `VoiceMode`).
+    static let discoveryVersion = 18
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -142,6 +144,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             guard let snapshot else { return .init(status: 503, object: ["error": "status_unavailable"]) }
             var object = await snapshot().object
             object["hands_free"] = HandsFreeService.shared.snapshot()
+            object["voice_mode"] = await VoiceModeRoutes.status().object
             return .init(status: 200, object: object)
         }
         // Ask the app to restart itself. Immediate when idle (200); deferred until
@@ -252,6 +255,14 @@ final class SpeechHTTPService: @unchecked Sendable {
             guard let result = await SpeechJobManager.shared.enqueue(parts: parts) else { return .init(status: 503, object: ["error": "speech_unavailable"]) }
             if result.error == "speech_muted" { return .init(status: 503, object: ["error": "speech_muted"]) }
             return .init(status: 202, object: object(result))
+        }
+        // Claude Code voice mode: the plugin's hooks and its `voice-mode` command. See `VoiceModeRoutes`.
+        if r.path == "/v1/voice-mode" || r.path.hasPrefix("/v1/voice-mode/") {
+            let answer = await VoiceModeRoutes.handle(method: r.method, path: r.path, query: r.query, body: r.body)
+            if let text = answer.text {
+                return .init(status: answer.status, object: nil, raw: (Data(text.utf8), "text/plain; charset=utf-8"))
+            }
+            return .init(status: answer.status, object: answer.object)
         }
         let components = r.path.split(separator: "/")
         guard components.count == 3, components[1] == "speech" else { return .init(status: 404, object: ["error": "not_found"]) }

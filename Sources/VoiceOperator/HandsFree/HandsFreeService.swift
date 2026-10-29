@@ -26,8 +26,11 @@ import Network
 ///   it, and `ack`s stream audio.
 ///
 /// One session per client: starting one ends the client's other. The Mac's
-/// microphone is one source shared by every client that started a session on
-/// it, so each client's trigger word works there; a stream is its own source.
+/// microphone is held by one client at a time: a client starting hands-free
+/// there takes it from whoever had it (`session-ended {why: "taken", by}`), so
+/// Spaceterm and Claude Code's voice mode (`VoiceMode`, a client inside this
+/// app rather than on the socket — `registerLocal`) can hand it back and forth.
+/// A stream is its own source.
 ///
 /// Every call into the engines happens on `queue`.
 final class HandsFreeService: @unchecked Sendable {
@@ -73,7 +76,7 @@ final class HandsFreeService: @unchecked Sendable {
     private struct Client {
         let name: String
         let trigger: String
-        let connection: Connection
+        let connection: HandsFreeClientLink
     }
 
     // MARK: - Host state
@@ -328,27 +331,68 @@ final class HandsFreeService: @unchecked Sendable {
             connection.send(["type": "welcome", "protocol": Self.protocolVersion])
             return
         }
-        guard let trigger = (message["trigger"] as? String).map(HandsFreePhrases.spokenWords), trigger.count == 1 else {
-            refuse("invalid_trigger", "a trigger word: one word")
-            return
-        }
-        guard clients[name] == nil else { refuse("client_taken", "\(name) is already connected"); return }
-        if let other = clients.values.first(where: { $0.trigger == trigger[0] }) {
-            refuse("trigger_taken", "\"\(trigger[0])\" belongs to \(other.name)")
+        if let refusal = register(name, trigger: message["trigger"] as? String, link: connection) {
+            refuse(refusal.error, refusal.detail)
             return
         }
         connection.role = .control
         connection.client = name
-        clients[name] = Client(name: name, trigger: trigger[0], connection: connection)
-        Log.log("hands-free: \(name) registered \"\(trigger[0])\"")
         connection.send(["type": "welcome", "protocol": Self.protocolVersion])
+    }
+
+    struct Refusal: Error, Equatable {
+        let error: String
+        let detail: String
+    }
+
+    /// A control client's registration, on the socket or in this app: refused
+    /// for a trigger that is not one word, a name already connected, or a word
+    /// another client has.
+    private func register(_ name: String, trigger: String?, link: HandsFreeClientLink) -> Refusal? {
+        guard let trigger = trigger.map(HandsFreePhrases.spokenWords), trigger.count == 1 else {
+            return Refusal(error: "invalid_trigger", detail: "a trigger word: one word")
+        }
+        guard clients[name] == nil else { return Refusal(error: "client_taken", detail: "\(name) is already connected") }
+        if let other = clients.values.first(where: { $0.trigger == trigger[0] }) {
+            return Refusal(error: "trigger_taken", detail: "\"\(trigger[0])\" belongs to \(other.name)")
+        }
+        clients[name] = Client(name: name, trigger: trigger[0], connection: link)
+        Log.log("hands-free: \(name) registered \"\(trigger[0])\"")
+        return nil
+    }
+
+    // MARK: - Clients inside this app
+
+    /// Register a client that lives in this app (`VoiceMode`): it is sent
+    /// exactly what a socket client would be, through `link`, on `queue`. Its
+    /// registration lasts until `unregisterLocal`. Nil, or why not.
+    func registerLocal(_ name: String, trigger: String, link: HandsFreeClientLink) -> Refusal? {
+        queue.sync { register(name, trigger: trigger, link: link) }
+    }
+
+    /// The local client's hands-free on the Mac's microphone, on or off —
+    /// `start` and `stop` on a control connection.
+    func setLocal(_ name: String, on: Bool) {
+        queue.async { [self] in
+            guard clients[name] != nil else { return }
+            if on { startMac(name) } else { stopClient(name, why: "off") }
+        }
+    }
+
+    func unregisterLocal(_ name: String) {
+        queue.async { [self] in
+            guard clients[name] != nil else { return }
+            stopClient(name, why: "off")
+            clients[name] = nil
+            Log.log("hands-free: \(name) unregistered")
+        }
     }
 
     private func closed(_ connection: Connection) {
         connections[ObjectIdentifier(connection)] = nil
         switch connection.role {
         case .control:
-            guard clients[connection.client]?.connection === connection else { return }
+            guard clients[connection.client]?.connection === connection as HandsFreeClientLink else { return }
             Log.log("hands-free: \(connection.client) disconnected")
             stopClient(connection.client, why: "disconnected")
             clients[connection.client] = nil
@@ -383,11 +427,9 @@ final class HandsFreeService: @unchecked Sendable {
         for session in streams.values where session.client == client { end(session, why: "replaced") }
         if let mac {
             guard !mac.engine.clients.contains(client) else { return }
-            mac.engine.addClient(client, trigger: registered.trigger)
-            registered.connection.send(["type": "session", "source": "mac"])
-            sendMacSetup()
-            Log.log("hands-free: \(client) listening on the Mac's microphone too")
-            return
+            // The Mac's microphone is one client's at a time: whoever had it is told who took it.
+            for other in mac.engine.clients { stopMac(other, why: "taken", by: client) }
+            Log.log("hands-free: \(client) took the Mac's microphone")
         }
         let engine = makeEngine(owner: client, trigger: registered.trigger, sessionKey: "mac") { [weak self] outgoing in
             self?.deliverMac(outgoing)
@@ -407,11 +449,13 @@ final class HandsFreeService: @unchecked Sendable {
         sendMacSetup()
     }
 
-    private func stopMac(_ client: String, why: String) {
+    private func stopMac(_ client: String, why: String, by taker: String? = nil) {
         guard let mac, mac.engine.clients.contains(client) else { return }
         // The engine's last word (`state` off) goes before the session's end, not after it.
         if mac.engine.clients.count == 1 { mac.engine.sourceStopped(final: true) }
-        clients[client]?.connection.send(["type": "session-ended", "why": why])
+        var ended: [String: Any] = ["type": "session-ended", "why": why]
+        if let taker { ended["by"] = taker }
+        clients[client]?.connection.send(ended)
         mac.engine.removeClient(client)
         guard mac.engine.clients.isEmpty else { return }
         self.mac = nil
@@ -866,9 +910,17 @@ struct Unchecked<Value>: @unchecked Sendable {
 
 // MARK: - A connection
 
+/// Where a control client's messages go, and whether it is playing sound of
+/// its own on the Mac: a socket `Connection`, or a client inside this app.
+/// Called on the service's queue.
+protocol HandsFreeClientLink: AnyObject {
+    func send(_ message: [String: Any])
+    func isPlaying(tailMs: Double) -> Bool
+}
+
 /// One client connection: newline-delimited JSON both ways. Confined to the
 /// service's queue.
-fileprivate final class Connection: @unchecked Sendable {
+fileprivate final class Connection: HandsFreeClientLink, @unchecked Sendable {
     enum Role { case control, stream, speaker }
 
     let nw: NWConnection

@@ -115,6 +115,18 @@ final class IncognitoTests: XCTestCase {
         XCTAssertTrue(Log.clip("secret words").contains("secret words"))
     }
 
+    // MARK: - Claude Code voice mode
+
+    /// What the user says in voice mode goes to Claude: it does not attach.
+    @MainActor
+    func testVoiceModeDoesNotAttach() {
+        let mode = VoiceMode(deps: .init(
+            registerHandsFree: { _, _ in XCTFail("registered"); return nil }, setHandsFree: { _ in XCTFail("started") },
+            unregisterHandsFree: {}, speak: { _, _ in nil }, cancelSpeech: { _, _ in nil }, playCue: { _ in },
+            stopCue: { _ in }, pidAlive: { _ in true }, save: { _ in XCTFail("saved") }))
+        XCTAssertThrowsError(try mode.attach(sessionID: "s", claudePID: 1, cwd: "/", trigger: nil, voice: nil))
+    }
+
     // MARK: - Spaceterm
 
     func testCommandsAreNotSentToSubscribers() throws {

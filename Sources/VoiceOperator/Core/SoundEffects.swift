@@ -36,6 +36,15 @@ enum SoundEffect: CaseIterable {
     case narrationUnmuted           // narration unmuted — low ascending slide
     case restarting                 // the app is about to relaunch itself
     case launched                   // the app has come up — the restart cue, reversed
+    // Hands-free, for a client inside this app (Claude Code's voice mode, `VoiceMode`):
+    // Spaceterm's tones for the same signals (its src/mobile/cues.ts), so the two sound alike.
+    case handsFreeReady             // listening — three soft steps up
+    case handsFreeDictationStart    // the user's words are being taken down — two notes up
+    case handsFreeDictationEnd      // taken down and sent — two notes down
+    case handsFreeConversationClosed // the window ran out: the trigger word again — three steps down
+    case handsFreeShutdown          // hands-free turned off — an octave down, held low
+    case handsFreeNotWakeWord       // speech that needed the trigger word did not start with it
+    case handsFreePending           // one beat of the "deciding" beep, repeated while undecided
 
     /// Global playback-speed multiplier for every cue. This lives with the
     /// cue definitions, rather than on the main-actor SoundBank, because the
@@ -125,6 +134,14 @@ enum SoundEffect: CaseIterable {
         case .launched:
             let falling = SoundEffect.restarting.segments
             return zip(falling.reversed(), falling).map { (freq: $0.freq, dur: $1.dur) }
+        case .handsFreeReady: return [(440, 0.08), (0, 0.03), (659, 0.08), (0, 0.03), (880, 0.18)]
+        case .handsFreeDictationStart: return [(659, 0.08), (0, 0.03), (988, 0.12)]
+        case .handsFreeDictationEnd: return [(988, 0.08), (0, 0.03), (659, 0.12)]
+        case .handsFreeConversationClosed: return [(880, 0.08), (0, 0.03), (659, 0.08), (0, 0.03), (440, 0.18)]
+        case .handsFreeShutdown: return [(523, 0.10), (262, 0.36)]
+        // From the pending beep's G5, sliding sadly down a semitone at a time, then dropping to a long D5.
+        case .handsFreeNotWakeWord: return [(784, 0.16), (740, 0.16), (698, 0.16), (587, 0.56)]
+        case .handsFreePending: return [(784, 0.09), (0, 0.16)]
         }
     }
 
@@ -151,6 +168,10 @@ enum SoundEffect: CaseIterable {
         switch self {
         case .transcriptionPending: return 0.18
         case .summarizing, .clipRequested, .clipStarted, .clipFinished: return 0.5
+        // Spaceterm plays these at 0.2 and the pending beep at 0.12, against Voice Operator's 0.35.
+        case .handsFreeReady, .handsFreeDictationStart, .handsFreeDictationEnd, .handsFreeConversationClosed,
+             .handsFreeShutdown, .handsFreeNotWakeWord: return 0.6
+        case .handsFreePending: return 0.35
         default: return 1.0
         }
     }
@@ -180,6 +201,13 @@ enum SoundEffect: CaseIterable {
         case .narrationUnmuted:         return "Narration unmuted"
         case .restarting:               return "Restarting"
         case .launched:                 return "Launched"
+        case .handsFreeReady:           return "Hands-free ready"
+        case .handsFreeDictationStart:  return "Hands-free dictation started"
+        case .handsFreeDictationEnd:    return "Hands-free dictation sent"
+        case .handsFreeConversationClosed: return "Hands-free conversation closed"
+        case .handsFreeShutdown:        return "Hands-free shut down"
+        case .handsFreeNotWakeWord:     return "Hands-free: not the trigger word"
+        case .handsFreePending:         return "Hands-free deciding (one beat)"
         }
     }
 }

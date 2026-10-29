@@ -27,4 +27,4 @@ record_released_version "$VERSION" "$BUILD_NUMBER"
 
 echo "Resources/Info.plist now records v$VERSION (build $BUILD_NUMBER)."
 echo "Commit it, then run ./scripts/make-release.sh:"
-echo "    git add Resources/Info.plist && git commit -m \"Bump version to $VERSION\" && git push origin main"
+echo "    git add Resources/Info.plist claude-plugin/single-agent-voice-mode/.claude-plugin/plugin.json && git commit -m \"Bump version to $VERSION\" && git push origin main"

@@ -89,6 +89,7 @@ final class VoiceModeTests: XCTestCase {
     private var spoken: [String] = []
     private var cancelled: [String] = []
     private var cues: [SoundEffect] = []
+    private var windows = 0
     private var saved: [VoiceMode.Attachment?] = []
     private var alive: Set<Int32> = [100, 200]
     private var refuse: HandsFreeService.Refusal?
@@ -112,6 +113,7 @@ final class VoiceModeTests: XCTestCase {
             },
             setHandsFree: { [unowned self] in handsFree.append($0) },
             unregisterHandsFree: { [unowned self] in registered.append("-") },
+            openConversation: { [unowned self] in windows += 1 },
             speak: { [unowned self] text, _ in spoken.append(text); return "job\(spoken.count)" },
             cancelSpeech: { [unowned self] id, _ in cancelled.append(id); return 9 },
             playCue: { [unowned self] in cues.append($0) },
@@ -157,6 +159,7 @@ final class VoiceModeTests: XCTestCase {
         let generation = await mode.turnEnded(input("s1", ["last_assistant_message": "**Hello.** What next?"]))
         XCTAssertEqual(generation, 1)
         XCTAssertEqual(spoken, ["Hello. What next?"])
+        XCTAssertEqual(windows, 1, "the reply opens the conversation window: no trigger word needed to answer")
         let waiting = await mode.next(sessionID: "s1", generation: 1, wait: .zero)
         XCTAssertEqual(waiting, .nothingYet)
         // The user speaks.
@@ -185,7 +188,7 @@ final class VoiceModeTests: XCTestCase {
         let output = try XCTUnwrap(mode.midTurn(input("s1"))?["hookSpecificOutput"] as? [String: Any])
         XCTAssertEqual(output["hookEventName"] as? String, "PostToolUse")
         XCTAssertEqual(output["additionalContext"] as? String,
-                       "[Voice mode] The user said (by voice, transcribed on device): \"Also make it red\"")
+                       "[Voice mode] While you were working, the user said (by voice, transcribed on device): \"Also make it red\"")
         XCTAssertNil(mode.midTurn(input("s1")))
     }
 

@@ -89,6 +89,8 @@ final class VoiceMode {
         var registerHandsFree: (_ trigger: String, _ link: HandsFreeClientLink) -> HandsFreeService.Refusal?
         var setHandsFree: (_ on: Bool) -> Void
         var unregisterHandsFree: () -> Void
+        /// Our voice is about to speak: the user may answer without the trigger word.
+        var openConversation: () -> Void = {}
         /// Speak `text` in `voice`; the speech job's id, or nil.
         var speak: (_ text: String, _ voice: String) async -> String?
         /// Stop job `id`, heard until then; how far into its text it got (UTF-16).
@@ -105,6 +107,7 @@ final class VoiceMode {
             },
             setHandsFree: { HandsFreeService.shared.setLocal(VoiceMode.clientName, on: $0) },
             unregisterHandsFree: { HandsFreeService.shared.unregisterLocal(VoiceMode.clientName) },
+            openConversation: { HandsFreeService.shared.openConversationLocal(VoiceMode.clientName) },
             speak: { text, voice in
                 guard let result = await SpeechJobManager.shared.enqueue(parts: [.init(text: text, voice: voice)]),
                       result.error == nil else { return nil }
@@ -130,7 +133,20 @@ final class VoiceMode {
     private(set) var phase = "off"
     private(set) var route: String?
     /// What the user said that no hook has taken yet, oldest first.
-    private(set) var inbox: [String] = []
+    private(set) var inbox: [Heard] = []
+
+    struct Heard: Equatable {
+        /// Their words, trigger word off; empty when they talked over the reply and nothing was caught.
+        var said: String
+        var interrupted: Bool
+        /// How far they had heard the reply they talked over.
+        var heard: String?
+
+        func message(whileWorking: Bool) -> String {
+            said.isEmpty ? VoiceModeText.interruptedWithoutWords(heard: heard)
+                : VoiceModeText.message(said: said, whileWorking: whileWorking, interrupted: interrupted, heard: heard)
+        }
+    }
     /// Why a session was detached under it, for its next prompt: it may still think it is being heard.
     private var notices: [String: String] = [:]
     /// The replies spoken lately, oldest first: their jobs and words, for a cut-in.
@@ -294,7 +310,7 @@ final class VoiceMode {
         while true {
             guard let current = attachment, current.sessionID == sessionID else { return .gone("not_attached") }
             guard current.generation == generation else { return .gone("superseded") }
-            if let message = takeInbox() { return .message(message) }
+            if let message = takeInbox(whileWorking: false) { return .message(message) }
             if ContinuousClock.now >= deadline { return .nothingYet }
             try? await Task.sleep(for: .milliseconds(100))
         }
@@ -302,7 +318,7 @@ final class VoiceMode {
 
     /// `PostToolUse`: what the user said while the agent works, as hook output.
     func midTurn(_ input: VoiceModeHookInput) -> [String: Any]? {
-        guard isAttached(input.sessionID), let message = takeInbox() else { return nil }
+        guard isAttached(input.sessionID), let message = takeInbox(whileWorking: true) else { return nil }
         return ["hookSpecificOutput": ["hookEventName": "PostToolUse", "additionalContext": message]]
     }
 
@@ -312,7 +328,7 @@ final class VoiceMode {
         guard let session = input.sessionID else { return nil }
         if let notice = notices.removeValue(forKey: session) { return notice }
         guard isAttached(session) else { return nil }
-        return takeInbox()
+        return takeInbox(whileWorking: false)
     }
 
     /// `SessionStart` after a compaction, a resume or `/clear`: whether this
@@ -375,6 +391,8 @@ final class VoiceMode {
         let text = VoiceModeText.spoken(markdown)
         guard !text.isEmpty else { return }
         let voice = attachment?.voice ?? KokoroSynthesizer.defaultVoiceID
+        // The agent took longer than the window lasts, most turns: its answer opens it again.
+        deps.openConversation()
         guard let job = await deps.speak(text, voice) else {
             Log.log("voice mode: the reply could not be spoken (muted, or speech unavailable)")
             return
@@ -403,26 +421,22 @@ final class VoiceMode {
 
     // MARK: - Hands-free
 
-    private func takeInbox() -> String? {
+    private func takeInbox(whileWorking: Bool) -> String? {
         guard !inbox.isEmpty else { return nil }
         if Incognito.refusal(Self.incognitoActivity) != nil {
             inbox = []
             return nil
         }
         defer { inbox = [] }
-        return inbox.joined(separator: "\n\n")
+        return inbox.map { $0.message(whileWorking: whileWorking) }.joined(separator: "\n\n")
     }
 
     private func heard(text: String, trigger: String?, interrupted: Bool) {
         let said = VoiceModeText.withoutTrigger(text, trigger: trigger ?? attachment?.trigger)
         let heard = interrupted ? heardBeforeCutIn : nil
         if interrupted { heardBeforeCutIn = nil }
-        if said.isEmpty {
-            guard interrupted else { return }
-            inbox.append(VoiceModeText.interruptedWithoutWords(heard: heard))
-        } else {
-            inbox.append(VoiceModeText.message(said: said, whileWorking: false, interrupted: interrupted, heard: heard))
-        }
+        guard !said.isEmpty || interrupted else { return }
+        inbox.append(Heard(said: said, interrupted: interrupted, heard: heard))
         Log.log("voice mode: heard \(said.count) chars\(interrupted ? " (over the reply)" : "") for \(attachment?.project ?? "?")")
     }
 

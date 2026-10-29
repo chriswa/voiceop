@@ -549,6 +549,20 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.cues.last, "notWakeWord")
     }
 
+    func testTheClientsReplyOpensTheWindowAgain() {
+        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Yes" } }
+        inConversation(h)
+        h.hear(Sound.quiet(15_500))
+        XCTAssertFalse(h.conversation, "the agent took longer than the window")
+        h.engine.openConversation(by: "nobody")
+        XCTAssertFalse(h.conversation)
+        h.engine.openConversation(by: "spaceterm")
+        XCTAssertTrue(h.conversation)
+        h.transcript = "Yes, do it."
+        h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500))
+        XCTAssertEqual(h.transcripts.map(\.text).last, "Yes, do it.", "answered without the trigger word")
+    }
+
     func testWindowHoldsOpenWhileTheClientSpeaksAndCountsFromWhenItStops() {
         let h = harness()
         inConversation(h)

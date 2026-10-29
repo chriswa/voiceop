@@ -1,0 +1,22 @@
+{
+  "name": "single-agent-voice-mode",
+  "displayName": "Single-Agent Voice Mode",
+  "version": "0.1.20",
+  "description": "Hands-free voice chat with one Claude Code session through Voice Operator: Kokoro speaks the agent's replies, Parakeet hears yours, with Voice Operator's trigger word, conversation window and talk-over interruption.",
+  "author": {
+    "name": "chriswa",
+    "url": "https://github.com/chriswa"
+  },
+  "homepage": "https://github.com/chriswa/voiceop/tree/main/claude-plugin/single-agent-voice-mode",
+  "repository": "https://github.com/chriswa/voiceop",
+  "keywords": [
+    "voice",
+    "hands-free",
+    "speech",
+    "tts",
+    "stt",
+    "kokoro",
+    "parakeet",
+    "macos"
+  ]
+}

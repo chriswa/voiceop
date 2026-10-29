@@ -1,0 +1,80 @@
+#!/bin/bash
+# The plugin's hooks, one script: `hook <event>`, the hook's input JSON on stdin.
+# Each hands the input to Voice Operator (/v1/voice-mode/hooks/<event>), which
+# decides everything; this only carries it there and back.
+#
+# Every Claude Code session with the plugin runs these, so the first thing is
+# the cheap way out: no voice-mode.json, nothing attached, nothing to do.
+event="$1"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
+state="$VO_SUPPORT/voice-mode.json"
+[ -f "$state" ] || exit 0
+input=$(cat)
+attached=$(plutil -extract session_id raw -o - "$state" 2>/dev/null)
+session=$(json_field "$input" session_id)
+# After /clear the session has a new id, which Voice Operator moves the attachment to.
+if [ "$event" != session-start ] && [ "$session" != "$attached" ]; then exit 0; fi
+url=$(vo_url) || exit 0
+
+post() {
+    printf '%s' "$input" | curl -sS --max-time "${2:-10}" -w '\n%{http_code}' --data-binary @- \
+        -H 'Content-Type: application/json' "$url/v1/voice-mode/hooks/$1?claude_pid=$(claude_pid)" 2>/dev/null
+}
+body() { printf '%s' "${1%$'\n'*}"; }
+code() { printf '%s' "${1##*$'\n'}"; }
+
+case "$event" in
+stop)
+    # The reply is spoken, and this waits — in the background (asyncRewake) —
+    # for the user to answer. Exit 2 wakes the agent with what they said.
+    response=$(post stop) || exit 0
+    [ "$(code "$response")" = 200 ] || exit 0
+    generation=$(body "$response")
+    failures=0
+    while :; do
+        url=$(vo_url) || url=""
+        if [ -n "$url" ]; then
+            response=$(curl -sS --max-time 40 -w '\n%{http_code}' \
+                "$url/v1/voice-mode/next?session=$session&generation=$generation&wait=25" 2>/dev/null)
+        else
+            response=$'\n000'
+        fi
+        case "$(code "$response")" in
+        200) body "$response" >&2; exit 2 ;;
+        204) failures=0 ;;
+        410|404|400) exit 0 ;;
+        *)
+            # Voice Operator restarting: it picks the attachment up again when it is back.
+            failures=$((failures + 1))
+            [ "$failures" -gt 150 ] && exit 0
+            sleep 2
+            ;;
+        esac
+    done
+    ;;
+pre-tool-use|post-tool-use)
+    response=$(post "$event" 5) || exit 0
+    [ "$(code "$response")" = 200 ] && body "$response"
+    ;;
+user-prompt-submit)
+    # Plain output goes to the agent with the prompt.
+    response=$(post "$event" 5) || exit 0
+    [ "$(code "$response")" = 200 ] && body "$response"
+    ;;
+session-start)
+    # After a compaction or /clear, the agent has lost the voice-mode rules: again.
+    response=$(post "$event" 5) || exit 0
+    if [ "$(code "$response")" = 200 ]; then
+        body "$response"
+        echo
+        cat "$here/../voice-mode.md"
+    fi
+    ;;
+session-end|notification)
+    post "$event" 5 >/dev/null
+    ;;
+esac
+exit 0

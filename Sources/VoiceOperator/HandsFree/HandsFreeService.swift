@@ -379,6 +379,13 @@ final class HandsFreeService: @unchecked Sendable {
         }
     }
 
+    /// The local client's voice is about to speak to the user: the
+    /// conversation window opens, so they can answer without the trigger word
+    /// (`HandsFreeEngine.openConversation(by:)`).
+    func openConversationLocal(_ name: String) {
+        queue.async { [self] in mac?.engine.openConversation(by: name) }
+    }
+
     func unregisterLocal(_ name: String) {
         queue.async { [self] in
             guard clients[name] != nil else { return }

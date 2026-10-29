@@ -349,6 +349,15 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     var clients: [String] { Array(triggers.keys) }
 
+    /// The client is talking to the user — its reply is starting — so the
+    /// user may answer without the trigger word: the conversation window opens
+    /// for it (or stays open), and closes as usual once both sides are quiet.
+    func openConversation(by client: String) {
+        guard live, triggers[client] != nil else { return }
+        openConversation(for: client)
+        publishState()
+    }
+
     /// The source is delivering audio. Turning it on opens the conversation
     /// window, so the first words need no trigger word; `reopened` (a stalled
     /// source back) leaves the window as it was.

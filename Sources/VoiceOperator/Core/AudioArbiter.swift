@@ -678,6 +678,10 @@ final class AudioArbiter {
                 case .route(let command):
                     if let routingContext { self.onCommand?(command, routingContext) }
                 case .paste(let styled):
+                    // Where the words went: a paste lands in whatever has focus,
+                    // which no other log records.
+                    let app = NSWorkspace.shared.frontmostApplication
+                    live?.trace.note("pasted into \(app?.localizedName ?? "?") (\(app?.bundleIdentifier ?? "?"))")
                     self.pasteAndRemember(styled)
                 }
                 live?.trace.mark("done")

@@ -94,6 +94,19 @@ final class DeliveryWatchTests: XCTestCase {
         XCTAssertEqual(recording.summary(dryAtStop: watch.dry(at: 1.08))?.longestDry ?? 0, 0.78, accuracy: 1e-9)
     }
 
+    func testAnOpeningBurstIsNotCountedAsSurplus() {
+        var watch = DeliveryWatch()
+        var recording = RecordingDelivery()
+        watch.opened(at: 0)
+        // Seen: a fresh engine handing over 0.7 s at once, then a steady stream.
+        var t = 1.0
+        for _ in 0..<7 { recording.buffer(0.1, dry: watch.delivered(0.1, at: t), at: t) }
+        for _ in 0..<13 { t += 0.1; recording.buffer(0.1, dry: watch.delivered(0.1, at: t), at: t) }
+        let summary = recording.summary(dryAtStop: 0)
+        XCTAssertEqual(summary?.shortfallPercent ?? -1, 0, accuracy: 1e-6)
+        XCTAssertEqual(summary?.expected ?? 0, 2.0, accuracy: 1e-6)
+    }
+
     func testARecordingThatHeardNothingHasNoSummary() {
         XCTAssertNil(RecordingDelivery().summary(dryAtStop: 3))
     }

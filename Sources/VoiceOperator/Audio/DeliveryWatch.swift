@@ -85,8 +85,11 @@ struct DeliveryWatch: Equatable {
 /// on it. Times are seconds on `DeliveryWatch`'s clock, audio is seconds at
 /// the device's own rate.
 struct RecordingDelivery: Equatable {
-    /// When the audio of the recording's first buffer began.
-    private var firstAt: TimeInterval?
+    /// The earliest the recording's audio can have begun: for each buffer, its
+    /// arrival less all the audio delivered up to and including it. A burst
+    /// (a fresh engine handing over its backlog at once) moves it earlier, so
+    /// the span it starts is never shorter than the audio actually delivered.
+    private var startedBy: TimeInterval?
     private var lastAt: TimeInterval = 0
     private var delivered: TimeInterval = 0
     private var longestDry: TimeInterval = 0
@@ -94,15 +97,16 @@ struct RecordingDelivery: Equatable {
     /// A buffer of `seconds` arrived at `now`, after the microphone had been
     /// dry for `dry` (`DeliveryWatch.delivered`).
     mutating func buffer(_ seconds: TimeInterval, dry: TimeInterval, at now: TimeInterval) {
-        if firstAt == nil { firstAt = now - seconds } else { longestDry = max(longestDry, dry) }
-        lastAt = now
+        if startedBy != nil { longestDry = max(longestDry, dry) }
         delivered += seconds
+        startedBy = min(startedBy ?? .infinity, now - delivered)
+        lastAt = now
     }
 
     struct Summary: Equatable {
         /// Includes the dry spell the recording stopped in.
         var longestDry: TimeInterval
-        /// Audio the span from the first buffer to the last should have held.
+        /// Audio the span from `startedBy` to the last buffer should have held.
         var expected: TimeInterval
         var delivered: TimeInterval
         var shortfallPercent: Double { expected > 0 ? (expected - delivered) / expected * 100 : 0 }
@@ -111,7 +115,7 @@ struct RecordingDelivery: Equatable {
     /// The recording stopped with the microphone dry for `dryAtStop`; nil if no
     /// audio ever arrived.
     func summary(dryAtStop: TimeInterval) -> Summary? {
-        guard let firstAt else { return nil }
-        return Summary(longestDry: max(longestDry, dryAtStop), expected: lastAt - firstAt, delivered: delivered)
+        guard let startedBy else { return nil }
+        return Summary(longestDry: max(longestDry, dryAtStop), expected: lastAt - startedBy, delivered: delivered)
     }
 }

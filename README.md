@@ -243,6 +243,57 @@ start and end — is kept for review in
 `~/Library/Application Support/VoiceOperator/hands-free/` (DESIGN.md,
 "Debugging it").
 
+## Hands-free with Claude Code (the `handsfree` plugin)
+
+Talk with one Claude Code session hands-free, from Spaceterm or any terminal: its
+replies are spoken, what you say becomes your next prompt, and you can talk over
+a reply to cut it off. Full details are in the plugin's
+[README](claude-plugin/handsfree/README.md).
+
+**Before you start:** Voice Operator running (a build with hands-free for Claude
+Code: local API 18 or later), Kokoro installed from the **Text to Speech** menu,
+and AirPods or a headset (on the Mac's speakers you can't talk over a reply).
+
+**1. Add this repository as a plugin marketplace.** At the prompt of any Claude
+Code session:
+
+```
+/plugin marketplace add chriswa/voiceop
+```
+
+**2. Install the plugin:**
+
+```
+/plugin install handsfree@voiceop
+```
+
+Pick the user scope so it's there in every project. (On Claude Code 2.1.275 or
+later, `/plugin install handsfree --marketplace chriswa/voiceop` does steps 1
+and 2 together. From a shell: `claude plugin marketplace add chriswa/voiceop`
+then `claude plugin install handsfree@voiceop`.)
+
+**3. Start a new Claude Code session** so the plugin loads.
+
+**4. Turn it on in the session you want to talk to:**
+
+```
+/handsfree
+```
+
+Voice Operator says "Hands-free is on", and a line above the prompt shows
+**Say “Claude” first** or **Keep talking…**. Then just talk: *"Claude, make the
+jump a bit higher."*
+
+**To turn it off:** say *"turn hands-free voice chat off"* (the agent does it),
+or *"let me turn this off"*, or type `/handsfree` again (or `/handsfree off`), or
+use **Turn Off Claude Hands-Free** in Voice Operator's menu. `/handsfree
+status` says whether it's on.
+
+**Updating:** `/plugin marketplace update voiceop`. The plugin is versioned
+with Voice Operator, so update both together.
+
+**Trying a checkout instead:** `claude --plugin-dir ~/voiceop/claude-plugin/handsfree`.
+
 ## Incognito mode
 
 **Incognito Mode** in the menu turns the menu-bar megaphone into sunglasses and

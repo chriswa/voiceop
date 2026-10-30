@@ -19,8 +19,8 @@ session while you play it.
   of this repo.
 - Kokoro installed from Voice Operator's **Text to Speech** menu, so replies can be spoken.
 - **A headset: AirPods or a wireless headset.** Voice Operator can't hear you
-  over its own voice, or the sonar, on the Mac's speakers, so on speakers you
-  can't interrupt a reply. Its echo-cancellation experiment for speakers isn't
+  over its own voice on the Mac's speakers, so on speakers you can't interrupt
+  a reply. (The sonar is no problem: hands-free listens through it.) Its echo-cancellation experiment for speakers isn't
   fully tested.
 - Claude Code with function hooks (mods). It was built and tested on 2.1.310.
 
@@ -57,7 +57,11 @@ To try it from a checkout instead:
 | `/handsfree off` | Turns it off from the keyboard. So does **Turn Off Claude Hands-Free** in Voice Operator's menu. |
 | `/handsfree status` | Says whether it's on, for which session, and what hands-free is doing. |
 
-While it's on, the status line shows 🎧 and Voice Operator's menu shows
+While it's on, a line above the prompt shows what hands-free is doing:
+**Say “Claude” first** (the trigger word is needed), **Keep talking…** (the
+conversation window is open), **Listening…** while you speak, and **working**
+while the agent's main thread is busy. It goes when hands-free is off. Voice
+Operator's menu shows
 **Claude Hands-Free: \<project\>**. Permission prompts are read aloud,
 because you may not be looking at the terminal. You still answer them at the
 keyboard.
@@ -118,6 +122,6 @@ it.
 - `~/Library/Application Support/VoiceOperator/hands-free/decisions.jsonl` has
   every hands-free decision, with the audio it was made on.
 - If nothing is heard, check whether Spaceterm took hands-free back, or
-  whether you're on speakers. While Voice Operator talks or plays the sonar
-  through speakers, hands-free doesn't listen.
+  whether you're on speakers. While Voice Operator talks through speakers,
+  hands-free doesn't listen.
 - `claude --debug` logs a line for each mod hook that failed.

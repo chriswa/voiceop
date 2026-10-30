@@ -132,6 +132,12 @@ final class VoiceMode {
     private(set) var attachment: Attachment?
     /// Hands-free as it last said: for `/v1/status`, the menu, and the pending beep.
     private(set) var phase = "off"
+    /// The conversation window is open: the user may talk without the trigger word.
+    private(set) var conversation = false
+    /// Why hands-free is not listening just now (`speech`, `sound`, `dictation`), or nil.
+    private(set) var standingAside: String?
+    /// Goes up whenever what `status` says of the conversation changes: `watch` waits on it.
+    private(set) var version = 0
     private(set) var route: String?
     /// What the user said that no hook has taken yet, oldest first.
     private(set) var inbox: [Heard] = []
@@ -213,6 +219,7 @@ final class VoiceMode {
         deps.setHandsFree(true)
         Log.log("voice mode: attached to \(attachment!.project) (session \(sessionID), pid \(claudePID)), trigger \"\(trigger)\"")
         watchSession()
+        version += 1
         onChange?()
         return attachment!
     }
@@ -223,6 +230,8 @@ final class VoiceMode {
         attachment = nil
         inbox = []
         phase = "off"
+        conversation = false
+        standingAside = nil
         setPendingBeep(false)
         setWorking(false)
         watch?.cancel()
@@ -236,6 +245,7 @@ final class VoiceMode {
         deps.unregisterHandsFree()
         deps.save(nil)
         Log.log("voice mode: detached from \(current.project) — \(why.description)")
+        version += 1
         onChange?()
     }
 
@@ -349,7 +359,8 @@ final class VoiceMode {
             Log.log("voice mode: /clear in \(current.project) — following the new session \(session)")
             attachment?.sessionID = session
             deps.save(attachment)
-            onChange?()
+            version += 1
+        onChange?()
         }
         return isAttached(session) ? attachment : nil
     }
@@ -381,6 +392,7 @@ final class VoiceMode {
 
     private func setWorking(_ on: Bool) {
         guard on != (sonar != nil) else { return }
+        version += 1
         sonar?.cancel()
         sonar = nil
         guard on else { deps.stopCue(.handsFreeSonar); return }
@@ -389,8 +401,9 @@ final class VoiceMode {
             try? await Task.sleep(for: timing.delay)
             while !Task.isCancelled {
                 guard let self else { return }
+                // Not reported as `playing`: hands-free listens through it, even on speakers,
+                // since its speech detector does not take a tone for speech.
                 if self.phase == "listening", !self.deps.isSpeaking() {
-                    self.link.played(SoundEffect.handsFreeSonar.duration)
                     self.deps.playCue(.handsFreeSonar)
                 }
                 try? await Task.sleep(for: timing.every)
@@ -408,9 +421,11 @@ final class VoiceMode {
     }
 
     /// A transcript as if hands-free had heard it — for testing the plugin end
-    /// to end without speaking (`POST /v1/voice-mode/simulate`).
-    func simulate(_ text: String) -> Bool {
-        guard attachment != nil else { return false }
+    /// to end without speaking (`POST /v1/voice-mode/simulate`). Only for the
+    /// session the test attached: if the user's own session took hands-free
+    /// meanwhile, a test's words must not land there.
+    func simulate(sessionID: String, _ text: String) -> Bool {
+        guard isAttached(sessionID) else { return false }
         heard(text: text, trigger: nil, interrupted: false)
         return true
     }
@@ -475,7 +490,11 @@ final class VoiceMode {
         guard attachment != nil else { return }
         switch message["type"] as? String {
         case "state":
+            let before = (phase, conversation, standingAside)
             phase = message["phase"] as? String ?? "off"
+            conversation = message["conversation"] as? Bool == true
+            standingAside = message["standingAside"] as? String
+            if before != (phase, conversation, standingAside) { version += 1 }
             setPendingBeep(message["pending"] as? Bool == true)
         case "cue":
             setPendingBeep(false)
@@ -547,14 +566,26 @@ final class VoiceMode {
     // MARK: - Status
 
     var status: [String: Any] {
-        guard let a = attachment else { return ["attached": false] }
-        var o: [String: Any] = ["attached": true, "session_id": a.sessionID, "project": a.project, "cwd": a.cwd,
+        guard let a = attachment else { return ["attached": false, "version": version] }
+        var o: [String: Any] = ["attached": true, "version": version, "conversation": conversation,
+                                "session_id": a.sessionID, "project": a.project, "cwd": a.cwd,
                                 "trigger": a.trigger, "claude_pid": Int(a.claudePID), "phase": phase,
                                 "attached_at": ISO8601DateFormatter().string(from: a.attachedAt),
                                 "waiting_messages": inbox.count, "generation": a.generation, "working": isWorking]
         if let route { o["route"] = route }
         if let voice = a.voice { o["voice"] = voice }
+        if let standingAside { o["standing_aside"] = standingAside }
         return o
+    }
+
+    /// `status` once it differs from version `since`, or after `wait` regardless:
+    /// what the plugin's band above the prompt draws from.
+    func watch(since: Int, wait: Duration) async -> [String: Any] {
+        let deadline = ContinuousClock.now + wait
+        while version == since, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return status
     }
 
     /// For the menu: what it is attached to, or nil.

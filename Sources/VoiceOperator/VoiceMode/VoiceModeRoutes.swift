@@ -18,6 +18,10 @@ enum VoiceModeRoutes {
         switch (method, String(rest)) {
         case ("GET", ""), ("GET", "/"):
             return Answer(status: 200, object: VoiceMode.shared.status)
+        case ("GET", "/watch"):
+            let since = Int(query["since"] ?? "") ?? -1
+            let wait = min(30, max(0, Int(query["wait"] ?? "0") ?? 0))
+            return Answer(status: 200, object: await VoiceMode.shared.watch(since: since, wait: .seconds(wait)))
         case ("POST", "/attach"):
             let form = Self.form(body)
             guard let session = form["session_id"], !session.isEmpty else {
@@ -68,9 +72,11 @@ enum VoiceModeRoutes {
             let ok = VoiceMode.shared.setWorking(sessionID: form["session_id"] ?? "", form["on"] == "1" || form["on"] == "true")
             return ok ? Answer(status: 204) : Answer(status: 409, object: ["error": "not_attached"])
         case ("POST", "/simulate"):
-            let text = Self.form(body)["text"] ?? ""
-            let ok = VoiceMode.shared.simulate(text)
-            return ok ? Answer(status: 202, object: ["heard": text]) : Answer(status: 409, object: ["error": "not_attached"])
+            let form = Self.form(body)
+            let text = form["text"] ?? ""
+            let ok = VoiceMode.shared.simulate(sessionID: form["session_id"] ?? "", text)
+            return ok ? Answer(status: 202, object: ["heard": text])
+                : Answer(status: 409, object: ["error": "not_attached", "detail": "voice mode is not attached to that session"])
         case ("GET", "/next"):
             guard let session = query["session"], let generation = Int(query["generation"] ?? "") else {
                 return Answer(status: 400, object: ["error": "session_and_generation_required"])

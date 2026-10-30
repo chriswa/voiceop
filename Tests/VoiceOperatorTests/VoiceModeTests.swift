@@ -190,11 +190,27 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertFalse(mode.isWorking)
     }
 
+    func testWatchAnswersWhenTheWindowOpensOrCloses() async throws {
+        let mode = make()
+        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
+        let start = mode.version
+        let unchanged = await mode.watch(since: start, wait: .milliseconds(150))
+        XCTAssertEqual(unchanged["version"] as? Int, start, "nothing changed: it waits, then says so")
+        mode.handsFree(["type": "state", "phase": "listening", "conversation": true, "pending": false])
+        let open = await mode.watch(since: start, wait: .seconds(1))
+        XCTAssertEqual(open["conversation"] as? Bool, true)
+        XCTAssertGreaterThan(open["version"] as? Int ?? 0, start)
+        mode.detach(.asked)
+        let off = await mode.watch(since: open["version"] as? Int ?? 0, wait: .seconds(1))
+        XCTAssertEqual(off["attached"] as? Bool, false)
+    }
+
     func testWordsMidTurnGoWithTheNextToolResult() throws {
         let mode = make()
         _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
         XCTAssertNil(mode.midTurn(input("s1")))
-        XCTAssertTrue(mode.simulate("also make it red"))
+        XCTAssertFalse(mode.simulate(sessionID: "s2", "not for this session"), "a test's words never reach another session")
+        XCTAssertTrue(mode.simulate(sessionID: "s1", "also make it red"))
         XCTAssertNil(mode.midTurn(input("s2")))
         let output = try XCTUnwrap(mode.midTurn(input("s1"))?["hookSpecificOutput"] as? [String: Any])
         XCTAssertEqual(output["hookEventName"] as? String, "PostToolUse")

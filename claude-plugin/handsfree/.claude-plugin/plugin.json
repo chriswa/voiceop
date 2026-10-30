@@ -18,5 +18,6 @@
     "kokoro",
     "parakeet",
     "macos"
-  ]
+  ],
+  "types": "./types/index.d.ts"
 }

@@ -1032,7 +1032,9 @@ microphone back automatically when the taker lets go.
 - `turn.start` on the main loop → `POST working on=1`. Voice Operator plays
   Spaceterm's thinking sonar (`SoundEffect.handsFreeSonar`) every 2.5 s, after
   a first 1.5 s. It holds off while anyone speaks or the user talks, and stops
-  at the turn's end or on detach. Subagents' turns are not the main thread's
+  at the turn's end or on detach. It is not reported as `playing`: hands-free
+  listens through it even on speakers, since Silero does not take a tone for
+  speech. Subagents' turns are not the main thread's
   and play nothing.
 - `turn.complete` on the main loop → `POST hooks/stop {session_id,
   last_assistant_message: e.answer}`. The reply is spoken through
@@ -1059,6 +1061,12 @@ microphone back automatically when the taker lets go.
 - `prompt.submit` from the keyboard carries any notice that hands-free went off
   under the session (`hooks/user-prompt-submit`).
 - `classic.Notification` reads permission prompts aloud.
+- A band above the prompt (`ui.render` on `AbovePrompt`, state `handsfree.band`)
+  shows hands-free's state while attached: "Say “Claude” first" outside the
+  conversation window, "Keep talking…" inside it, "Listening…" or "Sending…"
+  while the user speaks, "working" while the main thread does. The mod keeps it
+  in step with `GET watch?since=<version>&wait=25`, a long poll that answers
+  when `VoiceMode.version` moves: phase, window, stand-aside, working, attach.
 - `session.end` lets go. After a `/clear`, the mod moves the attachment to
   the new session id (`hooks/session-start {source: clear}` with the same
   `claude` pid).

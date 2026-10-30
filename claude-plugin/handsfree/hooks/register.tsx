@@ -1,4 +1,7 @@
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
+
+import type { Band } from '../types'
 
 /**
  * Hands-free voice chat with this one Claude Code session, through Voice
@@ -14,6 +17,8 @@ import type { EngineInterface, Register } from 'claude-code'
  *   anything said meanwhile rides in with the next tool result.
  * - While attached, the system prompt carries the hands-free rules
  *   (hands-free.md), and the model has two tools: `stop` and `say`.
+ * - While attached, a band above the prompt says what hands-free is doing:
+ *   whether the trigger word is needed, or the user can just keep talking.
  */
 
 type $ = EngineInterface
@@ -21,6 +26,7 @@ type $ = EngineInterface
 const VO_API_REQUIRED = 18
 const RULES_ID = 'handsfree:rules'
 const STOP = 'mcp__handsfree__stop'
+const band = atom({ plugin: 'handsfree', key: 'band' } as const, null)
 const SAY = 'mcp__handsfree__say'
 
 /** What this session's side knows. Module state: a reload asks Voice Operator again (`resume`). */
@@ -34,6 +40,7 @@ const self = {
   /** The main thread is between turns: what the user says is submitted at once. */
   idle: true,
   polling: false,
+  watching: false,
   rules: '',
   claudePid: 0,
   toolsRegistered: false,
@@ -126,13 +133,13 @@ async function attached($: $, generation: number): Promise<void> {
     })
     self.toolsRegistered = true
   }
-  $.ui.status('🎧 hands-free')
   void listen($)
+  void watch($)
 }
 
 function detached($: $): void {
   self.attached = false
-  $.ui.status(undefined)
+  void update($, band, () => null)
 }
 
 async function detach($: $): Promise<string> {
@@ -190,6 +197,47 @@ async function listen($: $): Promise<void> {
   }
 }
 
+/**
+ * Keeps the band in step with Voice Operator (`/watch`, a long poll that
+ * answers when the conversation's state changes), until hands-free is off.
+ */
+async function watch($: $): Promise<void> {
+  if (self.watching) return
+  self.watching = true
+  try {
+    let version = -1
+    while (self.attached) {
+      const answer = await vo($, `/watch?since=${version}&wait=25`)
+      if (answer?.status !== 200) { await $.clock.sleep(2000); continue }
+      const state = JSON.parse(answer.text) as Record<string, unknown>
+      version = Number(state.version ?? -1)
+      // Off, or moved to another session: the band goes.
+      if (state.attached !== true || state.session_id !== self.sessionId) { detached($); return }
+      const next: Band = {
+        phase: String(state.phase ?? 'off'),
+        conversation: state.conversation === true,
+        standingAside: typeof state.standing_aside === 'string' ? state.standing_aside : null,
+        working: state.working === true,
+        trigger: String(state.trigger ?? 'claude'),
+      }
+      await update($, band, () => next)
+    }
+  } finally {
+    self.watching = false
+  }
+}
+
+/** What the band says: what hands-free is doing, and whether the trigger word is needed. */
+function describe(b: Band): { text: string; color: string } {
+  const word = b.trigger.charAt(0).toUpperCase() + b.trigger.slice(1)
+  if (b.phase === 'hearing') return { text: 'Listening…', color: 'success' }
+  if (b.phase === 'sending') return { text: 'Sending…', color: 'success' }
+  if (b.standingAside === 'speech') return { text: 'Not listening while I speak on speakers', color: 'warning' }
+  if (b.standingAside === 'dictation') return { text: 'Paused for your Fn dictation', color: 'warning' }
+  if (b.phase !== 'listening') return { text: 'Microphone paused', color: 'warning' }
+  return b.conversation ? { text: 'Keep talking…', color: 'success' } : { text: `Say “${word}” first`, color: 'suggestion' }
+}
+
 // MARK: - Hooks
 
 export const register: Register = on => {
@@ -222,6 +270,21 @@ export const register: Register = on => {
     const [trigger = '', voice = ''] = verb === 'on' || verb === '' ? rest : [verb, ...rest]
     const text = await attach($, trigger, voice)
     return { text, context: self.attached ? [`${text} Follow the hands-free section of your system prompt from now on.`] : [] }
+  })
+
+  // While attached: one line above the prompt, for as long as hands-free is on.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const b = await read($, band)
+    if (!b || e.props.hasSurvey) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const { text, color } = describe(b)
+    return (
+      <Box>
+        <Text bold>🎧 Hands-free · </Text>
+        <Text color={color}>{text}</Text>
+        {b.working ? <Text dimColor> · working (sonar)</Text> : null}
+      </Box>
+    )
   })
 
   // The rules, in the system prompt while attached: they outlive compaction, and go when it is off.
@@ -295,8 +358,8 @@ export const register: Register = on => {
       // /clear goes on under a new session id in this process: hands-free follows it.
       $.clock.after(500, async () => {
         const id = await $.session.id()
-        await vo($, `/hooks/session-start?claude_pid=${await claudePid($)}`, { json: { session_id: id, source: 'clear' } })
         self.sessionId = id
+        await vo($, `/hooks/session-start?claude_pid=${await claudePid($)}`, { json: { session_id: id, source: 'clear' } })
       })
     } else if (self.attached) {
       await vo($, '/hooks/session-end', { json: { session_id: self.sessionId, reason: e.reason } })

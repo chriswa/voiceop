@@ -126,6 +126,19 @@ final class AudioArbiter {
     /// capture (permissions, a device that never started). Wispr has the same
     /// watchdog — `NoAudioDuringDictationError` at 5 s.
     private static let noAudioWarningSeconds: TimeInterval = 3
+    /// A Bluetooth headset whose microphone this dictation opens (not held open):
+    /// how long after its first sound to wait before the start cue, so the cue
+    /// lands after the switch into the call profile rather than inside it.
+    private nonisolated static let headsetSettleAfterSound: TimeInterval = 0.15
+    /// …and the start cue regardless, this long after the first (silent) audio,
+    /// should the headset never send anything but zeros.
+    private nonisolated static let headsetSoundTimeout: TimeInterval = 1.5
+    /// After its microphone closes at key-up, how long the headset takes to
+    /// switch back to its music profile — about half a second, by ear. The
+    /// output is unmuted, and the closing cue played, only then: unmuted
+    /// sooner, the music came back and dropped out again for the switch.
+    /// Nothing reports the switch's end, so this is a fixed wait.
+    private nonisolated static let headsetSettleAfterClose: TimeInterval = 0.7
 
     /// Tunable timing for the audible indication that transcription is ongoing.
     /// The cue itself is synthesized to last `cueDuration` (see SoundEffects).
@@ -227,6 +240,12 @@ final class AudioArbiter {
         var offset = 0
         var pump: Timer?
         var heardAudio = false
+        /// This dictation opens a Bluetooth headset's microphone (it was not held
+        /// open), so the headset switches profiles at both ends: the start cue
+        /// waits for its first sound, and the unmute at the end for it to close.
+        var headsetSwitches = false
+        /// The start cue has been asked for (`announceListening`).
+        var cueRequested = false
         /// True only after the start cue actually played. Distinct from
         /// `heardAudio`, which flips earlier — before the mode/`live` guards that
         /// can still cancel the chirp. Closing cues key off this so a discarded
@@ -251,6 +270,10 @@ final class AudioArbiter {
 
     func beginDictation(mode decision: DictationModeDecision, trace: DictationTrace = DictationTrace()) {
         guard !recorder.isRecording else { return }
+        // The last dictation's unmute is still waiting for its headset to switch
+        // back: do it now, or this dictation's mute would save "muted" as the
+        // user's own setting, and nothing would ever unmute it.
+        outputIsBack()
         isDictating = true
         haltSpeech()
         // Release the narration ducker here, ahead of `recorder.start()`, rather
@@ -268,6 +291,7 @@ final class AudioArbiter {
         onDictationBegan?()
 
         let live = LiveDictation(trace: trace, mode: decision)
+        live.headsetSwitches = OutputDevice.isWireless && !recorder.isAlwaysOn && !recorder.hasListener
         self.live = live
 
         // The start cue means "it is safe to talk now", so it must wait for the
@@ -275,6 +299,14 @@ final class AudioArbiter {
         // Fires on the audio thread; hop to main before touching anything.
         recorder.onFirstAudio = { [weak self] in
             DispatchQueue.main.async { self?.captureBecameLive() }
+        }
+        // A headset's microphone sends zeros until its link is up: on one, the
+        // start cue waits for real sound (and then a moment for the switch).
+        recorder.onFirstSound = { [weak self, weak live] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.headsetSettleAfterSound) {
+                guard let self, let live, self.live === live, live.headsetSwitches else { return }
+                self.announceListening(live)
+            }
         }
         // The device is spun up after `start()` returns (it is far too slow to do
         // on the trigger key's thread — see AudioRecorder.start), so a microphone
@@ -326,6 +358,7 @@ final class AudioArbiter {
     /// been made (the cooperative path in `RestartCoordinator` is where waiting
     /// happens).
     func prepareForTermination() {
+        outputIsBack()
         muter.restore()
         narrationDucker.stopSynchronously()
         guard isDictating else { return }
@@ -378,7 +411,21 @@ final class AudioArbiter {
     private func captureBecameLive() {
         guard let live, !live.heardAudio else { return }
         live.heardAudio = true
-        // The two start cues name the mode, so this one must not sound until the
+        guard live.headsetSwitches else { announceListening(live); return }
+        // On a headset that is still switching, the first buffers are zeros:
+        // `onFirstSound` announces. This is only the backstop.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.headsetSoundTimeout) { [weak self] in
+            guard let self, self.live === live, !live.cueRequested else { return }
+            live.trace.note("headset sent only zeros for \(Self.headsetSoundTimeout)s — start cue anyway")
+            self.announceListening(live)
+        }
+    }
+
+    /// The start cue, once the mode is final; then the output mute, after the
+    /// cue (on a headset, once it has played out — the mute would cut it).
+    private func announceListening(_ live: LiveDictation) {
+        guard !live.cueRequested else { return }
+        live.cueRequested = true        // The two start cues name the mode, so this one must not sound until the
         // mode is final. That wait is normally zero and never more than a few tens
         // of milliseconds: the mode window closes 200 ms after key-down and
         // CoreAudio has not been seen to deliver a first buffer sooner than that.
@@ -393,7 +440,8 @@ final class AudioArbiter {
             self.recorder.excludeFromMetering(seconds: cue.duration + Self.cueCaptureMargin)
             cue.play()
             live.announcedListening = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            let muteAfter = live.headsetSwitches ? max(0.2, cue.duration + 0.05) : 0.2
+            DispatchQueue.main.asyncAfter(deadline: .now() + muteAfter) { [weak self] in
                 guard let self, self.recorder.isRecording else { return }
                 self.muter.mute()
             }
@@ -507,7 +555,18 @@ final class AudioArbiter {
         let duration = recorder.lastDurationSeconds
         let peak = recorder.lastPeak
         let rms = recorder.lastRMS
-        muter.restore()
+        if live?.headsetSwitches == true {
+            // The headset switches back to music as its microphone closes: unmute,
+            // and play the closing cue, once it has — not into the switch.
+            outputPending = []
+            recorder.afterMicClosed {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.headsetSettleAfterClose) { [weak self] in
+                    self?.outputIsBack()
+                }
+            }
+        } else {
+            muter.restore()
+        }
         if micStalled {
             playClosingCue(.microphoneStalled, mode: mode)
             Log.log(String(format: "dictation: WARNING stopped early — the microphone stalled after %.1fs of "
@@ -535,7 +594,7 @@ final class AudioArbiter {
                 live?.trace.flush()
                 // Not `playClosingCue`: there is no closing to announce, and the
                 // start chirp this would silence never played either.
-                if !micStalled { SoundEffect.captureFailed.play() }
+                if !micStalled { whenOutputIsBack { SoundEffect.captureFailed.play() } }
                 record(clip: nil, duration: heldSeconds, transcript: "", command: isCommand,
                        error: "the microphone captured no audio")
                 finishDictation()
@@ -803,7 +862,25 @@ final class AudioArbiter {
     /// timings tighten, without changing when capture starts or stops.
     private func playClosingCue(_ cue: SoundEffect, mode: DictationMode) {
         mode.startCue.stop()
-        cue.play()
+        whenOutputIsBack { cue.play() }
+    }
+
+    /// What waits, after a headset dictation's key-up, for the headset to have
+    /// switched back (`headsetSettleAfterClose`): nil when nothing does.
+    private var outputPending: [() -> Void]?
+
+    /// `action` now, or once the output is back, if it is still waiting.
+    private func whenOutputIsBack(_ action: @escaping () -> Void) {
+        if outputPending != nil { outputPending?.append(action) } else { action() }
+    }
+
+    /// The headset has switched back: unmute, then what waited for it. Also
+    /// called early — by the next dictation, or quitting — to settle it now.
+    private func outputIsBack() {
+        guard let pending = outputPending else { return }
+        outputPending = nil
+        muter.restore()
+        pending.forEach { $0() }
     }
 
     /// Starts after a short grace period so quick transcriptions stay quiet,

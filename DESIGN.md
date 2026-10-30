@@ -442,6 +442,18 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
 
 ### Holding the microphone open (2026-09-05)
 
+**Without the hold (2026-10-29).** When a dictation opens a Bluetooth headset's
+microphone itself (`LiveDictation.headsetSwitches`: wireless output, not held
+open by the preference or hands-free), the arbiter works around the switch
+instead of avoiding it. At the start, the microphone hands over exact zeros until
+the headset's link is up; the start cue waits for the first buffer that is not
+(`AudioRecorder.onFirstSound`) plus 150 ms, with 1.5 s after the first audio as
+a backstop, and the output is muted only once the cue has played out. At key-up
+the microphone closes first; the output is unmuted, and the closing cue played,
+700 ms after it has (`headsetSettleAfterClose` — nothing reports the switch
+back's end, so the wait is fixed). A dictation started meanwhile settles that
+first (`outputIsBack`), or its mute would record "muted" as the user's own state.
+
 Opening or closing an input stream on a Bluetooth headset makes it renegotiate its
 codec: the AirPods drop out of their music profile into the voice one and back
 again, once at the start of a dictation and once at the end. The user hears a delay

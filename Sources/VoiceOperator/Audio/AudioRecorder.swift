@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 
 /// Captures the default input device to 16 kHz mono s16le — the format Wispr's
@@ -62,6 +63,9 @@ final class AudioRecorder: @unchecked Sendable {
     /// and its `sawFirstAudio` write would suppress the new "safe to talk" cue.
     private var generation = 0
     private var sawFirstAudio = false
+    /// The first buffer that is not digital silence has arrived (`onFirstSound`).
+    private var sawFirstSound = false
+    private var firstSoundHandler: (@Sendable () -> Void)?
     private var meteringStartByte = 0
     private var trace: DictationTrace?
     private var firstAudioHandler: (@Sendable () -> Void)?
@@ -251,6 +255,21 @@ final class AudioRecorder: @unchecked Sendable {
 
     /// Fired once per recording, on the audio thread, when the first buffer
     /// containing frames arrives. Set it before `start()`.
+    /// `block` once the microphone has closed (or stayed open) after `stop()`:
+    /// queued behind the teardown `stop()` queued. On the recorder's queue.
+    func afterMicClosed(_ block: @escaping @Sendable () -> Void) {
+        engineQueue.async { block() }
+    }
+
+    /// Fired once per recording, on the audio thread, when the first buffer
+    /// that is not exact zeros arrives. A Bluetooth headset's microphone hands
+    /// over zeros while its link is still coming up — AirPods switching into
+    /// their call profile — so this, not `onFirstAudio`, is when it can hear.
+    var onFirstSound: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return firstSoundHandler }
+        set { lock.lock(); firstSoundHandler = newValue; lock.unlock() }
+    }
+
     var onFirstAudio: (@Sendable () -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return firstAudioHandler }
         set { lock.lock(); firstAudioHandler = newValue; lock.unlock() }
@@ -364,6 +383,7 @@ final class AudioRecorder: @unchecked Sendable {
         converter = nil
         captured = Data()
         sawFirstAudio = false
+        sawFirstSound = false
         meteringStartByte = 0
         recordingDelivery = RecordingDelivery()
         capturing = true
@@ -864,6 +884,9 @@ final class AudioRecorder: @unchecked Sendable {
         if isFirstAudio { sawFirstAudio = true }
         let trace = self.trace
         let handler = isFirstAudio ? firstAudioHandler : nil
+        let isFirstSound = !sawFirstSound && Self.hasSound(buffer)
+        if isFirstSound { sawFirstSound = true }
+        let soundHandler = isFirstSound ? firstSoundHandler : nil
         converterLocked(for: buffer.format)
         convertAndStoreLocked(buffer)
         lock.unlock()
@@ -880,6 +903,19 @@ final class AudioRecorder: @unchecked Sendable {
             trace?.note(Self.firstBufferSummary(buffer))
             handler?()
         }
+        if isFirstSound {
+            if !isFirstAudio { trace?.mark("sound") }
+            soundHandler?()
+        }
+    }
+
+    /// Anything but exact zeros in the first channel.
+    private static func hasSound(_ buffer: AVAudioPCMBuffer) -> Bool {
+        guard buffer.frameLength > 0 else { return false }
+        guard let channel = buffer.floatChannelData else { return true }
+        var peak: Float = 0
+        vDSP_maxmgv(channel[0], 1, &peak, vDSP_Length(buffer.frameLength))
+        return peak > 0
     }
 
     /// Stops recording and returns the finished clip as 16 kHz mono PCM16, so

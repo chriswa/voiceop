@@ -20,12 +20,10 @@ One audio coordinator sits under all of it, so dictation always stops speech,
 other audio is muted while you dictate and turned down while it speaks, and a
 restart waits until nobody is talking or listening.
 
-- **Voice mode for Claude Code.** The `single-agent-voice-mode` plugin, released
-  with the app, lets you chat by voice with one Claude Code session from any
-  terminal, hands-free: `/plugin marketplace add chriswa/voiceop`, then
-  `/plugin install single-agent-voice-mode@voiceop`, then
-  `/single-agent-voice-mode:start` in the session. See
-  [its README](claude-plugin/single-agent-voice-mode/README.md).
+- **Hands-free voice chat with Claude Code.** The `handsfree` plugin, released
+  with the app, lets you talk with one Claude Code session from any terminal:
+  `/plugin install handsfree --marketplace chriswa/voiceop`, then `/handsfree`
+  in the session. See [its README](claude-plugin/handsfree/README.md).
 
 [Spaceterm](https://github.com/chriswa/spaceterm) is its first client: its
 Control assistant speaks through Voice Operator, takes command dictations, and

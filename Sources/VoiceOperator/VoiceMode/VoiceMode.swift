@@ -2,9 +2,8 @@ import Foundation
 
 /// Claude Code's voice mode: hands-free locked to one Claude Code session, so
 /// the user can talk with that one agent while the terminal is out of sight.
-/// The Claude Code side is the `single-agent-voice-mode` plugin
-/// (`claude-plugin/`), whose hooks and `voice-mode` command call
-/// `/v1/voice-mode/…` (DESIGN.md "Claude Code voice mode").
+/// The Claude Code side is the `handsfree` plugin (`claude-plugin/handsfree`),
+/// a mod whose hooks call `/v1/voice-mode/…` (DESIGN.md "Claude Code voice mode").
 ///
 /// It is a hands-free client like Spaceterm, but one inside this app
 /// (`HandsFreeService.registerLocal`), with the trigger word "claude" by
@@ -13,18 +12,17 @@ import Foundation
 ///
 /// The conversation:
 ///
-/// - **The agent's turn ends** (the plugin's `Stop` hook, `turnEnded`): its last
-///   message is spoken, and the hook waits on `next` for what the user says.
-///   The hook runs with `asyncRewake`, so Claude Code wakes the agent with
-///   whatever it prints.
+/// - **The agent works** (`setWorking`): a soft sonar, until its turn ends.
+/// - **The agent's turn ends** (`turnEnded`): its answer is spoken, and the mod
+///   waits on `next` for what the user says, which it submits as their prompt.
 /// - **The user speaks** (a hands-free `transcript`): the words, trigger word
-///   off, go to the hook waiting on `next`, or wait in `inbox` for one — or for
-///   `PostToolUse` to hand them over mid-turn.
+///   off, go to the poll waiting on `next`, or wait in `inbox` for one — or for
+///   the mod's next tool result to hand them over mid-turn (`midTurn`).
 /// - **The user talks over the reply**: hands-free cuts it off (`cut-in`),
 ///   and the agent is told how far they had heard.
 ///
-/// It detaches when asked (`voice-mode stop`, the menu), when the session
-/// ends (`SessionEnd`, or its `claude` process is gone), when another session
+/// It detaches when asked (`/handsfree off`, the agent's `stop` tool, the menu),
+/// when the session ends (or its `claude` process is gone), when another session
 /// attaches, when hands-free ends under it (Spaceterm takes the microphone,
 /// "let me turn this off", incognito), but not when this app restarts: the
 /// attachment is saved, and picked up again at launch.
@@ -59,7 +57,7 @@ final class VoiceMode {
 
     /// Why it detached, for the log, the menu, and the session's next prompt.
     enum Detach: Equatable {
-        /// `voice-mode stop`, `/single-agent-voice-mode:stop`: the agent knows already.
+        /// `/handsfree off`, the agent's `stop` tool: the session knows already.
         case asked
         case menu
         case sessionEnded
@@ -96,6 +94,8 @@ final class VoiceMode {
         /// Stop job `id`, heard until then; how far into its text it got (UTF-16).
         var cancelSpeech: (_ id: String, _ heardUntil: Date?) async -> Int?
         var playCue: (SoundEffect) -> Void
+        /// Voice Operator is speaking (anyone's speech): the sonar holds off.
+        var isSpeaking: () -> Bool = { false }
         var stopCue: (SoundEffect) -> Void
         var pidAlive: (Int32) -> Bool
         var save: (Attachment?) -> Void
@@ -117,6 +117,7 @@ final class VoiceMode {
                 await SpeechJobManager.shared.cancel(id: id, heardUntil: heardUntil)?.characterOffset
             },
             playCue: { $0.play() },
+            isSpeaking: { HandsFreeService.shared.host.speaking },
             stopCue: { $0.stop() },
             pidAlive: { pid in kill(pid, 0) == 0 || errno == EPERM },
             save: { attachment in
@@ -143,8 +144,8 @@ final class VoiceMode {
         var heard: String?
 
         func message(whileWorking: Bool) -> String {
-            said.isEmpty ? VoiceModeText.interruptedWithoutWords(heard: heard)
-                : VoiceModeText.message(said: said, whileWorking: whileWorking, interrupted: interrupted, heard: heard)
+            whileWorking ? VoiceModeText.midTurn(said: said, interrupted: interrupted, heard: heard)
+                : VoiceModeText.prompt(said: said, interrupted: interrupted, heard: heard)
         }
     }
     /// Why a session was detached under it, for its next prompt: it may still think it is being heard.
@@ -155,6 +156,10 @@ final class VoiceMode {
     private var heardBeforeCutIn: String?
     private var cutInPending = false
     private var pendingBeep: Task<Void, Never>?
+    /// The sonar, while the session's main thread works (`setWorking`).
+    private var sonar: Task<Void, Never>?
+    /// Spaceterm's thinking cue: the first echo after 1.5 s, then one every 2.5 s.
+    var sonarTiming: (delay: Duration, every: Duration) = (.milliseconds(1_500), .milliseconds(2_500))
     private var watch: Task<Void, Never>?
     private let link = Link()
     var deps: Deps
@@ -219,11 +224,12 @@ final class VoiceMode {
         inbox = []
         phase = "off"
         setPendingBeep(false)
+        setWorking(false)
         watch?.cancel()
         watch = nil
         switch why {
         case .asked, .sessionEnded: break
-        default: notices[current.sessionID] = "[Voice mode] Voice mode was turned off: \(why.description). "
+        default: notices[current.sessionID] = "[Hands-free] Hands-free was turned off: \(why.description). "
             + "Your replies are no longer spoken; answer in text as usual."
         }
         speaking = []
@@ -285,6 +291,7 @@ final class VoiceMode {
     /// hook waits for the user under. Nil when this session is not attached.
     func turnEnded(_ input: VoiceModeHookInput) async -> Int? {
         guard isAttached(input.sessionID) else { return nil }
+        setWorking(false)
         attachment?.generation += 1
         let generation = attachment!.generation
         deps.save(attachment)
@@ -316,7 +323,7 @@ final class VoiceMode {
         }
     }
 
-    /// `PostToolUse`: what the user said while the agent works, as hook output.
+    /// Mid-turn (the mod's `tool.call` hook): what the user said while the agent works, in a `PostToolUse` hook's shape.
     func midTurn(_ input: VoiceModeHookInput) -> [String: Any]? {
         guard isAttached(input.sessionID), let message = takeInbox(whileWorking: true) else { return nil }
         return ["hookSpecificOutput": ["hookEventName": "PostToolUse", "additionalContext": message]]
@@ -362,15 +369,38 @@ final class VoiceMode {
         await speak("\(attachment?.project ?? "Claude") needs you at the terminal. \(message)")
     }
 
-    /// `PreToolUse` on Bash: voice mode's own controls go ahead without asking.
-    func preToolUse(_ input: VoiceModeHookInput) -> [String: Any]? {
-        guard isAttached(input.sessionID), input.toolName == "Bash", let command = input.command,
-              VoiceModeCommandGuard.isVoiceControl(command) else { return nil }
-        return ["hookSpecificOutput": ["hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                       "permissionDecisionReason": "voice mode's own control"]]
+    /// The session's main thread started (true) or finished (false) a turn: a
+    /// soft sonar plays while it works, so the user knows it heard them and is
+    /// on it. It holds off while anyone speaks and while the user talks, and
+    /// stops at the turn's end (`turnEnded`) or on detach.
+    func setWorking(sessionID: String, _ on: Bool) -> Bool {
+        guard isAttached(sessionID) else { return false }
+        setWorking(on)
+        return true
     }
 
-    /// `voice-mode say`: a word now, mid-turn, without waiting for the turn to end.
+    private func setWorking(_ on: Bool) {
+        guard on != (sonar != nil) else { return }
+        sonar?.cancel()
+        sonar = nil
+        guard on else { deps.stopCue(.handsFreeSonar); return }
+        let timing = sonarTiming
+        sonar = Task { [weak self] in
+            try? await Task.sleep(for: timing.delay)
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.phase == "listening", !self.deps.isSpeaking() {
+                    self.link.played(SoundEffect.handsFreeSonar.duration)
+                    self.deps.playCue(.handsFreeSonar)
+                }
+                try? await Task.sleep(for: timing.every)
+            }
+        }
+    }
+
+    var isWorking: Bool { sonar != nil }
+
+    /// The agent's `say` tool: a word now, mid-turn, without waiting for the turn to end.
     func say(sessionID: String, text: String) async -> Bool {
         guard isAttached(sessionID) else { return false }
         await speak(text)
@@ -521,7 +551,7 @@ final class VoiceMode {
         var o: [String: Any] = ["attached": true, "session_id": a.sessionID, "project": a.project, "cwd": a.cwd,
                                 "trigger": a.trigger, "claude_pid": Int(a.claudePID), "phase": phase,
                                 "attached_at": ISO8601DateFormatter().string(from: a.attachedAt),
-                                "waiting_messages": inbox.count]
+                                "waiting_messages": inbox.count, "generation": a.generation, "working": isWorking]
         if let route { o["route"] = route }
         if let voice = a.voice { o["voice"] = voice }
         return o
@@ -529,7 +559,7 @@ final class VoiceMode {
 
     /// For the menu: what it is attached to, or nil.
     var menuTitle: String? {
-        attachment.map { "Claude Voice Mode: \($0.project) — say “\($0.trigger.capitalized)”" }
+        attachment.map { "Claude Hands-Free: \($0.project) — say “\($0.trigger.capitalized)”" }
     }
 
     /// The link hands-free sends this client's messages through, on its queue.

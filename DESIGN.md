@@ -986,30 +986,35 @@ dictation was under way: it is history, not the user talking now.
 ## Claude Code voice mode (2026-10-29)
 
 Hands-free locked to one Claude Code session, so the user can talk with that one
-agent with the terminal out of sight. The Claude Code half is the
-`single-agent-voice-mode` plugin in `claude-plugin/`. The repo root's
+agent with the terminal out of sight. The Claude Code half is the `handsfree`
+plugin in `claude-plugin/handsfree`. It is a mod: one hooks module,
+`hooks/register.ts`, on Claude Code's function-hooks API. The repo root's
 `.claude-plugin/marketplace.json` makes this repo its marketplace (`voiceop`),
 and `bump-version.sh` stamps the app's version into its `plugin.json`, so it is
 released with the app. Its README covers install and use. Multi-agent switching
-is out of scope.
+is out of scope. The app side keeps the name voice mode (`VoiceMode`,
+`/v1/voice-mode/…`).
 
 **Code.** `VoiceMode/`: `VoiceMode` (the attachment, the conversation, the
-hands-free client), `VoiceModeRoutes` (`/v1/voice-mode/…`), `VoiceModeText`
-(replies made fit to hear, messages for the agent, hook input, which Bash
-commands are pre-approved). Tests: `VoiceModeTests`, `HandsFreeHandoverTests`.
+hands-free client, the sonar), `VoiceModeRoutes` (`/v1/voice-mode/…`),
+`VoiceModeText` (replies made fit to hear, what the user said as a prompt,
+hook-shaped input). Tests: `VoiceModeTests`, `HandsFreeHandoverTests`.
 
 **A hands-free client inside the app.** `HandsFreeService.registerLocal` /
 `setLocal` / `unregisterLocal` give it the same messages a socket client gets,
 through a `HandsFreeClientLink` instead of a connection. Its client name is
-`claude-code` and its trigger word is "claude" by default (`/…:start <word>`).
-Apple's model hears "Claude" well (`say` voices, October 29). The trigger must
-differ from Spaceterm's "control": both stay registered while either holds the
-microphone. It plays hands-free's cues itself, as `SoundEffect.handsFree*`
-(Spaceterm's tones), including the repeating "deciding" beep. It reports them
-as `playing` so they are not listened through on speakers. A `cut-in` cancels
-its replies with `heard_until`, and the agent is told the last words heard.
-`duck` is ignored, as Spaceterm ignores it for speech on the Mac. Each reply it
-speaks opens the conversation window again (`openConversationLocal` →
+`claude-code` and its trigger word is "claude" by default (`/handsfree on
+<word>`). Apple's model writes "Claude" as "clod" or "clawed" too, and both
+count as the word (`HandsFreePhrases.soundsLike`). The trigger must differ from
+Spaceterm's "control": both stay registered while either holds the
+microphone.
+
+It plays hands-free's cues itself, as `SoundEffect.handsFree*` (Spaceterm's
+tones), including the repeating "deciding" beep. It reports them as `playing`
+so they are not listened through on speakers. A `cut-in` cancels its replies
+with `heard_until`, and the agent is told the last words heard. `duck` is
+ignored, as Spaceterm ignores it for speech on the Mac. Each reply it speaks
+opens the conversation window again (`openConversationLocal` →
 `HandsFreeEngine.openConversation(by:)`). The window lasts 15 s, and most agent
 turns take longer than that, so without this the user would need the trigger
 word to answer every reply.
@@ -1022,40 +1027,61 @@ button off quietly on `taken`, as it does on `replaced`. Turning it on again
 takes the microphone back, and voice mode detaches. Nothing gives the
 microphone back automatically when the taker lets go.
 
-**The loop.** The agent's turn ends, and the plugin's `Stop` hook (`asyncRewake`,
-24 h timeout) posts its input to `hooks/stop`. The reply is spoken
-(`last_assistant_message`, else the transcript's last assistant text, through
-`VoiceModeText.spoken`), and the session's turn `generation` goes up. The hook
-then long-polls `GET next?session&generation&wait=25` until the user says
-something. On `200` it prints the words and exits 2, which wakes the agent with
-them as its next turn. On `410` it exits quietly: detached, or superseded by a
-later turn's hook. Speech that arrives while the agent works waits in `inbox`
-for `PostToolUse` (`additionalContext`), the next `next`, or a typed prompt
-(`UserPromptSubmit`). The "8 consecutive Stop-hook continuations" cap on
-`decision: block` does not apply to `asyncRewake` wake-ups: a pty run did 11
-voice turns in a row with no tool calls.
+**The loop** (the mod's hooks; Voice Operator decides everything):
 
-**Lifetime.** Attaching saves `voice-mode.json` in Application Support. It
-marks the attachment for the hooks' fast path ("no file, exit 0") and is read
-back at launch, so a restart picks the attachment up again with its
-`generation`. A hook already waiting retries through the restart. Voice mode
+- `turn.start` on the main loop → `POST working on=1`. Voice Operator plays
+  Spaceterm's thinking sonar (`SoundEffect.handsFreeSonar`) every 2.5 s, after
+  a first 1.5 s. It holds off while anyone speaks or the user talks, and stops
+  at the turn's end or on detach. Subagents' turns are not the main thread's
+  and play nothing.
+- `turn.complete` on the main loop → `POST hooks/stop {session_id,
+  last_assistant_message: e.answer}`. The reply is spoken through
+  `VoiceModeText.spoken`, the sonar stops, and the session's turn `generation`
+  goes up.
+- The mod then long-polls `GET next?session&generation&wait=25` while the
+  main thread is idle. What the user said comes back as their own words, as
+  `VoiceModeText.prompt` puts it: bare, or with "(I talked over your spoken
+  reply. I'd heard up to “…”.)". The mod submits it with `$.prompt.submit({
+  text, asUser: true })`, so it is a real user prompt (origin `plugin`,
+  `asUser`), not a notification or a hook message. A `410` stops the poll:
+  detached, or superseded.
+- Speech that arrives while the main thread works waits in `inbox`. The mod's
+  `tool.call` hook fetches it (`hooks/post-tool-use`) and hands it to the
+  model as `context` on that tool result, marked `[Hands-free]`.
+- `prompt.compose` adds the rules (`hands-free.md`) as a session section of
+  the system prompt while attached, so they outlive compaction and leave when
+  it is off. The rules ask the agent to keep its main thread free for talking,
+  by doing long work in background subagents.
+- While attached, the model has two tools of the mod's (`$.tool.register`):
+  `mcp__handsfree__stop` and `mcp__handsfree__say`, which its `tool.check`
+  hook allows with nobody at the keyboard. The engine has no unregister, so
+  after detaching they stay, and answer that hands-free is off.
+- `prompt.submit` from the keyboard carries any notice that hands-free went off
+  under the session (`hooks/user-prompt-submit`).
+- `classic.Notification` reads permission prompts aloud.
+- `session.end` lets go. After a `/clear`, the mod moves the attachment to
+  the new session id (`hooks/session-start {source: clear}` with the same
+  `claude` pid).
+
+The routes under `hooks/` take hook-shaped JSON, a relic of a first version
+built on command hooks (an `asyncRewake` Stop hook). That version delivered
+speech as a task notification, which a model is right to distrust.
+
+**Lifetime.** Attaching saves `voice-mode.json` in Application Support. It is
+read back at launch, so a restart picks the attachment up again with its
+`generation`. A poll already waiting retries through the restart, and a mod
+reload asks `GET /v1/voice-mode` whether its session is attached. Voice mode
 detaches on:
 
-- `voice-mode stop`, the menu, or `/…:stop`
-- `SessionEnd` (not `clear`: `SessionStart {source: clear}` from the same
-  `claude` pid moves the attachment to the new session id)
+- `/handsfree off`, the `stop` tool, or the menu
+- `session.end`
 - its `claude` pid gone (checked every 5 s)
 - another session attaching
 - hands-free ending under it: `taken`, `shutdown` by voice, incognito, the
   microphone giving up
 
 A session it detached from for any reason it did not ask for is told on its
-next prompt.
-
-**Pre-approved commands.** While attached, `PreToolUse` on Bash allows exactly
-`voice-mode stop|status|help` and `voice-mode say` with one single-quoted
-argument or a quoted heredoc (`VoiceModeCommandGuard`). So "turn voice chat
-off" works with nobody at the keyboard.
+next typed prompt.
 
 **Incognito.** Attaching refuses (`.network("Claude Code voice mode")`, 403),
 and nothing waiting in `inbox` is handed out. Hands-free's own incognito
@@ -1063,8 +1089,9 @@ handling ends the session.
 
 **Testing.** `POST /v1/voice-mode/simulate {text}` acts as if hands-free heard
 `text`. `scripts/voice-mode-e2e.py` drives a real interactive Claude Code
-(haiku, in a pty) with the plugin through attach, a woken turn, ten more turns
-and "turn hands-free voice chat off". It speaks each reply aloud.
+(haiku, in a pty) with the mod, through `/handsfree`, a turn started by speech,
+ten more turns, and "turn hands-free voice chat off". It speaks each reply
+aloud.
 
 ## Speech on a device (2026-10-25)
 

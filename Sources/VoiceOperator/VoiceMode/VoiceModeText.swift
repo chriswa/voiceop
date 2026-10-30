@@ -56,7 +56,8 @@ enum VoiceModeText {
     static func withoutTrigger(_ text: String, trigger: String?) -> String {
         var rest = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trigger, !trigger.isEmpty {
-            let pattern = "^" + NSRegularExpression.escapedPattern(for: trigger) + #"\b[\s,.!?:;-]*"#
+            let words = [trigger] + (HandsFreePhrases.soundsLike[trigger.lowercased()] ?? [])
+            let pattern = "^(" + words.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|") + #")\b[\s,.!?:;-]*"#
             rest = rest.replacingOccurrences(of: pattern, with: "", options: [.regularExpression, .caseInsensitive])
         }
         guard let first = rest.first else { return "" }
@@ -70,28 +71,21 @@ enum VoiceModeText {
         return all.count > words ? "…" + kept : kept
     }
 
-    /// What the agent is handed for something the user said. `whileWorking`:
-    /// it arrives mid-turn (`PostToolUse`), not as the next turn. `heard`: they
-    /// cut the agent's spoken reply off, having heard it up to these words.
-    static func message(said: String, whileWorking: Bool, interrupted: Bool, heard: String?) -> String {
-        var out = whileWorking
-            ? "[Voice mode] While you were working, the user said (by voice, transcribed on device): \"\(said)\""
-            : "[Voice mode] The user said (by voice, transcribed on device): \"\(said)\""
-        if interrupted {
-            if let heard, !heard.isEmpty {
-                out += "\nThey talked over your spoken reply, which they heard up to: \"\(heard)\"."
-            } else {
-                out += "\nThey talked over your spoken reply."
-            }
-        }
-        return out
+    /// What the user said, as their own prompt: the plugin submits it as theirs
+    /// (`$.prompt.submit` with `asUser`), so it reads as they said it. Having
+    /// talked over the agent's reply, they say how far they had heard it.
+    static func prompt(said: String, interrupted: Bool, heard: String?) -> String {
+        guard interrupted else { return said }
+        let upTo = heard.flatMap { $0.isEmpty ? nil : " I'd heard up to “\($0)”." } ?? ""
+        if said.isEmpty { return "(I talked over your spoken reply, but my words weren't caught.\(upTo) What were you saying?)" }
+        return "\(said)\n\n(I talked over your spoken reply.\(upTo))"
     }
 
-    /// The user cut the reply off, but no words were caught.
-    static func interruptedWithoutWords(heard: String?) -> String {
-        var out = "[Voice mode] The user talked over your spoken reply, but no words were caught."
-        if let heard, !heard.isEmpty { out += " They heard it up to: \"\(heard)\"." }
-        return out + " Ask them, briefly, what they said."
+    /// What the agent is handed mid-turn, with the result of a tool call, for
+    /// something the user said while it worked.
+    static func midTurn(said: String, interrupted: Bool, heard: String?) -> String {
+        "[Hands-free] While you were working, the user said, by voice: "
+            + prompt(said: said.isEmpty ? "" : "“\(said)”", interrupted: interrupted, heard: heard)
     }
 }
 
@@ -105,8 +99,6 @@ struct VoiceModeHookInput {
     var source: String?
     /// SessionEnd: `clear`, `logout`, `prompt_input_exit`, …
     var reason: String?
-    var toolName: String?
-    var command: String?
     /// Notification: its words and kind (`permission_prompt`, `idle_prompt`, …).
     var message: String?
     var notificationType: String?
@@ -122,8 +114,6 @@ struct VoiceModeHookInput {
         transcriptPath = o["transcript_path"] as? String
         source = o["source"] as? String
         reason = o["reason"] as? String
-        toolName = o["tool_name"] as? String
-        command = (o["tool_input"] as? [String: Any])?["command"] as? String
         message = o["message"] as? String
         notificationType = o["notification_type"] as? String
     }
@@ -141,25 +131,5 @@ struct VoiceModeHookInput {
             if !texts.isEmpty { return texts.joined(separator: "\n") }
         }
         return nil
-    }
-}
-
-/// Which Bash commands voice mode lets the agent run without asking, while it
-/// is attached: its own controls, so "turn voice chat off" works with nobody at
-/// the keyboard. Only these exact shapes: anything a shell could expand or
-/// chain is asked about as usual.
-enum VoiceModeCommandGuard {
-    static func isVoiceControl(_ command: String) -> Bool {
-        let c = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        if c.range(of: #"^voice-mode( (stop|status|help))?$"#, options: .regularExpression) != nil { return true }
-        // `say` with one single-quoted argument: nothing inside single quotes is expanded.
-        if c.range(of: #"^voice-mode say '[^']*'$"#, options: .regularExpression) != nil { return true }
-        // …or a quoted heredoc, whose body is not expanded either, ending at its first `EOF` line.
-        let lines = c.components(separatedBy: "\n")
-        if lines.count >= 3, lines[0] == "voice-mode say <<'EOF'", lines.last == "EOF",
-           !lines.dropFirst().dropLast().contains("EOF") {
-            return true
-        }
-        return false
     }
 }

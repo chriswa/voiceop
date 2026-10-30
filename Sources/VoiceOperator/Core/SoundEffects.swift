@@ -45,6 +45,7 @@ enum SoundEffect: CaseIterable {
     case handsFreeShutdown          // hands-free turned off — an octave down, held low
     case handsFreeNotWakeWord       // speech that needed the trigger word did not start with it
     case handsFreePending           // one beat of the "deciding" beep, repeated while undecided
+    case handsFreeSonar             // one decaying echo, repeated while the agent works (Spaceterm's thinking cue)
 
     /// Global playback-speed multiplier for every cue. This lives with the
     /// cue definitions, rather than on the main-actor SoundBank, because the
@@ -142,6 +143,9 @@ enum SoundEffect: CaseIterable {
         // From the pending beep's G5, sliding sadly down a semitone at a time, then dropping to a long D5.
         case .handsFreeNotWakeWord: return [(784, 0.16), (740, 0.16), (698, 0.16), (587, 0.56)]
         case .handsFreePending: return [(784, 0.09), (0, 0.16)]
+        // B4, 0.24 s, five times with 0.06 s between, each half as loud (`segmentVolumes`); written at 2× for `speedup`.
+        case .handsFreeSonar: return [(494, 0.48), (0, 0.12), (494, 0.48), (0, 0.12), (494, 0.48), (0, 0.12),
+                                      (494, 0.48), (0, 0.12), (494, 0.48)]
         }
     }
 
@@ -157,6 +161,7 @@ enum SoundEffect: CaseIterable {
     var segmentVolumes: [Double] {
         switch self {
         case .transcriptionPending: return [1.0, 0, 0.50, 0, 0.25, 0, 0.12, 0, 0.06, 0]
+        case .handsFreeSonar: return [1.0, 0, 0.5, 0, 0.25, 0, 0.125, 0, 0.0625]
         default: return Array(repeating: 1.0, count: segments.count)
         }
     }
@@ -172,6 +177,8 @@ enum SoundEffect: CaseIterable {
         case .handsFreeReady, .handsFreeDictationStart, .handsFreeDictationEnd, .handsFreeConversationClosed,
              .handsFreeShutdown, .handsFreeNotWakeWord: return 0.6
         case .handsFreePending: return 0.35
+        // Spaceterm's loudest echo is 0.056 of full scale; this plays at 0.35 of `volume`.
+        case .handsFreeSonar: return 0.16
         default: return 1.0
         }
     }
@@ -208,6 +215,7 @@ enum SoundEffect: CaseIterable {
         case .handsFreeShutdown:        return "Hands-free shut down"
         case .handsFreeNotWakeWord:     return "Hands-free: not the trigger word"
         case .handsFreePending:         return "Hands-free deciding (one beat)"
+        case .handsFreeSonar:           return "Hands-free: the agent is working (one echo)"
         }
     }
 }

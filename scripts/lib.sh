@@ -82,7 +82,7 @@ record_released_version() {
     _set_plist_string Resources/Info.plist CFBundleVersion "$build"
     # The Claude Code plugin is released with the app, at the same version: a
     # changed version is what tells installed copies there is an update.
-    local plugin=claude-plugin/single-agent-voice-mode/.claude-plugin/plugin.json
+    local plugin=claude-plugin/handsfree/.claude-plugin/plugin.json
     sed -E "s/(\"version\": *\")[^\"]*\"/\\1$version\"/" "$plugin" > "$plugin.tmp" && mv "$plugin.tmp" "$plugin"
 }
 

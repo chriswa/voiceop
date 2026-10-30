@@ -12,6 +12,16 @@ final class HandsFreePhrasesTests: XCTestCase {
         XCTAssertNil(HandsFreePhrases.trigger(in: "", among: triggers))
     }
 
+    func testClaudeIsHeardAsClodOrClawedToo() {
+        for heard in ["Claude, what next", "Clod, what next", "Clawed. What next", "clawed what next"] {
+            XCTAssertEqual(HandsFreePhrases.trigger(in: heard, among: ["control", "claude"]), "claude", heard)
+        }
+        XCTAssertNil(HandsFreePhrases.trigger(in: "Clod, what next", among: ["control"]))
+        XCTAssertNil(HandsFreePhrases.trigger(in: "Cloud, what next", among: ["claude"]))
+        XCTAssertTrue(HandsFreePhrases.isShutdown("Clawed, shutdown.", trigger: "claude"))
+        XCTAssertTrue(HandsFreePhrases.isStopListening("Clod, stop listening", trigger: "claude"))
+    }
+
     func testWordsInTheConversationWindow() {
         XCTAssertTrue(HandsFreePhrases.judge("Yes.", triggers: ["control"]).words)
         XCTAssertTrue(HandsFreePhrases.judge("No, tell Evan.", triggers: ["control"]).words)

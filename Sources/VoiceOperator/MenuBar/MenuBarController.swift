@@ -12,7 +12,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let streamWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     /// Claude Code voice mode: what it is attached to, and a way out. Hidden while detached.
     private let voiceMode = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let voiceModeDetach = NSMenuItem(title: "Turn Off Claude Voice Mode", action: #selector(detachVoiceMode), keyEquivalent: "")
+    private let voiceModeDetach = NSMenuItem(title: "Turn Off Claude Hands-Free", action: #selector(detachVoiceMode), keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
     private let incognitoItem = NSMenuItem(title: "Incognito Mode", action: #selector(toggleIncognito), keyEquivalent: "")
     /// What incognito means, under its checkbox while it is on.

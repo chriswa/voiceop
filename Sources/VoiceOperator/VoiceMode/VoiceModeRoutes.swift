@@ -63,6 +63,10 @@ enum VoiceModeRoutes {
             let ok = await VoiceMode.shared.say(sessionID: form["session_id"] ?? "", text: text)
             return ok ? Answer(status: 202, object: ["spoken": true])
                 : Answer(status: 409, object: ["error": "not_attached", "detail": "voice mode is not attached to this session"])
+        case ("POST", "/working"):
+            let form = Self.form(body)
+            let ok = VoiceMode.shared.setWorking(sessionID: form["session_id"] ?? "", form["on"] == "1" || form["on"] == "true")
+            return ok ? Answer(status: 204) : Answer(status: 409, object: ["error": "not_attached"])
         case ("POST", "/simulate"):
             let text = Self.form(body)["text"] ?? ""
             let ok = VoiceMode.shared.simulate(text)
@@ -94,8 +98,6 @@ enum VoiceModeRoutes {
             return Answer(status: 200, text: String(generation))
         case "post-tool-use":
             return mode.midTurn(input).map { Answer(status: 200, object: $0) } ?? Answer(status: 204)
-        case "pre-tool-use":
-            return mode.preToolUse(input).map { Answer(status: 200, object: $0) } ?? Answer(status: 204)
         case "user-prompt-submit":
             return mode.promptSubmitted(input).map { Answer(status: 200, text: $0) } ?? Answer(status: 204)
         case "session-start":

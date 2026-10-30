@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""End to end: the single-agent-voice-mode plugin in a real interactive Claude Code.
+"""End to end: the handsfree plugin (a mod) in a real interactive Claude Code.
 
 Starts `claude` (haiku) in a pty with the plugin from this checkout, runs
-/single-agent-voice-mode:start, then plays the user through Voice Operator's
+/handsfree, then plays the user through Voice Operator's
 `/v1/voice-mode/simulate` (as if hands-free had heard it): a turn woken by
 speech, ten turns in a row, and "turn hands-free voice chat off", which the
-agent must act on by running `voice-mode stop`. Prints OK/TIMEOUT per step.
+agent must act on with its `mcp__handsfree__stop` tool. Prints OK/TIMEOUT per step.
 
 Needs the running Voice Operator to have voice mode (API 18). Every reply is
 spoken aloud, and attaching takes hands-free from Spaceterm.
@@ -15,7 +15,7 @@ spoken aloud, and attaching takes hands-free from Spaceterm.
 import os, pty, time, uuid, glob, select, re, json, sys, tempfile, urllib.request, urllib.parse
 SID = str(uuid.uuid4())
 WORK = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="voice-mode-e2e-")
-PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-plugin", "single-agent-voice-mode")
+PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-plugin", "handsfree")
 env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC")) and k not in {"CLAUDECODE", "AI_AGENT"}}
 env["TERM"] = "xterm-256color"
 pid, fd = pty.fork()
@@ -66,8 +66,8 @@ def typ(s):
 pump(8)
 if 'trust' in screen():
     os.write(fd, b"\x1b[B"); time.sleep(0.6); os.write(fd, b"\r"); pump(8)
-typ("/single-agent-voice-mode:start")
-wait_for(lambda: attached() and len(assistant_texts()) >= 1, 90, "attached + greeting")
+typ("/handsfree")
+wait_for(lambda: attached(), 60, "attached")
 print("ASSISTANT:", assistant_texts()[-3:])
 pump(6)
 n = len(assistant_texts())
@@ -83,6 +83,6 @@ wait_for(lambda: not attached(), 90, "detached by voice")
 pump(5)
 print("ASSISTANT tail:", assistant_texts()[-4:])
 tx = transcript()
-print("rewake records:", tx.count("Voice mode] The user said"))
+print("voice prompts:", tx.count("Reply with only the number"))
 os.kill(pid, 15)
 print("SID", SID)

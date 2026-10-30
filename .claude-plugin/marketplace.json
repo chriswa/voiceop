@@ -9,8 +9,8 @@
   },
   "plugins": [
     {
-      "name": "single-agent-voice-mode",
-      "source": "./claude-plugin/single-agent-voice-mode",
+      "name": "handsfree",
+      "source": "./claude-plugin/handsfree",
       "description": "Hands-free voice chat with one Claude Code session through Voice Operator: Kokoro speaks the agent's replies, Parakeet hears yours, with Voice Operator's trigger word, conversation window and talk-over interruption.",
       "category": "productivity"
     }

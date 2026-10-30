@@ -68,7 +68,7 @@ build output, so they keep working if the app is renamed. Run them from the repo
    correspond to a real commit on `main`, and `make-release.sh` builds exactly the
    version recorded here):
    ```bash
-   git add Resources/Info.plist claude-plugin/single-agent-voice-mode/.claude-plugin/plugin.json
+   git add Resources/Info.plist claude-plugin/handsfree/.claude-plugin/plugin.json
    git commit -m "Bump version to X.Y.Z"
    git push origin main
    ```

@@ -33,22 +33,26 @@ final class VoiceModeTextTests: XCTestCase {
         XCTAssertEqual(VoiceModeText.withoutTrigger("claude. what's next", trigger: "claude"), "What's next")
         XCTAssertEqual(VoiceModeText.withoutTrigger("Claudette is here", trigger: "claude"), "Claudette is here")
         XCTAssertEqual(VoiceModeText.withoutTrigger("Claude.", trigger: "claude"), "")
+        XCTAssertEqual(VoiceModeText.withoutTrigger("Clod, add a boss", trigger: "claude"), "Add a boss")
+        XCTAssertEqual(VoiceModeText.withoutTrigger("clawed. add a boss", trigger: "claude"), "Add a boss")
         XCTAssertEqual(VoiceModeText.withoutTrigger("make it red", trigger: nil), "Make it red")
     }
 
-    func testMessagesSayHowTheyCame() {
-        XCTAssertEqual(VoiceModeText.message(said: "Hi", whileWorking: false, interrupted: false, heard: nil),
-                       "[Voice mode] The user said (by voice, transcribed on device): \"Hi\"")
-        XCTAssertTrue(VoiceModeText.message(said: "Stop", whileWorking: false, interrupted: true, heard: "…the jump")
-            .hasSuffix("which they heard up to: \"…the jump\"."))
+    func testWhatTheUserSaidIsTheirOwnPrompt() {
+        XCTAssertEqual(VoiceModeText.prompt(said: "Hi", interrupted: false, heard: nil), "Hi")
+        XCTAssertEqual(VoiceModeText.prompt(said: "Stop", interrupted: true, heard: "…the jump"),
+                       "Stop\n\n(I talked over your spoken reply. I'd heard up to “…the jump”.)")
+        XCTAssertEqual(VoiceModeText.prompt(said: "", interrupted: true, heard: nil),
+                       "(I talked over your spoken reply, but my words weren't caught. What were you saying?)")
+        XCTAssertEqual(VoiceModeText.midTurn(said: "Also red", interrupted: false, heard: nil),
+                       "[Hands-free] While you were working, the user said, by voice: “Also red”")
         XCTAssertEqual(VoiceModeText.tail("one two three", words: 2), "…two three")
     }
 
     func testHookInput() throws {
-        let json = #"{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"voice-mode stop"},"last_assistant_message":"Hi"}"#
+        let json = #"{"session_id":"s1","hook_event_name":"Stop","last_assistant_message":"Hi"}"#
         let input = try XCTUnwrap(VoiceModeHookInput(json: Data(json.utf8)))
         XCTAssertEqual(input.sessionID, "s1")
-        XCTAssertEqual(input.command, "voice-mode stop")
         XCTAssertEqual(input.lastAssistantMessage, "Hi")
         XCTAssertNil(VoiceModeHookInput(json: Data("nope".utf8)))
     }
@@ -62,18 +66,6 @@ final class VoiceModeTextTests: XCTestCase {
         {"type":"system","subtype":"stop_hook_summary"}
         """
         XCTAssertEqual(VoiceModeHookInput.lastAssistantText(transcript: transcript), "All done.\nBye.")
-    }
-
-    func testOnlyVoiceModeControlsGoAheadUnasked() {
-        for ok in ["voice-mode stop", "voice-mode status", "voice-mode", " voice-mode stop\n",
-                   "voice-mode say 'On it, give me a minute.'", "voice-mode say <<'EOF'\nI'll be a minute.\nEOF"] {
-            XCTAssertTrue(VoiceModeCommandGuard.isVoiceControl(ok), ok)
-        }
-        for no in ["voice-mode stop; rm -rf ~", "voice-mode stop && ls", "voice-mode say \"$(whoami)\"",
-                   "voice-mode say 'a' 'b'", "voice-mode say 'it's'", "voice-mode start", "voice-mode stop | sh",
-                   "voice-mode say <<'EOF'\nx\nEOF\nrm -rf ~\nEOF", "voice-mode say <<EOF\n$(id)\nEOF", "ls"] {
-            XCTAssertFalse(VoiceModeCommandGuard.isVoiceControl(no), no)
-        }
     }
 
     func testFormBodies() {
@@ -136,7 +128,7 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertEqual(registered, ["-", "claude"])
         XCTAssertEqual(handsFree, [true])
         XCTAssertEqual(saved.last??.sessionID, "s1")
-        XCTAssertEqual(mode.menuTitle, "Claude Voice Mode: game — say “Claude”")
+        XCTAssertEqual(mode.menuTitle, "Claude Hands-Free: game — say “Claude”")
     }
 
     func testIncognitoRefusesToAttach() {
@@ -168,7 +160,7 @@ final class VoiceModeTests: XCTestCase {
                         "interrupted": false, "reason": "mini", "shutdown": false])
         XCTAssertEqual(cues, [.handsFreeDictationStart])
         let next = await mode.next(sessionID: "s1", generation: 1, wait: .zero)
-        XCTAssertEqual(next, .message("[Voice mode] The user said (by voice, transcribed on device): \"Make it jump higher.\""))
+        XCTAssertEqual(next, .message("Make it jump higher."))
         // A later turn's hook replaces this one; another session's is not this one.
         _ = await mode.turnEnded(input("s1", ["last_assistant_message": "Done."]))
         let replaced = await mode.next(sessionID: "s1", generation: 1, wait: .zero)
@@ -177,6 +169,25 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertEqual(other, .gone("not_attached"))
         let unattached = await mode.turnEnded(input("s2", ["last_assistant_message": "x"]))
         XCTAssertNil(unattached)
+    }
+
+    func testASonarPlaysWhileTheAgentWorks() async throws {
+        let mode = make()
+        mode.sonarTiming = (.milliseconds(10), .milliseconds(20))
+        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
+        XCTAssertFalse(mode.setWorking(sessionID: "s2", true), "another session's turn")
+        mode.handsFree(["type": "state", "phase": "listening", "pending": false])
+        XCTAssertTrue(mode.setWorking(sessionID: "s1", true))
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertGreaterThanOrEqual(cues.filter { $0 == .handsFreeSonar }.count, 2)
+        // The user talking holds it off; the turn's end stops it.
+        mode.handsFree(["type": "state", "phase": "hearing", "pending": false])
+        try await Task.sleep(for: .milliseconds(30))
+        let held = cues.count
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(cues.count, held)
+        _ = await mode.turnEnded(input("s1", ["last_assistant_message": "Done."]))
+        XCTAssertFalse(mode.isWorking)
     }
 
     func testWordsMidTurnGoWithTheNextToolResult() throws {
@@ -188,7 +199,7 @@ final class VoiceModeTests: XCTestCase {
         let output = try XCTUnwrap(mode.midTurn(input("s1"))?["hookSpecificOutput"] as? [String: Any])
         XCTAssertEqual(output["hookEventName"] as? String, "PostToolUse")
         XCTAssertEqual(output["additionalContext"] as? String,
-                       "[Voice mode] While you were working, the user said (by voice, transcribed on device): \"Also make it red\"")
+                       "[Hands-free] While you were working, the user said, by voice: “Also make it red”")
         XCTAssertNil(mode.midTurn(input("s1")))
     }
 
@@ -202,8 +213,7 @@ final class VoiceModeTests: XCTestCase {
         mode.handsFree(["type": "transcript", "text": "No wait", "trigger": NSNull(), "interrupted": true,
                         "reason": "silence", "shutdown": false])
         let next = await mode.next(sessionID: "s1", generation: 1, wait: .zero)
-        XCTAssertEqual(next, .message("[Voice mode] The user said (by voice, transcribed on device): \"No wait\"\n"
-                                      + "They talked over your spoken reply, which they heard up to: \"I raised\"."))
+        XCTAssertEqual(next, .message("No wait\n\n(I talked over your spoken reply. I'd heard up to “I raised”.)"))
     }
 
     func testSpaceTermTakingItBackDetachesAndTellsTheSession() throws {
@@ -215,7 +225,7 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertNil(mode.attachment)
         XCTAssertNil(saved.last!)
         XCTAssertEqual(mode.promptSubmitted(input("s1")),
-                       "[Voice mode] Voice mode was turned off: Spaceterm took hands-free back. "
+                       "[Hands-free] Hands-free was turned off: Spaceterm took hands-free back. "
                        + "Your replies are no longer spoken; answer in text as usual.")
         XCTAssertNil(mode.promptSubmitted(input("s1")), "said once")
     }
@@ -241,15 +251,6 @@ final class VoiceModeTests: XCTestCase {
         mode.sessionEnded(input("s9", ["reason": "prompt_input_exit"]))
         XCTAssertNil(mode.attachment)
         XCTAssertNil(mode.promptSubmitted(input("s9")), "the session ended itself: no notice")
-    }
-
-    func testOnlyItsOwnControlsArePreApproved() throws {
-        let mode = make()
-        let stop = input("s1", ["tool_name": "Bash", "tool_input": ["command": "voice-mode stop"]])
-        XCTAssertNil(mode.preToolUse(stop), "not attached: asked as usual")
-        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/a", trigger: nil, voice: nil)
-        XCTAssertNotNil(mode.preToolUse(stop))
-        XCTAssertNil(mode.preToolUse(input("s1", ["tool_name": "Bash", "tool_input": ["command": "rm -rf /"]])))
     }
 
     func testRestoreSkipsAGoneSession() throws {

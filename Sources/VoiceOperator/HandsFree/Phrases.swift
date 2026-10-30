@@ -48,12 +48,23 @@ enum HandsFreePhrases {
         return out
     }
 
+    /// What Apple's model writes for a trigger word as often as the word:
+    /// "Claude" comes back as "clod" or "clawed". Each counts as the word.
+    static let soundsLike: [String: [String]] = ["claude": ["clod", "clawed"]]
+
+    /// Whether `word` (one spoken word, lowercased) is `trigger`, or sounds like it.
+    static func isTrigger(_ word: String, _ trigger: String) -> Bool {
+        let trigger = spokenWords(trigger)
+        guard trigger.count == 1 else { return false }
+        return word == trigger[0] || soundsLike[trigger[0]]?.contains(word) == true
+    }
+
     /// The trigger word the words begin with, if any of `triggers` — the first
     /// word only: "Control, what's Kevin doing" counts; "under control" and
     /// "controller" do not.
     static func trigger(in heard: String, among triggers: [String]) -> String? {
         guard let first = spokenWords(heard).first else { return nil }
-        return triggers.first { spokenWords($0) == [first] }
+        return triggers.first { isTrigger(first, $0) }
     }
 
     /// Lowercased letters-only words, "lemme" as dictation sometimes writes "let me".
@@ -86,7 +97,7 @@ enum HandsFreePhrases {
     /// `phraseWords` with `trigger` taken off the front, if it is there.
     private static func phraseWords(_ text: String, after trigger: String?) -> [String] {
         var words = phraseWords(text)
-        if let trigger, let first = words.first, phraseWords(trigger) == [first] { words.removeFirst() }
+        if let trigger, let first = words.first, isTrigger(first, trigger) { words.removeFirst() }
         return words
     }
 

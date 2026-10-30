@@ -58,6 +58,9 @@ final class HandsFreeService: @unchecked Sendable {
     var isBusy: Bool { busyLock.withLock { busyCount > 0 } }
     /// Called (on any thread) when the last busy session goes idle.
     var onIdle: (@Sendable () -> Void)?
+    /// Hands-free on the Mac's microphone as the menu-bar icon shows it, on each change; nil when off.
+    var onMacLook: (@Sendable (HandsFreeLook?) -> Void)?
+    private var macLook: HandsFreeLook?
 
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: Connection] = [:]
@@ -467,6 +470,7 @@ final class HandsFreeService: @unchecked Sendable {
         guard mac.engine.clients.isEmpty else { return }
         self.mac = nil
         setBusy("mac", false)
+        setMacLook(nil)
         setMicrophoneListener?(nil)
         Log.log("hands-free: off on the Mac's microphone (\(why))")
     }
@@ -520,11 +524,23 @@ final class HandsFreeService: @unchecked Sendable {
         return out
     }
 
+    private func setMacLook(_ look: HandsFreeLook?) {
+        guard look != macLook else { return }
+        macLook = look
+        onMacLook?(look)
+    }
+
     private func deliverMac(_ outgoing: HandsFreeEngine.Outgoing) {
         let targets = outgoing.client.map { [$0] } ?? (mac?.engine.clients ?? [])
         for name in targets { clients[name]?.connection.send(Self.wire(outgoing.event)) }
-        if case .state(let phase, _, _, _, _, _) = outgoing.event {
+        if case .state(let phase, let conversation, _, _, _, _) = outgoing.event {
             setBusy("mac", phase == .hearing || phase == .sending)
+            switch phase {
+            case .off: setMacLook(nil)
+            case .listening: setMacLook(conversation ? .conversation : .waiting)
+            case .hearing: setMacLook(.hearing)
+            case .sending: setMacLook(.sending)
+            }
         }
         // "Let me turn this off" ends hands-free hands-free: after the words and the cue have gone.
         if case .transcript(_, _, _, _, true) = outgoing.event, let client = outgoing.client {

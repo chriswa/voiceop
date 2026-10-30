@@ -293,6 +293,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         handsFree.host.echoExperiment = EchoExperiment.isOn
         let arbiter = self.arbiter
         handsFree.setMicrophoneListener = { handler in arbiter.setHandsFreeListener(handler) }
+        let menuBar = self.menuBar
+        handsFree.onMacLook = { look in
+            DispatchQueue.main.async { MainActor.assumeIsolated { menuBar.update(handsFree: look) } }
+        }
         do { try handsFree.start() } catch { Log.log("hands-free: could not start: \(error)") }
         // Claude Code voice mode, attached before this launch, is picked up again.
         VoiceMode.shared.onChange = { [weak self] in self?.menuBar.update(voiceMode: VoiceMode.shared.menuTitle) }

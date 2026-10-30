@@ -180,10 +180,19 @@ enum DebugCLI {
             TranscriptStyle(discard: true),
         ]
         let statuses: [OperatorStatus] = [.listening, .commandListening]
+        // Each status across the styles, then hands-free's looks: waiting for the trigger word, the
+        // conversation window, hearing, sending, and the window in incognito.
+        var icons: [[NSImage]] = statuses.map { status in
+            styles.map { MenuBarController.icon(status: status, muted: false, style: $0) }
+        }
+        icons.append([(HandsFreeLook.waiting, false), (.conversation, false), (.hearing, false), (.sending, false),
+                      (.conversation, true)].map { look, incognito in
+            MenuBarController.icon(status: .idle, muted: false, incognito: incognito, handsFree: look)
+        })
         let scale: CGFloat = 2, zoom: CGFloat = 8, pad: CGFloat = 4
         let cell = MenuBarController.icon(status: .listening, muted: false).size
 
-        let cols = styles.count, rows = statuses.count * 2   // × light/dark
+        let cols = styles.count, rows = icons.count * 2   // × light/dark
         let cellW = (cell.width + pad * 2) * zoom, cellH = (cell.height + pad * 2) * zoom
         let sheet = NSSize(width: cellW * CGFloat(cols), height: cellH * CGFloat(rows))
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
@@ -196,16 +205,15 @@ enum DebugCLI {
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         NSGraphicsContext.current?.imageInterpolation = .none
         var row = 0
-        for status in statuses {
+        for iconRow in icons {
             for dark in [true, false] {
                 let bg: NSColor = dark ? NSColor(white: 0.13, alpha: 1) : NSColor(white: 0.93, alpha: 1)
-                for (col, style) in styles.enumerated() {
+                for (col, icon) in iconRow.enumerated() {
                     let frame = NSRect(x: CGFloat(col) * cellW, y: sheet.height - CGFloat(row + 1) * cellH,
                                        width: cellW, height: cellH)
                     bg.setFill(); frame.fill()
                     // Render the icon into its own 2× bitmap first, so the zoom
                     // magnifies real pixels rather than re-rendering vectors.
-                    let icon = MenuBarController.icon(status: status, muted: false, style: style)
                     guard let small = NSBitmapImageRep(bitmapDataPlanes: nil,
                                                        pixelsWide: Int(cell.width * scale),
                                                        pixelsHigh: Int(cell.height * scale),
@@ -236,8 +244,8 @@ enum DebugCLI {
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         do {
             try png.write(to: url)
-            print("icon preview → \(url.path)  (rows: listening dark/light, command dark/light; "
-                  + "cols: normal, a, a+x, x, trash)")
+            print("icon preview → \(url.path)  (rows: listening dark/light, command dark/light, hands-free dark/light; "
+                  + "cols: normal, a, a+x, x, trash — hands-free: trigger word needed, window, hearing, sending, incognito)")
         } catch {
             FileHandle.standardError.write(Data("icon-preview failed: \(error)\n".utf8))
         }

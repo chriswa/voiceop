@@ -46,6 +46,34 @@ enum OperatorStatus: String, Equatable {
     }
 }
 
+/// Hands-free on the Mac's microphone, as the menu-bar icon shows it while
+/// nothing else is: listening for the trigger word (a pastel rainbow),
+/// listening in the conversation window where no trigger word is needed (a
+/// rainbow), taking a dictation down (red, as a Fn dictation), and sending it
+/// (yellow, as transcribing). Speech, and anything a Fn dictation is doing,
+/// wins over it: the icon goes back to hands-free's look when they are done.
+enum HandsFreeLook: Equatable {
+    case waiting, conversation, hearing, sending
+
+    /// Its own colour, or nil for a rainbow (`MenuBarController.icon`).
+    var tint: NSColor? {
+        switch self {
+        case .hearing: return .systemRed
+        case .sending: return .systemYellow
+        case .waiting, .conversation: return nil
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .waiting: return "hands-free: say the trigger word"
+        case .conversation: return "hands-free: listening, no trigger word needed"
+        case .hearing: return "hands-free: taking your words down"
+        case .sending: return "hands-free: transcribing"
+        }
+    }
+}
+
 extension DictationMode {
     /// The capture status this mode shows in the menu bar.
     var listeningStatus: OperatorStatus { self == .command ? .commandListening : .listening }

@@ -924,6 +924,14 @@ cancelled, lays each phrase over each reply, and asks the trigger-word check
 what it hears. Captures go to `echo-captures/` in Application Support, and are
 refused in incognito.
 
+**The menu-bar icon** shows hands-free on the Mac's microphone whenever the
+status has no colour of its own (`HandsFreeLook`): a washed-out rainbow while
+the trigger word is needed, a full rainbow in the conversation window, red
+while it takes a dictation down and yellow while it sends it — as a Fn
+dictation and transcribing are. Speech (green, cyan) and anything a Fn
+dictation does win over it. (Incognito ends hands-free, so the sunglasses never wear it.)
+`--icon-preview` draws them all.
+
 **Incognito** ends every session and refuses new ones: what hands-free hears
 goes to a client.
 

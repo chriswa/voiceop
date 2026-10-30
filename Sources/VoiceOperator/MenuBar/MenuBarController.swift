@@ -135,6 +135,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private var currentStyle: TranscriptStyle = .normal
     private var streamHealth: StreamHealth = .unverified
     private var incognito = false
+    private var handsFree: HandsFreeLook?
 
     override init() {
         super.init(); menu.delegate = self; status.isEnabled = false; menu.addItem(status)
@@ -287,6 +288,13 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         incognito = on
         incognitoItem.state = on ? .on : .off
         incognitoNote.isHidden = !on
+        refreshIcon()
+    }
+    /// Hands-free on the Mac's microphone, or nil while it is off: the icon's
+    /// colour whenever the status itself has none.
+    func update(handsFree look: HandsFreeLook?) {
+        guard look != handsFree else { return }
+        handsFree = look
         refreshIcon()
     }
     func refreshHistory() { }
@@ -499,8 +507,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private func refreshIcon() {
         guard let button = statusItem.button else { return }
         button.image = Self.icon(status: currentStatus, muted: muted, style: currentStyle,
-                                 degraded: streamHealth.isDegraded, incognito: incognito)
+                                 degraded: streamHealth.isDegraded, incognito: incognito, handsFree: handsFree)
+        let showsHandsFree = currentStatus.tint == nil && handsFree != nil
         button.image?.accessibilityDescription = currentStatus.accessibilityLabel
+            + (showsHandsFree ? " — \(handsFree?.accessibilityLabel ?? "")" : "")
             + (incognito ? " (incognito)" : "")
             + (Self.badgesVisible(status: currentStatus, style: currentStyle)
                ? " (\(currentStyle.accessibilityLabel))" : "")
@@ -512,8 +522,13 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// menu-bar appearance. Incognito only changes the base symbol: the tints,
     /// the mute ring and the badges all draw over it exactly as they do over
     /// the megaphone, and a discarded dictation's trash can still wins.
+    ///
+    /// Hands-free (`handsFree`) colours the icon only while the status has no
+    /// colour of its own — so speech (green) and a Fn dictation win over it.
+    /// Listening, it is a rainbow: vivid in the conversation window, washed out
+    /// while the trigger word is needed.
     static func icon(status: OperatorStatus, muted: Bool, style: TranscriptStyle = .normal,
-                     degraded: Bool = false, incognito: Bool = false) -> NSImage {
+                     degraded: Bool = false, incognito: Bool = false, handsFree: HandsFreeLook? = nil) -> NSImage {
         let showsDiscard = style.discard && (status == .listening || status == .commandListening)
         let name = showsDiscard ? "trash.fill" : incognito ? "sunglasses.fill" : "megaphone.fill"
         let base = NSImage(systemSymbolName: name, accessibilityDescription: "Voice Operator")
@@ -522,12 +537,20 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             ?? NSImage(size: NSSize(width: 18, height: 18))
         // A degraded icon is badged in colour, so like the muted ring it cannot
         // be a template image even at idle.
-        let template = status.tint == nil && !muted && !degraded
-        let color = status.tint ?? .labelColor
+        let look = status.tint == nil ? handsFree : nil
+        let tint = status.tint ?? look?.tint
+        let rainbow = look != nil && tint == nil ? rainbowGradient(pastel: look == .waiting) : nil
+        let template = tint == nil && rainbow == nil && !muted && !degraded
+        let color = tint ?? .labelColor
         let badges = badgesVisible(status: status, style: style)
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             symbol.draw(in: rect)
-            if !template { color.set(); rect.fill(using: .sourceAtop) }
+            if let rainbow {
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current?.compositingOperation = .sourceAtop
+                rainbow.draw(in: rect, angle: 0)
+                NSGraphicsContext.restoreGraphicsState()
+            } else if !template { color.set(); rect.fill(using: .sourceAtop) }
             if muted {
                 color.setStroke()
                 let path = NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)); path.lineWidth = 1.5; path.stroke()
@@ -543,6 +566,16 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         // image even when the status itself would have been.
         image.isTemplate = template && !badges
         return image
+    }
+
+    /// Red to violet, left to right; `pastel` washed 42% of the way to white — any further and it vanishes on a light menu bar.
+    private nonisolated static func rainbowGradient(pastel: Bool) -> NSGradient? {
+        let hues: [(CGFloat, CGFloat, CGFloat)] = [(1, 0.23, 0.19), (1, 0.58, 0), (1, 0.84, 0), (0.2, 0.78, 0.35),
+                                                   (0, 0.48, 1), (0.69, 0.32, 0.87)]
+        let wash: CGFloat = pastel ? 0.42 : 0
+        return NSGradient(colors: hues.map { r, g, b in
+            NSColor(srgbRed: r + (1 - r) * wash, green: g + (1 - g) * wash, blue: b + (1 - b) * wash, alpha: 1)
+        })
     }
 
     /// The badges describe the dictation being recorded, so they show only while

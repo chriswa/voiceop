@@ -187,8 +187,16 @@ async function listen($: $): Promise<void> {
         return
       }
       if (answer.status === 410) {
-        if (answer.text === 'not_attached') detached($)
-        return
+        if (answer.text === 'not_attached') { detached($); return }
+        // Superseded: a turn ended while this poll waited, and its `turn.complete` found this
+        // loop still running and left it to carry on — so carry on, under Voice Operator's turn.
+        // Returning here left nobody listening, and what the user said next sat undelivered
+        // until hands-free was turned off and it was thrown away (October 29).
+        const status = await vo($, '')
+        const generation = Number(field(status, 'generation'))
+        if (field(status, 'session_id') === self.sessionId && generation > 0) self.generation = generation
+        else await $.clock.sleep(2000)
+        continue
       }
       if (answer.status !== 204) await $.clock.sleep(2000)
     }

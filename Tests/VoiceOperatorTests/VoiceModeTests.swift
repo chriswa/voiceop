@@ -190,6 +190,38 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertFalse(mode.isWorking)
     }
 
+    func testWhatNobodyIsWaitingForIsStrandedNotLost() async throws {
+        var stranded: [String] = []
+        let mode = VoiceMode(deps: .init(
+            registerHandsFree: { _, _ in nil },
+            setHandsFree: { _ in }, unregisterHandsFree: {}, openConversation: {},
+            speak: { _, _ in "job" }, cancelSpeech: { _, _ in 0 },
+            playCue: { _ in }, stopCue: { _ in },
+            pidAlive: { _ in true }, save: { _ in }, stranded: { stranded.append($0) }))
+        mode.deliveryGrace = .milliseconds(50)
+        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
+        // A poll waiting: delivered, nothing stranded.
+        let poll = Task { await mode.next(sessionID: "s1", generation: 0, wait: .seconds(2)) }
+        try await Task.sleep(for: .milliseconds(20))
+        transcript(mode, "Claude, make it jump higher.")
+        let got = await poll.value
+        XCTAssertEqual(got, .message("Make it jump higher."))
+        // Nobody polling, the agent idle: on the clipboard after the grace.
+        transcript(mode, "Claude, and the corners rounder.")
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(stranded, ["And the corners rounder."])
+        XCTAssertEqual(mode.status["waiting_messages"] as? Int, 0)
+        // Said, then turned off before anything took it.
+        transcript(mode, "Claude, one more thing.")
+        mode.detach(.asked)
+        XCTAssertEqual(stranded.last, "One more thing.")
+    }
+
+    private func transcript(_ mode: VoiceMode, _ text: String) {
+        mode.handsFree(["type": "transcript", "text": text, "trigger": "claude", "interrupted": false,
+                        "reason": "mini", "shutdown": false])
+    }
+
     func testThePendingBeepDoesNotMakeHandsFreeStandAside() async throws {
         var link: HandsFreeClientLink?
         let mode = VoiceMode(deps: .init(

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Claude Code's voice mode: hands-free locked to one Claude Code session, so
@@ -100,6 +101,8 @@ final class VoiceMode {
         var pidAlive: (Int32) -> Bool
         var save: (Attachment?) -> Void
         var now: () -> Date = Date.init
+        /// What the user said can reach nobody: on the clipboard, with the error cue, so it is not lost.
+        var stranded: (String) -> Void = { _ in }
 
         static var live: Deps { Deps(
             registerHandsFree: { trigger, link in
@@ -126,6 +129,11 @@ final class VoiceMode {
                 } else {
                     try? FileManager.default.removeItem(at: VoiceMode.stateURL)
                 }
+            },
+            stranded: { text in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                SoundEffect.transcriptionFailed.play()
             }) }
     }
 
@@ -153,6 +161,10 @@ final class VoiceMode {
     private(set) var echoExperiment: String?
     /// What the user said that no hook has taken yet, oldest first.
     private(set) var inbox: [Heard] = []
+    /// `next` polls waiting now: someone to hand what is said to, while the agent is idle.
+    private var waiting = 0
+    /// How long what was said may wait, with the agent idle and nobody polling `next`, before it is stranded.
+    var deliveryGrace: Duration = .seconds(5)
 
     struct Heard: Equatable {
         /// Their words, trigger word off; empty when they talked over the reply and nothing was caught.
@@ -240,7 +252,7 @@ final class VoiceMode {
     func detach(_ why: Detach) {
         guard let current = attachment else { return }
         attachment = nil
-        inbox = []
+        strand(why: "hands-free went off before it was delivered")
         phase = "off"
         conversation = false
         standingAside = nil
@@ -336,6 +348,8 @@ final class VoiceMode {
     /// at once if something is waiting, or the first thing said within `wait`.
     func next(sessionID: String, generation: Int, wait: Duration) async -> Next {
         let deadline = ContinuousClock.now + wait
+        waiting += 1
+        defer { waiting -= 1 }
         while true {
             guard let current = attachment, current.sessionID == sessionID else { return .gone("not_attached") }
             guard current.generation == generation else { return .gone("superseded") }
@@ -495,6 +509,26 @@ final class VoiceMode {
         guard !said.isEmpty || interrupted else { return }
         inbox.append(Heard(said: said, interrupted: interrupted, heard: heard))
         Log.log("voice mode: heard \(said.count) chars\(interrupted ? " (over the reply)" : "") for \(attachment?.project ?? "?")")
+        let session = attachment?.sessionID
+        let grace = deliveryGrace
+        Task { [weak self] in
+            try? await Task.sleep(for: grace)
+            guard let self, self.attachment?.sessionID == session, !self.inbox.isEmpty,
+                  !self.isWorking, self.waiting == 0 else { return }
+            self.strand(why: "the session is not listening for it")
+        }
+    }
+
+    /// What was said, and cannot be delivered: on the clipboard, with the error
+    /// cue, rather than thrown away. With the agent idle and no `next` poll
+    /// waiting, the plugin's listener is gone, and nothing would take it.
+    private func strand(why: String) {
+        guard !inbox.isEmpty else { return }
+        let text = inbox.map(\.said).filter { !$0.isEmpty }.joined(separator: "\n\n")
+        inbox = []
+        guard !text.isEmpty else { return }
+        Log.log("voice mode: \(text.count) chars undelivered — \(why); copied to the clipboard")
+        deps.stranded(text)
     }
 
     /// One of hands-free's messages to this client (DESIGN.md "Hands-free", protocol).

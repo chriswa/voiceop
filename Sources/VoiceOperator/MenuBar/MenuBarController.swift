@@ -570,9 +570,13 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
 
     /// Red to violet, left to right; `pastel` washed 42% of the way to white — any further and it vanishes on a light menu bar.
     private nonisolated static func rainbowGradient(pastel: Bool) -> NSGradient? {
-        let hues: [(CGFloat, CGFloat, CGFloat)] = [(1, 0.23, 0.19), (1, 0.58, 0), (1, 0.84, 0), (0.2, 0.78, 0.35),
-                                                   (0, 0.48, 1), (0.69, 0.32, 0.87)]
-        let wash: CGFloat = pastel ? 0.42 : 0
+        // Full: saturated primaries in Display P3, past what sRGB can show, on the screens that can.
+        let hues: [(CGFloat, CGFloat, CGFloat)] = [(1, 0, 0.1), (1, 0.45, 0), (1, 0.9, 0), (0, 0.9, 0.2),
+                                                   (0, 0.4, 1), (0.6, 0, 1)]
+        guard pastel else {
+            return NSGradient(colors: hues.map { r, g, b in NSColor(displayP3Red: r, green: g, blue: b, alpha: 1) })
+        }
+        let wash: CGFloat = 0.42
         return NSGradient(colors: hues.map { r, g, b in
             NSColor(srgbRed: r + (1 - r) * wash, green: g + (1 - g) * wash, blue: b + (1 - b) * wash, alpha: 1)
         })

@@ -1065,8 +1065,14 @@ microphone back automatically when the taker lets go.
   `VoiceModeText.prompt` puts it: bare, or with "(I talked over your spoken
   reply. I'd heard up to “…”.)". The mod submits it with `$.prompt.submit({
   text, asUser: true })`, so it is a real user prompt (origin `plugin`,
-  `asUser`), not a notification or a hook message. A `410` stops the poll:
-  detached, or superseded.
+  `asUser`), not a notification or a hook message. A `410 not_attached`
+  stops the poll; `410 superseded` (a turn ended while it waited) carries on
+  under Voice Operator's turn — stopping there left nobody listening, since
+  the turn's end had found the poll still running and not started another.
+- Nothing said is thrown away: with the main thread idle and no `next` poll
+  waiting for `deliveryGrace` (5 s), or hands-free turned off with it still in
+  `inbox`, it goes on the clipboard with the error cue
+  (`voice mode: … undelivered` in the log).
 - Speech that arrives while the main thread works waits in `inbox`. The mod's
   `tool.call` hook fetches it (`hooks/post-tool-use`) and hands it to the
   model as `context` on that tool result, marked `[Hands-free]`.

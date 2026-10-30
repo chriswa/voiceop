@@ -80,7 +80,7 @@ if 'trust' in screen():
 typ("/handsfree")
 wait_for(lambda: attached(), 60, "attached")
 squash = lambda: screen().replace(" ", "")
-wait_for(lambda: "Hands-free·" in squash() and ("Keeptalking" in squash() or "first" in squash()), 30, "band above the prompt")
+wait_for(lambda: "transcribing" in squash() and ("Keeptalking" in squash() or "first" in squash()), 30, "band above the prompt")
 print("ASSISTANT:", assistant_texts()[-3:])
 pump(6)
 n = len(assistant_texts())

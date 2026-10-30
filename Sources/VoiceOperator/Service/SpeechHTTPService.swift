@@ -173,7 +173,7 @@ final class SpeechHTTPService: @unchecked Sendable {
                 return .init(status: 409, object: ["error": "busy"])
             }
             let way = r.query["way"].flatMap { $0.isEmpty ? nil : $0 }
-            let text = await HeadsetProbe.run(only: way)
+            let text = await HeadsetProbe.run(only: way, cues: r.query["cues"] == "1")
             return .init(status: 200, object: ["report": text])
         }
         if let route = TranscriptionRoute(method: r.method, path: r.path) {

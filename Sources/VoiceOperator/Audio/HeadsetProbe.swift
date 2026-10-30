@@ -33,7 +33,7 @@ enum HeadsetProbe {
     /// The report, as printed. Also run inside the app (`POST /v1/debug/headset-probe?way=`),
     /// which has the microphone permission a process started from a terminal may not.
     @discardableResult
-    static func run(only: String? = nil) async -> String {
+    static func run(only: String? = nil, cues: Bool = false) async -> String {
         report = []
         defer { Log.log("headset-probe:\n" + report.joined(separator: "\n")) }
         note("headset-probe: output \(OutputDevice.formatSummary). Each way opens the default input for 1.5 s, "
@@ -42,6 +42,9 @@ enum HeadsetProbe {
             queuePeak = 0
             queueBuffers = 0
             try? await Task.sleep(for: .seconds(4))   // let the last one settle
+            // `cues`: the start cue as the microphone opens, the finish cue as it closes, so
+            // a listener can say when the music dropped: at one, or ~2 s after the second.
+            if cues { await MainActor.run { DictationMode.paste.startCue.play() } }
             let opening = DeviceSettleWatch()
             guard let close = open() else { note("\(name): could not open"); continue }
             try? await Task.sleep(for: .seconds(1.5))
@@ -49,6 +52,7 @@ enum HeadsetProbe {
             let closing = DeviceSettleWatch()
             let closedAt = Date()
             close()
+            if cues { await MainActor.run { DictationMode.paste.finishCue.play() } }
             let closeMs = Date().timeIntervalSince(closedAt) * 1000
             try? await Task.sleep(for: .seconds(4))
             closing.stop()

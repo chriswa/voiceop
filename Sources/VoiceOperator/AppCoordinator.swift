@@ -186,6 +186,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             applyMicrophonePolicy(reason: "menu")
             return AudioPreferences.keepMicrophoneOpenForWireless
         }
+        menuBar.macMicrophoneWithHeadsetsState = { AudioPreferences.macMicrophoneWithHeadsets }
+        menuBar.onToggleMacMicrophoneWithHeadsets = { [unowned self] in
+            AudioPreferences.macMicrophoneWithHeadsets.toggle()
+            Log.log("recorder: the Mac's own microphone with headsets \(AudioPreferences.macMicrophoneWithHeadsets ? "on" : "off") (menu)")
+            arbiter.macMicrophoneChoiceChanged()
+            return AudioPreferences.macMicrophoneWithHeadsets
+        }
         menuBar.echoExperimentState = { EchoExperiment.isOn }
         menuBar.onToggleEchoExperiment = {
             EchoExperiment.isOn.toggle()

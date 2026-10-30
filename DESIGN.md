@@ -442,6 +442,15 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
 
 ### Holding the microphone open (2026-09-05)
 
+**The Mac's microphone with headsets (2026-10-29).** A third way, a menu
+checkbox (`AudioPreferences.macMicrophoneWithHeadsets`, default off): while the
+output is a Bluetooth headset, the capture engine's input is pointed at the
+Mac's own microphone (`kAudioOutputUnitProperty_CurrentDevice` on its input
+unit, `AudioRecorder.applyInputChoiceOnQueue`), whatever the system's input is.
+The headset's microphone is never opened, so it never switches; when the output
+stops being a headset, a fresh engine follows the default input again.
+Hands-free hears the same microphone.
+
 **Without the hold (2026-10-29).** When a dictation opens a Bluetooth headset's
 microphone itself (`LiveDictation.headsetSwitches`: wireless output, not held
 open by the preference or hands-free), the arbiter works around the switch
@@ -455,8 +464,10 @@ closing cue played, once the switch back has happened: a full reconfiguration
 of the output (`out:cfgb` … `out:cfge`) about 2.15 s after the microphone closes —
 macOS holds the voice link that long — and no longer (4 s cap). Every sound
 the dictation makes after key-up (the closing cue, the pasted cue, an error)
-waits for the unmute (`whenOutputIsBack`); the transcribing beep is skipped
-while muted. The format-change
+waits for the unmute (`whenOutputIsBack`) and then 500 ms more — played at the
+unmute they were lost in the end of the switch; the transcribing beep is
+skipped while muted. The watch lists the system's device list changing too
+(`sys:devices`), to tell an engine's private aggregate device going away. The format-change
 bursts before it (0.4 s, 0.75 s) are not the switch; unmuting after them brought
 the music back for a second before it dropped out. The cost is the music, and
 the closing cue, about 2.4 s after key-up; holding the microphone open is the

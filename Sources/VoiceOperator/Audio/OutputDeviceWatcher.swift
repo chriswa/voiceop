@@ -60,6 +60,20 @@ enum OutputDevice {
         }
     }
 
+    /// The Mac's own microphone: the built-in device with input streams, if any
+    /// (none with the lid shut on some Macs).
+    static func builtInMicrophone() -> AudioObjectID? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr else { return nil }
+        var devices = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &devices) == noErr else { return nil }
+        return devices.first { transport($0) == kAudioDeviceTransportTypeBuiltIn && hasInput($0) }
+    }
+
     /// `name (transport)` for the log — the one line that explains why the
     /// microphone just opened or closed on its own.
     static var summary: String {

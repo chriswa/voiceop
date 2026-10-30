@@ -23,6 +23,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let typeInsteadOfPaste = NSMenuItem(title: "Type Text Instead of Pasting", action: #selector(toggleTypeInsteadOfPaste), keyEquivalent: "")
     private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
     private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
+    private let macMicrophoneWithHeadsets = NSMenuItem(title: "Use the Mac's Microphone with AirPods (Bluetooth)", action: #selector(toggleMacMicrophoneWithHeadsets), keyEquivalent: "")
     private let echoExperiment = NSMenuItem(title: "Echo Cancellation on Speakers (Experimental)", action: #selector(toggleEchoExperiment), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
@@ -98,6 +99,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var keepMicOpenState: (() -> Bool)?
     var onToggleKeepMicOpen: (() -> Bool)?
     var keepMicOpenForWirelessState: (() -> Bool)?
+    /// Reads and flips recording from the Mac's own microphone while a headset plays.
+    var macMicrophoneWithHeadsetsState: (() -> Bool)?
+    var onToggleMacMicrophoneWithHeadsets: (() -> Bool)?
     var onToggleKeepMicOpenForWireless: (() -> Bool)?
     /// Reads and flips hands-free's echo experiment (`EchoExperiment`). Off is
     /// how hands-free has always behaved; the flip returns the state afterwards.
@@ -213,6 +217,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         // a rule under the switch it drives.
         keepMicOpenForWireless.indentationLevel = 1
         keepMicOpenForWireless.target = self; menu.addItem(keepMicOpenForWireless)
+        macMicrophoneWithHeadsets.toolTip = "Listen on AirPods or another Bluetooth headset, but record from the Mac's "
+            + "own microphone: the headset never switches into its call mode, so the music never drops."
+        macMicrophoneWithHeadsets.target = self; menu.addItem(macMicrophoneWithHeadsets)
         echoExperiment.toolTip = "Off: hands-free does not listen while our voice plays on a speaker the microphone hears. "
             + "On: it listens through echo cancellation, and only \"Control\" cuts in. Headsets are never affected."
         echoExperiment.target = self; menu.addItem(echoExperiment)
@@ -310,6 +317,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         typeInsteadOfPaste.state = (typeInsteadOfPasteState?() ?? false) ? .on : .off
         keepMicOpen.state = (keepMicOpenState?() ?? false) ? .on : .off
         keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
+        macMicrophoneWithHeadsets.state = (macMicrophoneWithHeadsetsState?() ?? false) ? .on : .off
         echoExperiment.state = (echoExperimentState?() ?? false) ? .on : .off
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT,
                 copyRaw: onCopyRawSTT, copyShadow: onCopyShadowSTT)
@@ -473,6 +481,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func toggleKeepMicOpen() { keepMicOpen.state = (onToggleKeepMicOpen?() ?? false) ? .on : .off }
     @objc private func toggleEchoExperiment() {
         echoExperiment.state = (onToggleEchoExperiment?() ?? false) ? .on : .off
+    }
+
+    @objc private func toggleMacMicrophoneWithHeadsets() {
+        macMicrophoneWithHeadsets.state = (onToggleMacMicrophoneWithHeadsets?() ?? false) ? .on : .off
     }
 
     @objc private func toggleKeepMicOpenForWireless() {

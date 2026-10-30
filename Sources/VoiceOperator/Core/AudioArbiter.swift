@@ -90,6 +90,9 @@ final class AudioArbiter {
     }
 
     /// Hands-free's ear on the microphone — see `AudioRecorder.setListener`.
+    /// The "Mac's microphone with headsets" preference changed (`AudioPreferences`).
+    nonisolated func macMicrophoneChoiceChanged() { recorder.inputChoiceChanged() }
+
     nonisolated func setHandsFreeListener(_ handler: (@Sendable (Data, UInt64) -> Void)?) {
         recorder.setListener(handler)
     }
@@ -147,6 +150,9 @@ final class AudioArbiter {
     private nonisolated static let headsetQuietAtEnd: TimeInterval = 0
     private nonisolated static let headsetSwitchBackSign = "out:cfge"
     private nonisolated static let headsetCapAtEnd: TimeInterval = 4
+    /// The closing sounds after that unmute: half a second later, or the end of
+    /// the switch swallows them.
+    private nonisolated static let headsetCueDelay: TimeInterval = 0.5
     /// The watch at key-up keeps listening this long after the unmute, for the log:
     /// a change after it is a switch the unmute did not wait for.
     private nonisolated static let headsetWatchAfterUnmute: TimeInterval = 3
@@ -305,6 +311,7 @@ final class AudioArbiter {
 
         let live = LiveDictation(trace: trace, mode: decision)
         live.headsetSwitches = OutputDevice.isWireless && !recorder.isAlwaysOn && !recorder.hasListener
+            && !AudioRecorder.willUseMacMicrophone
         if live.headsetSwitches { live.deviceWatch = DeviceSettleWatch() }
         self.live = live
 
@@ -576,7 +583,7 @@ final class AudioArbiter {
                     let unmutedAt = Date().timeIntervalSince(keyUp) * 1000
                     Log.log(String(format: "dictation: headset %@ %.0fms after key-up — unmuting. %@",
                                    settled ? "settled" : "not switched back by the cap", unmutedAt, closingWatch.summary))
-                    self?.outputIsBack()
+                    self?.outputIsBack(cueDelay: Self.headsetCueDelay)
                     DispatchQueue.main.asyncAfter(deadline: .now() + Self.headsetWatchAfterUnmute) {
                         Log.log(String(format: "dictation: headset after the unmute (at %.0fms): %@", unmutedAt, closingWatch.summary))
                         closingWatch.stop()
@@ -895,11 +902,15 @@ final class AudioArbiter {
 
     /// The headset has switched back: unmute, then what waited for it. Also
     /// called early — by the next dictation, or quitting — to settle it now.
-    private func outputIsBack() {
+    /// `cueDelay`: the switch back has just ended, and a sound played at once is
+    /// lost in it (v0.1.117: no closing cues heard at all), so what waited plays
+    /// this much later. Settled early — the next dictation, quitting — it plays at once.
+    private func outputIsBack(cueDelay: TimeInterval = 0) {
         guard let pending = outputPending else { return }
         outputPending = nil
         muter.restore()
-        pending.forEach { $0() }
+        guard cueDelay > 0 else { pending.forEach { $0() }; return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + cueDelay) { pending.forEach { $0() } }
     }
 
     /// Starts after a short grace period so quick transcriptions stay quiet,

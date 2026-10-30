@@ -7,6 +7,7 @@ enum AudioPreferences {
     private static let muteSystemAudioKey = "vo.muteSystemAudioWhileDictating"
     private static let keepMicrophoneOpenKey = "vo.keepMicrophoneOpen"
     private static let keepMicrophoneOpenForWirelessKey = "vo.keepMicrophoneOpenForWireless"
+    private static let macMicrophoneWithHeadsetsKey = "vo.macMicrophoneWithHeadsets"
 
     /// Whether a dictation hardware-mutes the default output device for its
     /// duration (see `OutputMuter`). Defaults to on — that is what Wispr does and
@@ -37,5 +38,15 @@ enum AudioPreferences {
     static var keepMicrophoneOpenForWireless: Bool {
         get { UserDefaults.standard.bool(forKey: keepMicrophoneOpenForWirelessKey) }
         set { UserDefaults.standard.set(newValue, forKey: keepMicrophoneOpenForWirelessKey) }
+    }
+
+    /// Whether, while the output is a Bluetooth headset (`OutputDevice.isWireless`),
+    /// Voice Operator records from the Mac's own microphone rather than the
+    /// headset's (`AudioRecorder`, `InputDevice.builtInMicrophone`). The headset
+    /// then never switches profiles for a dictation — no drop in the music at
+    /// either end — whatever the system's input is set to. Default off.
+    static var macMicrophoneWithHeadsets: Bool {
+        get { UserDefaults.standard.bool(forKey: macMicrophoneWithHeadsetsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: macMicrophoneWithHeadsetsKey) }
     }
 }

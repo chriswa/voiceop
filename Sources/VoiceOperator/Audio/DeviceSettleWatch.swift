@@ -17,9 +17,19 @@ final class DeviceSettleWatch: @unchecked Sendable {
     private var events: [(ms: Int, what: String)] = []
     private var lastChange: Date?
     private var listeners: [(AudioObjectID, AudioObjectPropertyListenerBlock)] = []
+    private var systemListener: AudioObjectPropertyListenerBlock?
     private var stopped = false
 
     init() {
+        // The system's device list too: an engine's private aggregate device
+        // coming or going shows there, not on the devices themselves.
+        let system: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.note("sys:devices") }
+        var devicesAddress = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                        mScope: kAudioObjectPropertyScopeGlobal,
+                                                        mElement: kAudioObjectPropertyElementMain)
+        if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &devicesAddress, queue, system) == noErr {
+            systemListener = system
+        }
         let devices = [("out", Self.defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)),
                        ("in", Self.defaultDevice(kAudioHardwarePropertyDefaultInputDevice))]
         var seen: Set<AudioObjectID> = []
@@ -45,8 +55,16 @@ final class DeviceSettleWatch: @unchecked Sendable {
         stopped = true
         let installed = listeners
         listeners = []
+        let system = systemListener
+        systemListener = nil
         lock.unlock()
         guard !wasStopped else { return }
+        if let system {
+            var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                     mScope: kAudioObjectPropertyScopeGlobal,
+                                                     mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, queue, system)
+        }
         for (device, block) in installed {
             var address = Self.wildcard
             AudioObjectRemovePropertyListenerBlock(device, &address, queue, block)

@@ -31,6 +31,15 @@ final class AudioRecorder: @unchecked Sendable {
     private static let outputStartsLock = NSLock()
     nonisolated(unsafe) private static var outputStarts = 0
     private var engineBuiltAtOutputStart = 0
+    /// `engine`'s input was pointed at the Mac's own microphone (`applyInputChoiceOnQueue`).
+    /// A fresh engine follows the system's default input again.
+    private var engineOnMacMicrophone = false
+
+    /// Whether a microphone opened now would be the Mac's own, under a headset
+    /// (`AudioPreferences.macMicrophoneWithHeadsets`): then the headset does not switch.
+    static var willUseMacMicrophone: Bool {
+        AudioPreferences.macMicrophoneWithHeadsets && OutputDevice.isWireless && OutputDevice.builtInMicrophone() != nil
+    }
 
     /// Every touch of the engine graph — tap install/removal, start, stop — runs
     /// here, and nowhere else. Three reasons, and the last two are the important
@@ -244,6 +253,7 @@ final class AudioRecorder: @unchecked Sendable {
         lock.lock()
         engine = fresh
         engineBuiltAtOutputStart = starts
+        engineOnMacMicrophone = false
         lock.unlock()
         return Date().timeIntervalSince(began) * 1000
     }
@@ -574,6 +584,7 @@ final class AudioRecorder: @unchecked Sendable {
     /// were ever wrong. **engineQueue only.**
     private func openMic(trace: DictationTrace?) -> String? {
         replaceEngineIfStaleOnQueue()
+        applyInputChoiceOnQueue()
         let input = engine.inputNode
         lock.lock()
         let alreadyInstalled = micIsOpen
@@ -619,6 +630,47 @@ final class AudioRecorder: @unchecked Sendable {
             input.removeTap(onBus: 0)
             lock.lock(); micIsOpen = false; tapNumber += 1; lock.unlock()
             return "\(error)"
+        }
+    }
+
+    /// Point the engine's input at the Mac's own microphone while a headset is the
+    /// output and the preference says so; back on the system's default input (a
+    /// fresh engine) when either stops being true. Only with the microphone shut.
+    /// **engineQueue only.**
+    private func applyInputChoiceOnQueue() {
+        lock.lock()
+        let open = micIsOpen
+        let onMac = engineOnMacMicrophone
+        lock.unlock()
+        guard !open else { return }
+        let mac = Self.willUseMacMicrophone ? OutputDevice.builtInMicrophone() : nil
+        if let mac, !onMac {
+            engine.stop()
+            guard let unit = engine.inputNode.audioUnit else { return }
+            var device = mac
+            let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                              &device, UInt32(MemoryLayout<AudioObjectID>.size))
+            if status == noErr {
+                lock.withLock { engineOnMacMicrophone = true }
+                Log.log("recorder: recording from the Mac's own microphone while \(OutputDevice.summary) plays")
+            } else {
+                Log.log("recorder: could not switch to the Mac's own microphone (\(status)) — using the default input")
+            }
+        } else if mac == nil, onMac {
+            let ms = installFreshEngine()
+            Log.log(String(format: "recorder: back on the default input (%.0f ms) — %@", ms, OutputDevice.summary))
+        }
+    }
+
+    /// The Mac-microphone preference changed: a held-open microphone is
+    /// reopened on the right input; otherwise the next dictation picks it up.
+    func inputChoiceChanged() {
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            let held = self.lock.withLock { self.micIsOpen && !self.capturing }
+            guard held else { return }
+            self.closeMic()
+            self.openMicNow()
         }
     }
 

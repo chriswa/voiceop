@@ -23,7 +23,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let typeInsteadOfPaste = NSMenuItem(title: "Type Text Instead of Pasting", action: #selector(toggleTypeInsteadOfPaste), keyEquivalent: "")
     private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
     private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
-    private let echoExperiment = NSMenuItem(title: "Hands-Free: Hear Me Over Speakers (Experimental)", action: #selector(toggleEchoExperiment), keyEquivalent: "")
+    private let echoExperiment = NSMenuItem(title: "Echo Cancellation on Speakers (Experimental)", action: #selector(toggleEchoExperiment), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
     /// Which provider transcribes, and which shadows it — rebuilt on every open.

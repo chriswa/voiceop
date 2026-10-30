@@ -294,8 +294,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         let arbiter = self.arbiter
         handsFree.setMicrophoneListener = { handler in arbiter.setHandsFreeListener(handler) }
         let menuBar = self.menuBar
-        handsFree.onMacLook = { look in
+        handsFree.onMacLook = { look, order in
             DispatchQueue.main.async { MainActor.assumeIsolated { menuBar.update(handsFree: look) } }
+            // While hands-free takes the user's words down, speech waits for them, as for a Fn dictation.
+            let hearing = look == .hearing || look == .sending
+            Task { await SpeechJobManager.shared.setHandsFreeHearing(hearing, order: order) }
         }
         do { try handsFree.start() } catch { Log.log("hands-free: could not start: \(error)") }
         // Claude Code voice mode, attached before this launch, is picked up again.

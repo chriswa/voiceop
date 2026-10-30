@@ -59,8 +59,10 @@ final class HandsFreeService: @unchecked Sendable {
     /// Called (on any thread) when the last busy session goes idle.
     var onIdle: (@Sendable () -> Void)?
     /// Hands-free on the Mac's microphone as the menu-bar icon shows it, on each change; nil when off.
-    var onMacLook: (@Sendable (HandsFreeLook?) -> Void)?
+    /// `order` goes up by one each time, for a receiver that hops threads and may see them out of order.
+    var onMacLook: (@Sendable (HandsFreeLook?, _ order: Int) -> Void)?
     private var macLook: HandsFreeLook?
+    private var macLookOrder = 0
 
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: Connection] = [:]
@@ -527,7 +529,8 @@ final class HandsFreeService: @unchecked Sendable {
     private func setMacLook(_ look: HandsFreeLook?) {
         guard look != macLook else { return }
         macLook = look
-        onMacLook?(look)
+        macLookOrder += 1
+        onMacLook?(look, macLookOrder)
     }
 
     private func deliverMac(_ outgoing: HandsFreeEngine.Outgoing) {

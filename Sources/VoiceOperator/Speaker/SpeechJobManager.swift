@@ -83,6 +83,11 @@ actor SpeechJobManager {
     private var order: [String] = []
     private var current: String?
     private var dictating = false
+    /// Hands-free on the Mac's microphone is taking the user's words down, or
+    /// sending them: speech waits, as for a Fn dictation, but what is playing is
+    /// not interrupted here — talking over it is hands-free's cut-in to decide.
+    private var handsFreeHearing = false
+    private var handsFreeHearingOrder = -1
     private var muted = false
     private var configured = false
     /// `(sentence, onStart, onSynthesized) -> finishedNaturally`. Closure
@@ -291,6 +296,15 @@ actor SpeechJobManager {
 
     func beginDictation() async { dictating = true; await interruptCurrent(state: .interruptedByUser) }
     func endDictation() { dictating = false; pump() }
+    /// `order` counts the changes as hands-free made them: one that arrives
+    /// after a later one (each comes in a task of its own) is stale.
+    func setHandsFreeHearing(_ on: Bool, order: Int) {
+        guard order > handsFreeHearingOrder else { return }
+        handsFreeHearingOrder = order
+        guard on != handsFreeHearing else { return }
+        handsFreeHearing = on
+        if !on { pump() }
+    }
     /// `heardUntil`: the listener stopped hearing it then, before this — they
     /// began talking over it, and the client decided to stop it only later.
     /// What was heard is counted up to then.
@@ -314,7 +328,7 @@ actor SpeechJobManager {
 
     private func pump() {
         defer { refreshActivity() }
-        guard configured, !dictating, !muted, current == nil, let play else {
+        guard configured, !dictating, !handsFreeHearing, !muted, current == nil, let play else {
             // Waiting behind a dictation, or behind the sentence now playing, is
             // ordinary queueing and says nothing. The states below are the ones
             // that leave a job parked indefinitely, which is indistinguishable
@@ -467,7 +481,7 @@ actor SpeechJobManager {
             order.removeAll { $0 == id }
             pump()
         } else {
-            update(id) { $0.next = next; $0.playbackState = dictating ? .waitingForUser : .queued }
+            update(id) { $0.next = next; $0.playbackState = dictating || handsFreeHearing ? .waitingForUser : .queued }
             pump()
         }
     }

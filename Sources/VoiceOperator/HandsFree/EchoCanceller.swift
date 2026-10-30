@@ -38,8 +38,9 @@ final class EchoReference: @unchecked Sendable {
         set { lock.withLock { _capturing = newValue } }
     }
 
-    /// Whether a player starting now should tap its output for this.
-    var wanted: Bool { EchoExperiment.isOn || capturing }
+    /// Whether a player starting now should tap its output for this: only on the
+    /// speakers the experiment acts on, so a headset's playback is left untouched.
+    var wanted: Bool { (EchoExperiment.isOn && OutputDevice.isSpeakers) || capturing }
 
     /// Tap `engine`'s mixer for the reference. `latency` is how far the
     /// speaker is behind the mixer, read as each buffer comes.

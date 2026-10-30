@@ -27,6 +27,28 @@ final class SpeechJobManagerTests: XCTestCase {
         await gate.finishNext()
     }
 
+    /// While hands-free takes the user's words down, a reply waits for them,
+    /// and goes once they are sent; a change that arrives late is ignored.
+    func testSpeechWaitsWhileHandsFreeTakesTheUserDown() async {
+        let manager = SpeechJobManager()
+        let gate = PlaybackGate()
+        let requests = PlaybackRequests()
+        await manager.configure(
+            play: { request, onStart, _ in
+                await requests.append(request)
+                return await gate.play(onStart: onStart)
+            }, prefetch: { _, _ in }, halt: { _ in nil })
+        await manager.setHandsFreeHearing(true, order: 1)
+        _ = await manager.enqueue(text: "Here is the answer.", voice: "af_heart")
+        try? await Task.sleep(for: .milliseconds(50))
+        let waiting = await requests.values
+        XCTAssertTrue(waiting.isEmpty, "spoke over the user")
+        await manager.setHandsFreeHearing(false, order: 3)
+        await manager.setHandsFreeHearing(true, order: 2)   // stale: hands-free has moved on
+        await gate.waitForStarts(1)
+        await gate.finishNext()
+    }
+
     /// Each sentence is synthesized on its own, so a split inside a number is
     /// heard: "zero", a sentence's pause, "eighteen".
     func testDecimalsAreNotSentenceBoundaries() async {

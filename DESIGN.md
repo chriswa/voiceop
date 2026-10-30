@@ -871,8 +871,9 @@ the word off after a blip. Voice cut-in on the
 Mac therefore needs a headset, as it did in Spaceterm — unless the echo
 experiment below is on.
 
-**Echo cancellation experiment (2026-10-26).** A menu checkbox, **Hands-Free:
-Hear Me Over Speakers (Experimental)** (`EchoExperiment`, off by default). Off,
+**Echo cancellation experiment (2026-10-26).** A menu checkbox, **Echo
+Cancellation on Speakers (Experimental)** (`EchoExperiment`, off by default; it
+taps speech players only while the output is the speakers). Off,
 everything above holds, unchanged. On, it acts only where our voice plays into
 the room — the `open` route: the Mac's built-in speakers, the phone's own
 speaker with its voice processing on — and there hands-free listens through our
@@ -923,6 +924,11 @@ microphone (`aec.wav`) and `capture.json` with levels per reply;
 cancelled, lays each phrase over each reply, and asks the trigger-word check
 what it hears. Captures go to `echo-captures/` in Application Support, and are
 refused in incognito.
+
+**Speech waits for the user** while hands-free on the Mac takes a dictation
+down or sends it (`SpeechJobManager.setHandsFreeHearing`), as it does for a
+Fn dictation — but nothing playing is interrupted for it: talking over our
+voice is the cut-in's to decide.
 
 **The menu-bar icon** shows hands-free on the Mac's microphone whenever the
 status has no colour of its own (`HandsFreeLook`): a washed-out rainbow while

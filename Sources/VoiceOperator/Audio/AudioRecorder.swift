@@ -498,13 +498,25 @@ final class AudioRecorder: @unchecked Sendable {
     /// user presses the trigger key in that window their `start()` sees the
     /// microphone as already open and does no graph work of its own. This is then
     /// the only thing that can hand them a live tap. **engineQueue only.**
-    private func openMicNow(attemptsLeft: Int = openAttempts) {
+    private func openMicNow(attemptsLeft: Int = openAttempts, freshEngineTried: Bool = false) {
         lock.lock()
         let wanted = alwaysOn || capturing || listener != nil
         lock.unlock()
         guard wanted else { return }
 
-        guard let reason = openMic(trace: nil) else {
+        let failure = openMic(trace: nil)
+        // The engine that can never start again on AirPods (`noteOutputEngineStarted`): -10868, every
+        // retry the same, until the app restarts — even when it was built fresh after the last speech
+        // (October 29, 22:55, two dictations lost after hands-free let the AirPods' microphone go). A
+        // brand-new engine is what a restart gave it, so build one here, once per open, and try that.
+        if let failure, failure.contains("-10868"), !freshEngineTried, OutputDevice.isWireless {
+            let ms = installFreshEngine()
+            Log.log(String(format: "recorder: the capture engine cannot start (-10868) — built a fresh one (%.0f ms), "
+                           + "trying again — %@", ms, OutputDevice.summary))
+            openMicNow(attemptsLeft: attemptsLeft, freshEngineTried: true)
+            return
+        }
+        guard let reason = failure else {
             lock.lock(); let format = tapFormat; lock.unlock()
             Log.log(String(format: "recorder: microphone held open (%.0f Hz, %d ch)",
                            format?.sampleRate ?? 0, format?.channelCount ?? 0))
@@ -521,7 +533,7 @@ final class AudioRecorder: @unchecked Sendable {
             Log.log("recorder: microphone not ready yet (\(reason)) — retrying")
         }
         engineQueue.asyncAfter(deadline: .now() + Self.deviceSettle) { [weak self] in
-            self?.openMicNow(attemptsLeft: attemptsLeft - 1)
+            self?.openMicNow(attemptsLeft: attemptsLeft - 1, freshEngineTried: freshEngineTried)
         }
     }
 

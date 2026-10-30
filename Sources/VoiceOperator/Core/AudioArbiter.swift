@@ -573,9 +573,10 @@ final class AudioArbiter {
         let peak = recorder.lastPeak
         let rms = recorder.lastRMS
         if let closingWatch {
-            // The headset switches back to music as its microphone closes: unmute,
-            // and play the closing cue, once it has — not into the switch.
-            outputPending = []
+            // The headset switches back to music 2 s after its microphone closes. Muted
+            // by us, the output stays muted through it, and the closing sounds wait for
+            // the unmute. Not muted, they play now: after the switch they were not heard.
+            if muter.isMuting { outputPending = [] }
             let keyUp = Date()
             recorder.afterMicClosed {
                 closingWatch.whenQuiet(quiet: Self.headsetQuietAtEnd,

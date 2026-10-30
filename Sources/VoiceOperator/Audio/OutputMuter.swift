@@ -25,6 +25,9 @@ final class OutputMuter {
         if current == false { Self.setMute(device, true) }
     }
 
+    /// The output is muted by us now (not by the user, and not untouched).
+    var isMuting: Bool { wasPreviouslyMuted == false }
+
     func restore() {
         defer { wasPreviouslyMuted = nil }
         guard let device = Self.defaultOutputDevice(),

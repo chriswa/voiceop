@@ -1096,7 +1096,11 @@ and nothing waiting in `inbox` is handed out. Hands-free's own incognito
 handling ends the session.
 
 **Testing.** `POST /v1/voice-mode/simulate {text}` acts as if hands-free heard
-`text`. `scripts/voice-mode-e2e.py` drives a real interactive Claude Code
+`text`. Before pushing a change to the mod, load it for real:
+`claude -p "Reply with only: ok" --plugin-dir claude-plugin/handsfree` prints
+`handsfree: hooks module did not load: …` on stderr when the engine refuses it.
+`tsc` and `claude plugin validate` both passed a module the engine refused,
+because the engine refuses any module that declares `on` or `next` again. `scripts/voice-mode-e2e.py` drives a real interactive Claude Code
 (haiku, in a pty) with the mod, through `/handsfree`, a turn started by speech,
 ten more turns, and "turn hands-free voice chat off". It speaks each reply
 aloud.

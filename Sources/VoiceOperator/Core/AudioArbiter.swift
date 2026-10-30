@@ -137,8 +137,18 @@ final class AudioArbiter {
     /// under way (October 29, v0.1.113: the cue and the music both cut by it).
     private nonisolated static let headsetQuietAtStart: TimeInterval = 0.25
     private nonisolated static let headsetCapAtStart: TimeInterval = 2.0
-    private nonisolated static let headsetQuietAtEnd: TimeInterval = 0.3
+    /// At key-up the switch back to music shows as a burst of output stream-format
+    /// changes (`out:spfi` among them) 0.4 s after the microphone closes, sometimes
+    /// a second one 0.3 s later; the running-state changes before it are not the
+    /// switch. Unmuted on 300 ms of quiet alone, it sometimes came before the burst,
+    /// and the music dropped out after it was back (v0.1.114: dictations 5 and 8).
+    /// So the burst must have come, then 400 ms of quiet.
+    private nonisolated static let headsetQuietAtEnd: TimeInterval = 0.4
+    private nonisolated static let headsetSwitchBackSign = "out:spfi"
     private nonisolated static let headsetCapAtEnd: TimeInterval = 2.5
+    /// The watch at key-up keeps listening this long after the unmute, for the log:
+    /// a change after it is a switch the unmute did not wait for.
+    private nonisolated static let headsetWatchAfterUnmute: TimeInterval = 3
 
     /// Tunable timing for the audible indication that transcription is ongoing.
     /// The cue itself is synthesized to last `cueDuration` (see SoundEffects).
@@ -561,12 +571,15 @@ final class AudioArbiter {
             let keyUp = Date()
             recorder.afterMicClosed {
                 closingWatch.whenQuiet(quiet: Self.headsetQuietAtEnd, atLeast: Self.headsetQuietAtEnd,
-                                       cap: Self.headsetCapAtEnd) { [weak self] settled in
+                                       after: Self.headsetSwitchBackSign, cap: Self.headsetCapAtEnd) { [weak self] settled in
+                    let unmutedAt = Date().timeIntervalSince(keyUp) * 1000
                     Log.log(String(format: "dictation: headset %@ %.0fms after key-up — unmuting. %@",
-                                   settled ? "settled" : "still changing at the cap",
-                                   Date().timeIntervalSince(keyUp) * 1000, closingWatch.summary))
-                    closingWatch.stop()
+                                   settled ? "settled" : "not switched back by the cap", unmutedAt, closingWatch.summary))
                     self?.outputIsBack()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.headsetWatchAfterUnmute) {
+                        Log.log(String(format: "dictation: headset after the unmute (at %.0fms): %@", unmutedAt, closingWatch.summary))
+                        closingWatch.stop()
+                    }
                 }
             }
         } else {

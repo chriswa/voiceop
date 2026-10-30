@@ -451,8 +451,10 @@ audio is no sign the switch is over — on AirPods it is real sound 150 ms in,
 the switch still under way. So the start cue waits until the devices have been
 still for 250 ms (2 s cap), and the output is muted only once the cue has played
 out. At key-up the microphone closes first; the output is unmuted, and the
-closing cue played, once the devices have been still for 300 ms after it (2.5 s
-cap). The trace (start) and the log (end) list every change seen, with its time,
+closing cue played, once the switch back has shown — a burst of output stream
+changes (`out:spfi`) about 0.4 s after the microphone closes, sometimes twice —
+and 400 ms of quiet have followed it (2.5 s cap); the log lists what changed for
+3 s after the unmute too. The trace (start) and the log (end) list every change seen, with its time,
 so what a switch looks like can be read off them. A dictation started meanwhile
 settles that first (`outputIsBack`), or its mute would record "muted" as the user's own state.
 

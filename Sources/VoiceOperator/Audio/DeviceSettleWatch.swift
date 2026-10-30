@@ -63,16 +63,17 @@ final class DeviceSettleWatch: @unchecked Sendable {
     }
 
     /// `done` on the main queue once, as soon as at least `atLeast` seconds have
-    /// passed since the watch began and the devices have reported no change for
-    /// `quiet` seconds — or at `cap` regardless. Its argument says which.
-    func whenQuiet(quiet: TimeInterval, atLeast: TimeInterval = 0, cap: TimeInterval,
+    /// passed since the watch began, a change naming `after` has been seen (if
+    /// given — `"out:spfi"`, say), and the devices have reported no change for
+    /// `quiet` seconds since — or at `cap` regardless. Its argument says which.
+    func whenQuiet(quiet: TimeInterval, atLeast: TimeInterval = 0, after: String? = nil, cap: TimeInterval,
                    _ done: @escaping @MainActor (_ settled: Bool) -> Void) {
         func check() {
             let now = Date()
             let elapsed = now.timeIntervalSince(started)
-            let last = lock.withLock { lastChange }
+            let (last, seen) = lock.withLock { (lastChange, after.map { a in events.contains { $0.what.contains(a) } } ?? true) }
             let still = now.timeIntervalSince(last ?? started)
-            if elapsed >= atLeast, still >= quiet { MainActor.assumeIsolated { done(true) }; return }
+            if elapsed >= atLeast, seen, still >= quiet { MainActor.assumeIsolated { done(true) }; return }
             if elapsed >= cap { MainActor.assumeIsolated { done(false) }; return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { check() }
         }

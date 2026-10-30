@@ -59,7 +59,7 @@ enum HeadsetProbe {
             let rebuilt = firstMs(of: "out:cfge", in: closing.summary)
             note(String(format: "%@: closed in %.0f ms; link rebuilt %@", name, closeMs,
                         rebuilt.map { "at +\($0) ms" } ?? "not seen"))
-            if name != "auhal-input" {
+            if name != "auhal-input" {  // capture-session's peak is only non-zero or zero
                 note(String(format: "  heard: %d buffers, peak %.4f (0 = silence: the microphone gave nothing)",
                             queueBuffers, Double(queuePeak) / 32768))
             }
@@ -83,9 +83,46 @@ enum HeadsetProbe {
         ("engine-pause", { engine(pause: true) }),
         ("audio-queue", { audioQueue() }),
         ("auhal-input", { auhal() }),
+        ("capture-session", { captureSession() }),
     ] }
 
+    /// AVFoundation's capture stack, not Core Audio's: an `AVCaptureSession` on
+    /// the default audio device. (Its high-quality Bluetooth recording option is
+    /// iOS-only: unavailable on macOS.)
+    private static func captureSession() -> (() -> Void)? {
+        guard let device = AVCaptureDevice.default(for: .audio),
+              let input = try? AVCaptureDeviceInput(device: device) else { return nil }
+        let session = AVCaptureSession()
+        let output = AVCaptureAudioDataOutput()
+        let delegate = CaptureLevels()
+        output.setSampleBufferDelegate(delegate, queue: DispatchQueue(label: "com.voiceop.headset-probe.capture"))
+        session.beginConfiguration()
+        guard session.canAddInput(input), session.canAddOutput(output) else { return nil }
+        session.addInput(input)
+        session.addOutput(output)
+        session.commitConfiguration()
+        session.startRunning()
+        keptObjects.append(delegate)
+        return { session.stopRunning() }
+    }
+
+    private final class CaptureLevels: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
+        func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+            HeadsetProbe.queueBuffers += 1
+            guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+            var length = 0
+            var pointer: UnsafeMutablePointer<CChar>?
+            guard CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
+                                              dataPointerOut: &pointer) == noErr, let pointer else { return }
+            // Float32 or Int16, whichever it delivers: either way, non-zero bytes are sound.
+            let bytes = UnsafeBufferPointer(start: UnsafeRawPointer(pointer).assumingMemoryBound(to: Int16.self), count: length / 2)
+            let peak = bytes.reduce(Int32(0)) { max($0, abs(Int32($1))) }
+            HeadsetProbe.queuePeak = max(HeadsetProbe.queuePeak, peak > 0 ? max(1, peak) : 0)
+        }
+    }
+
     nonisolated(unsafe) private static var kept: [AVAudioEngine] = []
+    nonisolated(unsafe) private static var keptObjects: [AnyObject] = []
     nonisolated(unsafe) static var queuePeak: Int32 = 0
     nonisolated(unsafe) static var queueBuffers = 0
 

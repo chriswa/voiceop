@@ -138,7 +138,16 @@ final class VoiceMode {
     private(set) var standingAside: String?
     /// Goes up whenever what `status` says of the conversation changes: `watch` waits on it.
     private(set) var version = 0
+    /// Speech that needed the trigger word just turned out not to start with it
+    /// (the `notWakeWord` cue): "say Claude first", with alarm bells, for a few seconds.
+    private(set) var missedTrigger = false
+    private var missedTriggerClear: Task<Void, Never>?
+    static let missedTriggerShownFor: Duration = .seconds(4)
+    /// Voice Operator is speaking (anyone's speech): for the plugin's band.
+    private(set) var voiceSpeaking = false
     private(set) var route: String?
+    /// The echo experiment on this route: `off`, `standby`, `active` (hands-free's `setup`).
+    private(set) var echoExperiment: String?
     /// What the user said that no hook has taken yet, oldest first.
     private(set) var inbox: [Heard] = []
 
@@ -498,7 +507,10 @@ final class VoiceMode {
             setPendingBeep(message["pending"] as? Bool == true)
         case "cue":
             setPendingBeep(false)
-            if let effect = (message["name"] as? String).flatMap(Self.cue) {
+            let name = message["name"] as? String
+            if name == "notWakeWord" { setMissedTrigger(true) }
+            if name == "dictationStart" { setMissedTrigger(false) }
+            if let effect = name.flatMap(Self.cue) {
                 link.played(effect.duration)
                 deps.playCue(effect)
             }
@@ -519,7 +531,10 @@ final class VoiceMode {
             }
             heard(text: text, trigger: message["trigger"] as? String, interrupted: interrupted)
         case "setup":
+            let before = (route, echoExperiment)
             route = message["route"] as? String
+            echoExperiment = message["echoExperiment"] as? String
+            if before != (route, echoExperiment) { version += 1 }
         case "session-ended":
             let why = message["why"] as? String ?? "off"
             switch why {
@@ -575,7 +590,33 @@ final class VoiceMode {
         if let route { o["route"] = route }
         if let voice = a.voice { o["voice"] = voice }
         if let standingAside { o["standing_aside"] = standingAside }
+        o["missed_trigger"] = missedTrigger && !conversation
+        o["transcribing"] = phase == "hearing" || phase == "sending"
+        o["speaking"] = voiceSpeaking
+        if let echoExperiment { o["echo_experiment"] = echoExperiment }
         return o
+    }
+
+    private func setMissedTrigger(_ on: Bool) {
+        missedTriggerClear?.cancel()
+        missedTriggerClear = nil
+        if on {
+            missedTriggerClear = Task { [weak self] in
+                try? await Task.sleep(for: Self.missedTriggerShownFor)
+                guard !Task.isCancelled else { return }
+                self?.setMissedTrigger(false)
+            }
+        }
+        guard on != missedTrigger else { return }
+        missedTrigger = on
+        version += 1
+    }
+
+    /// Voice Operator's speech started or stopped (`AppCoordinator`), for the band.
+    func speechActivity(_ on: Bool) {
+        guard on != voiceSpeaking else { return }
+        voiceSpeaking = on
+        if attachment != nil { version += 1 }
     }
 
     /// `status` once it differs from version `since`, or after `wait` regardless:

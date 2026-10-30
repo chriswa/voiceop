@@ -8,6 +8,16 @@ export type Band = {
   standingAside: string | null
   /** The main thread is working (the sonar). */
   working: boolean
+  /** Speech that needed the trigger word just came without it (a few seconds' alarm). */
+  missedTrigger: boolean
+  /** Hands-free has committed to a dictation: the user's words are being taken down. */
+  transcribing: boolean
+  /** Voice Operator is speaking. */
+  speaking: boolean
+  /** Where the sound goes: `ear` (headset), `open` (speakers the mic hears), `unsure`, or null. */
+  route: string | null
+  /** The speakers echo experiment is listening through our voice here. */
+  echoActive: boolean
   trigger: string
 }
 

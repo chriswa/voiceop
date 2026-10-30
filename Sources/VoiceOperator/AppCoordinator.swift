@@ -88,6 +88,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                     Task { @MainActor in
                         self?.arbiter.setSpeechActive(active)
                         HandsFreeService.shared.host.speaking = self?.arbiter.isSpeaking ?? false
+                        VoiceMode.shared.speechActivity(self?.arbiter.isSpeaking ?? false)
                         // Speech going quiet is one of the two ways the app becomes
                         // idle, so it is one of the two places a restart that has
                         // been waiting gets to fire.
@@ -141,6 +142,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         arbiter.onSpeechIdle = { [weak self] in
             HandsFreeService.shared.host.speaking = false
+            VoiceMode.shared.speechActivity(false)
             self?.restart.attempt()
         }
         menuBar.onRestart = { [unowned self] in restart.request(source: .menu) }

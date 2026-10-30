@@ -218,6 +218,11 @@ async function watch($: $): Promise<void> {
         conversation: state.conversation === true,
         standingAside: typeof state.standing_aside === 'string' ? state.standing_aside : null,
         working: state.working === true,
+        missedTrigger: state.missed_trigger === true,
+        transcribing: state.transcribing === true,
+        speaking: state.speaking === true,
+        route: typeof state.route === 'string' ? state.route : null,
+        echoActive: state.echo_experiment === 'active',
         trigger: String(state.trigger ?? 'claude'),
       }
       await update($, band, () => next)
@@ -227,15 +232,28 @@ async function watch($: $): Promise<void> {
   }
 }
 
-/** What the band says: what hands-free is doing, and whether the trigger word is needed. */
-function describe(b: Band): { text: string; color: string } {
+/** Where the sound goes, first on the band: a headset, or speakers (the echo experiment on or not). */
+function route(b: Band): string {
+  if (b.route === 'ear') return '🎧 headset · '
+  if (b.route === 'open') return b.echoActive ? '🔈 speakers (echo cancelling) · ' : '🔈 speakers · '
+  if (b.route === 'unsure') return '🔊 external speakers? · '
+  return '🎧 '
+}
+
+/**
+ * The band's first part: whether the trigger word is needed. Three states —
+ * keep talking (the window is open), say it first, and say it first with
+ * alarm bells (speech just came without it) — unless hands-free is not
+ * listening at all just now.
+ */
+function trigger(b: Band): { text: string; color: string; bold?: boolean } {
   const word = b.trigger.charAt(0).toUpperCase() + b.trigger.slice(1)
-  if (b.phase === 'hearing') return { text: 'Listening…', color: 'success' }
-  if (b.phase === 'sending') return { text: 'Sending…', color: 'success' }
   if (b.standingAside === 'speech') return { text: 'Not listening while I speak on speakers', color: 'warning' }
   if (b.standingAside === 'dictation') return { text: 'Paused for your Fn dictation', color: 'warning' }
-  if (b.phase !== 'listening') return { text: 'Microphone paused', color: 'warning' }
-  return b.conversation ? { text: 'Keep talking…', color: 'success' } : { text: `Say “${word}” first`, color: 'suggestion' }
+  if (b.phase === 'off') return { text: 'Microphone paused', color: 'warning' }
+  if (b.conversation) return { text: 'Keep talking…', color: 'success' }
+  if (b.missedTrigger) return { text: `Say “${word}” first!`, color: 'error', bold: true }
+  return { text: `Say “${word}” first`, color: 'suggestion' }
 }
 
 // MARK: - Hooks
@@ -272,17 +290,24 @@ export const register: Register = on => {
     return { text, context: self.attached ? [`${text} Follow the hands-free section of your system prompt from now on.`] : [] }
   })
 
-  // While attached: one line above the prompt, for as long as hands-free is on.
+  // While attached: one line above the prompt, for as long as hands-free is on. The trigger
+  // word's state, then three lamps: transcribing (hands-free committed to a dictation, the
+  // chirp up), speaking, and working (the main thread, the sonar).
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const b = await read($, band)
     if (!b || e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const { text, color } = describe(b)
+    const t = trigger(b)
+    const lamp = (key: string, on: boolean, label: string, color: string) => on
+      ? <Text key={key} color={color} bold>{`  ● ${label}`}</Text>
+      : <Text key={key} dimColor>{`  ○ ${label}`}</Text>
     return (
       <Box>
-        <Text bold>🎧 Hands-free · </Text>
-        <Text color={color}>{text}</Text>
-        {b.working ? <Text dimColor> · working (sonar)</Text> : null}
+        <Text bold>{route(b)}</Text>
+        <Text color={t.color} bold={t.bold ?? false}>{t.text}</Text>
+        {lamp('transcribing', b.transcribing, 'transcribing', 'error')}
+        {lamp('speaking', b.speaking, 'speaking', 'claude')}
+        {lamp('working', b.working, 'working', 'suggestion')}
       </Box>
     )
   })

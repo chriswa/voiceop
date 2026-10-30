@@ -796,6 +796,8 @@ final class HandsFreeService: @unchecked Sendable {
             return message
         case .duck(let on):
             return ["type": "duck", "on": on]
+        case .notTrigger(let heard, let throughEcho, let echo):
+            return ["type": "not-trigger", "heard": heard, "throughEcho": throughEcho, "echo": echo]
         case .cutIn(let msAgo):
             return ["type": "cut-in", "msAgo": msAgo, "at": Date().timeIntervalSince1970 * 1000 - Double(msAgo)]
         case .transcript(let text, let trigger, let interrupted, let reason, let shutdown):

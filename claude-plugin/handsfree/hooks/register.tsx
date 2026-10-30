@@ -219,6 +219,7 @@ async function watch($: $): Promise<void> {
         standingAside: typeof state.standing_aside === 'string' ? state.standing_aside : null,
         working: state.working === true,
         missedTrigger: state.missed_trigger === true,
+        missedHeard: typeof state.missed_heard === 'string' ? state.missed_heard : null,
         transcribing: state.transcribing === true,
         speaking: state.speaking === true,
         route: typeof state.route === 'string' ? state.route : null,
@@ -252,7 +253,10 @@ function trigger(b: Band): { text: string; color: string; bold?: boolean } {
   if (b.standingAside === 'dictation') return { text: 'Paused for your Fn dictation', color: 'warning' }
   if (b.phase === 'off') return { text: 'Microphone paused', color: 'warning' }
   if (b.conversation) return { text: 'Keep talking…', color: 'success' }
-  if (b.missedTrigger) return { text: `Say “${word}” first!`, color: 'error', bold: true }
+  if (b.missedTrigger) {
+    const heard = b.missedHeard ? ` (heard “${b.missedHeard.replace(/[.!?]+$/, '')}”)` : ''
+    return { text: `Say “${word}” first!${heard}`, color: 'error', bold: true }
+  }
   return { text: `Say “${word}” first`, color: 'suggestion' }
 }
 

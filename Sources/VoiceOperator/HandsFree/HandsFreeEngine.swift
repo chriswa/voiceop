@@ -93,6 +93,12 @@ final class HandsFreeEngine: @unchecked Sendable {
         case cue(Cue)
         /// Turn the client's voice down for someone talking over it, or back up.
         case duck(Bool)
+        /// Speech that needed the trigger word did not start with it: what Apple's
+        /// model heard, for a client that shows it. `throughEcho`: heard while our
+        /// own voice played (`SourceState.throughEcho`), so most likely that voice;
+        /// `echo`: it matched what that voice just said. Sent whether or not the
+        /// `notWakeWord` cue is.
+        case notTrigger(heard: String, throughEcho: Bool, echo: Bool)
         /// The user cut the client's voice off: they began talking `msAgo`
         /// milliseconds ago, which is as far as they heard it.
         case cutIn(msAgo: Int)
@@ -554,7 +560,9 @@ final class HandsFreeEngine: @unchecked Sendable {
             ? (verdict.trigger.flatMap(clientFor) ?? conversationClient ?? owner)
             : verdict.trigger.flatMap(clientFor)
         var match = window ? verdict.words : client != nil
+        var echoRejected = false
         if match, throughEcho, deps.isEcho(heard) {
+            echoRejected = true
             deps.log("\"\(heard)\" is what our own voice just said: echo, not the user")
             deps.record("echo-rejected", ["heard": heard])
             match = false
@@ -568,6 +576,9 @@ final class HandsFreeEngine: @unchecked Sendable {
                                           "spokeMs": candidate.spokeMs, "overVoice": overVoice]
         if throughEcho { checkDetail["throughEcho"] = true }
         deps.record("check", checkDetail)
+        if !match, !window, phase == .listening, live {
+            emit(nil, .notTrigger(heard: heard, throughEcho: throughEcho, echo: echoRejected))
+        }
         // Through our own voice, nothing that was not for the client gets a cue: it was most likely that voice.
         if !match, !window, phase == .listening, live, !throughEcho {
             if verdict.shutdown != nil {

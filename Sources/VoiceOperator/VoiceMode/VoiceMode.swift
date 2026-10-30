@@ -142,6 +142,9 @@ final class VoiceMode {
     /// (the `notWakeWord` cue): "say Claude first", with alarm bells, for a few seconds.
     private(set) var missedTrigger = false
     private var missedTriggerClear: Task<Void, Never>?
+    /// What was heard instead of the trigger word, the last time (hands-free's `not-trigger`),
+    /// for the band to show beside "say Claude first". Not what was heard through our own voice.
+    private(set) var missedHeard: String?
     static let missedTriggerShownFor: Duration = .seconds(4)
     /// Voice Operator is speaking (anyone's speech): for the plugin's band.
     private(set) var voiceSpeaking = false
@@ -509,11 +512,18 @@ final class VoiceMode {
             setPendingBeep(false)
             let name = message["name"] as? String
             if name == "notWakeWord" { setMissedTrigger(true) }
-            if name == "dictationStart" { setMissedTrigger(false) }
+            if name == "dictationStart" {
+                setMissedTrigger(false)
+                missedHeard = nil
+            }
             if let effect = name.flatMap(Self.cue) {
                 link.played(effect.duration)
                 deps.playCue(effect)
             }
+        case "not-trigger":
+            guard message["throughEcho"] as? Bool != true else { break }
+            missedHeard = message["heard"] as? String ?? ""
+            version += 1
         case "cut-in":
             let at = (message["at"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
             cutIn(at: at ?? deps.now())
@@ -563,6 +573,10 @@ final class VoiceMode {
     }
 
     /// The "deciding" beep, repeated while speech that needs the trigger word is undecided.
+    /// Not reported as playing (`link.played`), unlike the other cues: it starts as the user
+    /// begins the trigger word, so hands-free standing aside for it cut the word off mid-syllable,
+    /// left the rest unchecked, and the trigger word never worked outside the conversation window
+    /// (October 29). The speech detector does not take the beep for speech.
     private func setPendingBeep(_ on: Bool) {
         guard on != (pendingBeep != nil) else { return }
         pendingBeep?.cancel()
@@ -571,7 +585,6 @@ final class VoiceMode {
         pendingBeep = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.link.played(SoundEffect.handsFreePending.duration)
                 self.deps.playCue(.handsFreePending)
                 try? await Task.sleep(for: .seconds(SoundEffect.handsFreePending.duration))
             }
@@ -591,6 +604,7 @@ final class VoiceMode {
         if let voice = a.voice { o["voice"] = voice }
         if let standingAside { o["standing_aside"] = standingAside }
         o["missed_trigger"] = missedTrigger && !conversation
+        if let missedHeard { o["missed_heard"] = missedHeard }
         o["transcribing"] = phase == "hearing" || phase == "sending"
         o["speaking"] = voiceSpeaking
         if let echoExperiment { o["echo_experiment"] = echoExperiment }

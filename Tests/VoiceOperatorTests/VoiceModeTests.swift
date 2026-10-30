@@ -190,6 +190,23 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertFalse(mode.isWorking)
     }
 
+    func testThePendingBeepDoesNotMakeHandsFreeStandAside() async throws {
+        var link: HandsFreeClientLink?
+        let mode = VoiceMode(deps: .init(
+            registerHandsFree: { _, l in link = l; return nil },
+            setHandsFree: { _ in }, unregisterHandsFree: {}, openConversation: {},
+            speak: { _, _ in "job" }, cancelSpeech: { _, _ in 0 },
+            playCue: { [unowned self] in cues.append($0) }, stopCue: { _ in },
+            pidAlive: { _ in true }, save: { _ in }))
+        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
+        mode.handsFree(["type": "state", "phase": "listening", "conversation": false, "pending": true])
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(cues.last, .handsFreePending)
+        XCTAssertEqual(link?.isPlaying(tailMs: 400), false, "the beep plays as they say the trigger word")
+        mode.handsFree(["type": "cue", "name": "notWakeWord"])
+        XCTAssertEqual(link?.isPlaying(tailMs: 400), true, "other cues are still stood aside for")
+    }
+
     func testWatchAnswersWhenTheWindowOpensOrCloses() async throws {
         let mode = make()
         _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
@@ -203,10 +220,14 @@ final class VoiceModeTests: XCTestCase {
         // Speech outside the window without the trigger word: alarm bells, until a dictation starts.
         mode.handsFree(["type": "state", "phase": "listening", "conversation": false, "pending": false])
         mode.handsFree(["type": "cue", "name": "notWakeWord"])
+        mode.handsFree(["type": "not-trigger", "heard": "Cod.", "throughEcho": false, "echo": false])
+        mode.handsFree(["type": "not-trigger", "heard": "Our own voice", "throughEcho": true, "echo": false])
         XCTAssertEqual(mode.status["missed_trigger"] as? Bool, true)
+        XCTAssertEqual(mode.status["missed_heard"] as? String, "Cod.", "not what was heard through our own voice")
         mode.handsFree(["type": "cue", "name": "dictationStart"])
         mode.handsFree(["type": "state", "phase": "hearing", "conversation": false, "pending": false])
         XCTAssertEqual(mode.status["missed_trigger"] as? Bool, false)
+        XCTAssertNil(mode.status["missed_heard"])
         XCTAssertEqual(mode.status["transcribing"] as? Bool, true)
         mode.speechActivity(true)
         XCTAssertEqual(mode.status["speaking"] as? Bool, true)

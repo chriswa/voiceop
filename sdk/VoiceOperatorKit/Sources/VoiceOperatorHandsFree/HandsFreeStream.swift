@@ -17,6 +17,9 @@ public enum HandsFreeEvent: Equatable, Sendable {
     case cue(name: String, haptic: String?)
     case duck(Bool)
     case cutIn(msAgo: Int, at: Double)
+    /// Speech that needed the trigger word did not start with it: what was heard. `throughEcho`:
+    /// heard while the client's voice played, so most likely that voice; `echo`: it matched it.
+    case notTrigger(heard: String, throughEcho: Bool, echo: Bool)
     case transcript(text: String, trigger: String?, interrupted: Bool, reason: String, shutdown: Bool)
     /// The hello was refused (`protocol`, `invalid_client`, `no_client`, …); Voice Operator closes the connection.
     case refused(String)
@@ -301,6 +304,8 @@ public final class HandsFreeStream {
             return .duck(bool(m["on"]))
         case "cut-in":
             return .cutIn(msAgo: int(m["msAgo"]) ?? 0, at: double(m["at"]) ?? 0)
+        case "not-trigger":
+            return .notTrigger(heard: m["heard"] as? String ?? "", throughEcho: bool(m["throughEcho"]), echo: bool(m["echo"]))
         case "transcript":
             return .transcript(text: m["text"] as? String ?? "", trigger: m["trigger"] as? String,
                                interrupted: bool(m["interrupted"]), reason: m["reason"] as? String ?? "",

@@ -319,6 +319,7 @@ final class HandsFreeStreamTests: XCTestCase {
         t.vo(["type": "error", "error": "bad_json"])
         t.vo(["type": "setup", "route": "open", "echoExperiment": "active"])
         t.vo(["type": "setup", "route": NSNull(), "echoExperiment": "off"])
+        t.vo(["type": "not-trigger", "heard": "Cod.", "throughEcho": false, "echo": false])
         t.vo(["type": "something-new"])
         XCTAssertEqual(t.events, [
             .state(phase: "hearing", conversation: true, closesAt: nil, checking: false, pending: true),
@@ -334,7 +335,8 @@ final class HandsFreeStreamTests: XCTestCase {
             .error("bad_json"),
             .setup(route: "open", echoExperiment: "active"),
             .setup(route: nil, echoExperiment: "off"),
+            .notTrigger(heard: "Cod.", throughEcho: false, echo: false),
         ])
-        XCTAssertEqual(t.raw.count, 14, "every line but bookkeeping is forwarded raw, unknown ones too")
+        XCTAssertEqual(t.raw.count, 15, "every line but bookkeeping is forwarded raw, unknown ones too")
     }
 }

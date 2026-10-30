@@ -10,6 +10,8 @@ export type Band = {
   working: boolean
   /** Speech that needed the trigger word just came without it (a few seconds' alarm). */
   missedTrigger: boolean
+  /** What was heard instead of the trigger word, the last time: shown with the alarm. */
+  missedHeard: string | null
   /** Hands-free has committed to a dictation: the user's words are being taken down. */
   transcribing: boolean
   /** Voice Operator is speaking. */

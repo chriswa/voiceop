@@ -333,6 +333,30 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.cues, ["notWakeWord"])
     }
 
+    func testWhatWasHeardInsteadOfTheTriggerGoesToTheClients() {
+        let h = harness { $0.heard = { _ in "Cod, what is Kevin doing?" } }
+        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(800))
+        let missed = h.events.compactMap { e -> (String, Bool, Bool)? in
+            if case .notTrigger(let heard, let throughEcho, let echo) = e.event { return (heard, throughEcho, echo) }
+            return nil
+        }
+        XCTAssertEqual(missed.map(\.0), ["Cod, what is Kevin doing?"])
+        XCTAssertEqual(missed.first?.1, false)
+        XCTAssertEqual(h.events.first { if case .notTrigger = $0.event { return true }; return false }?.client, nil,
+                       "every client on the source: it was nobody's trigger word")
+    }
+
+    func testThroughOurVoiceWhatWasHeardIsSentMarked() {
+        let h = harness {
+            $0.heard = { _ in "Control is waiting" }
+            $0.isEcho = { _ in true }
+        }
+        h.state.voiceOperatorSpeaking = true
+        h.state.throughEcho = true
+        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(800))
+        XCTAssertTrue(h.events.contains { $0.event == .notTrigger(heard: "Control is waiting", throughEcho: true, echo: true) })
+    }
+
     func testChecksOnlySpeechAfterAQuietSpell() {
         let h = harness { $0.heard = { _ in "Something else" } }
         h.hear(Sound.quiet(1500), Sound.speech(3000), Sound.quiet(400), Sound.speech(2000), Sound.quiet(300),

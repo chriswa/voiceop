@@ -444,16 +444,11 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
 
 **The drop after a dictation is macOS's (2026-10-30).** About 2.15 s after any
 app stops recording from the AirPods, macOS tears their recording link down and
-the music drops for about half a second. `--headset-probe` (also `POST
-/v1/debug/headset-probe?way=&cues=1` inside the app, which has the microphone
-permission a terminal may not) tried every way an app can open an input —
-`AVAudioEngine` stopped or paused, an input-only HAL unit, an `AudioQueue`, an
-`AVCaptureSession` — and the user heard the drop ~2 s after every one (the
-queue's showed no rebuild in the devices' properties, but dropped all the same).
-The private aggregate device is not it; nothing found on the web changes the
-timeout; AirPods high-quality recording (`bluetoothHighQualityRecording`) is
-iOS-only. Do not spend another evening on it: the remedies are not closing the
-headset's microphone (the hold) or not opening it (the Mac's microphone).
+the music drops for about half a second — whatever API opened the microphone.
+Everything tried, measured and read is in `docs/airpods-microphone-drop.md`: do
+not reopen it until macOS gets AirPods high-quality recording (iOS-only today).
+The remedies are not closing the headset's microphone (the hold) or not opening
+it (the Mac's microphone).
 
 **The Mac's microphone with headsets (2026-10-29).** A third way, a menu
 checkbox (`AudioPreferences.macMicrophoneWithHeadsets`, default off): while the

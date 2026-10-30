@@ -94,12 +94,6 @@ if CommandLine.arguments.contains("--summarize-test") {
     await DebugCLI.runSummarizeTest()
     exit(0)
 }
-// Which ways of opening a Bluetooth headset's microphone make it rebuild its
-// link after closing (see HeadsetProbe). Drops the music on the headset.
-if let i = CommandLine.arguments.firstIndex(of: "--headset-probe") {
-    await HeadsetProbe.run(only: CommandLine.arguments.dropFirst(i + 1).first)
-    exit(0)
-}
 // The echo experiment's recording kit (see EchoCapture): `--echo-capture [dir]`,
 // `--echo-capture phrases [dir]`, `--echo-replay <capture dir> [phrases dir]`.
 if let i = CommandLine.arguments.firstIndex(of: "--echo-capture") {

@@ -166,16 +166,6 @@ final class SpeechHTTPService: @unchecked Sendable {
             case .none: return .init(status: 500, object: ["error": "restart_not_recorded"])
             }
         }
-        // Development only: `HeadsetProbe` inside the app, which has the microphone
-        // permission. Refused while anything is dictating or listening.
-        if r.method == "POST", r.path == "/v1/debug/headset-probe" {
-            if let state = await snapshot?(), state.dictating || state.speaking || HandsFreeService.shared.isBusy {
-                return .init(status: 409, object: ["error": "busy"])
-            }
-            let way = r.query["way"].flatMap { $0.isEmpty ? nil : $0 }
-            let text = await HeadsetProbe.run(only: way, cues: r.query["cues"] == "1")
-            return .init(status: 200, object: ["report": text])
-        }
         if let route = TranscriptionRoute(method: r.method, path: r.path) {
             return await handle(route, body: r.body)
         }

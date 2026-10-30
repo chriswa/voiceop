@@ -44,7 +44,7 @@ To try it from a checkout instead:
 
 | You | What happens |
 | --- | --- |
-| `/handsfree` | Hands-free attaches to **this** session. Voice Operator takes hands-free (from Spaceterm, if it had it), plays its "ready" tones and says "Hands-free is on". Run it again to turn it off. |
+| `/handsfree` | Hands-free attaches to **this** session. Voice Operator takes hands-free (from Spaceterm, if it had it), plays its "ready" tones and says "Listening". Run it again to turn it off. |
 | `/handsfree on jarvis` | Turns it on with **jarvis** as the trigger word instead of **claude**. A further word picks a Kokoro voice, such as `/handsfree on claude bf_emma`. |
 | *"Claude, make the jump a bit higher."* | Hands-free hears the trigger word and takes down what you say until you've finished. It reaches the agent as your own prompt, and the agent's answer is spoken. "Clod" and "clawed" count as "Claude", since that's how speech recognition often writes it. |
 | *(just keep talking)* | For a short while after each reply you don't need the trigger word. After that, say "Claude" again. |

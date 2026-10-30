@@ -280,7 +280,7 @@ then `claude plugin install handsfree@voiceop`.)
 /handsfree
 ```
 
-Voice Operator says "Hands-free is on", and a line above the prompt shows
+Voice Operator says "Listening", and a line above the prompt shows
 **Say “Claude” first** or **Keep talking…**. Then just talk: *"Claude, make the
 jump a bit higher."*
 

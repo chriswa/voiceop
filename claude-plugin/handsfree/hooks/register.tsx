@@ -107,7 +107,7 @@ async function attach($: $, trigger: string, voice: string): Promise<string> {
   const replaced = field(answer, 'replaced')
   await attached($, Number(field(answer, 'generation') ?? 0))
   const spoken = word.charAt(0).toUpperCase() + word.slice(1)
-  await vo($, '/say', { form: { session_id: self.sessionId, text: `Hands-free is on. Say ${spoken} when you want me.` } })
+  await vo($, '/say', { form: { session_id: self.sessionId, text: 'Listening.' } })
   return `Hands-free is on for this session: say “${spoken}” to talk to it.`
     + (typeof replaced === 'string' ? ` (It was on in another session, ${replaced}, which no longer has it.)` : '')
 }

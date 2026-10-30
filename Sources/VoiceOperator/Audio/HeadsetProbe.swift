@@ -23,12 +23,24 @@ import Foundation
 /// some do, the others are the way to open it. **It drops the music on the
 /// headset several times**: run it while nothing is playing that matters.
 enum HeadsetProbe {
-    private static func note(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+    nonisolated(unsafe) private static var report: [String] = []
+    private static func note(_ s: String) {
+        report.append(s)
+        FileHandle.standardError.write(Data((s + "\n").utf8))
+    }
 
-    static func run() async {
+    /// `only`: one way's name, to run that one alone.
+    /// The report, as printed. Also run inside the app (`POST /v1/debug/headset-probe?way=`),
+    /// which has the microphone permission a process started from a terminal may not.
+    @discardableResult
+    static func run(only: String? = nil) async -> String {
+        report = []
+        defer { Log.log("headset-probe:\n" + report.joined(separator: "\n")) }
         note("headset-probe: output \(OutputDevice.formatSummary). Each way opens the default input for 1.5 s, "
              + "closes it, and watches 4 s. The music will drop.")
-        for (name, open) in ways {
+        for (name, open) in ways where only == nil || name == only {
+            queuePeak = 0
+            queueBuffers = 0
             try? await Task.sleep(for: .seconds(4))   // let the last one settle
             let opening = DeviceSettleWatch()
             guard let close = open() else { note("\(name): could not open"); continue }
@@ -43,9 +55,14 @@ enum HeadsetProbe {
             let rebuilt = firstMs(of: "out:cfge", in: closing.summary)
             note(String(format: "%@: closed in %.0f ms; link rebuilt %@", name, closeMs,
                         rebuilt.map { "at +\($0) ms" } ?? "not seen"))
+            if name != "auhal-input" {
+                note(String(format: "  heard: %d buffers, peak %.4f (0 = silence: the microphone gave nothing)",
+                            queueBuffers, Double(queuePeak) / 32768))
+            }
             note("  opening: \(opening.summary)")
             note("  closing: \(closing.summary)")
         }
+        return report.joined(separator: "\n")
     }
 
     private static func firstMs(of what: String, in summary: String) -> Int? {
@@ -65,11 +82,19 @@ enum HeadsetProbe {
     ] }
 
     nonisolated(unsafe) private static var kept: [AVAudioEngine] = []
+    nonisolated(unsafe) static var queuePeak: Int32 = 0
+    nonisolated(unsafe) static var queueBuffers = 0
 
     private static func engine(pause: Bool) -> (() -> Void)? {
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { _, _ in }
+        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { buffer, _ in
+            guard let channel = buffer.floatChannelData else { return }
+            var peak: Float = 0
+            for i in 0..<Int(buffer.frameLength) { peak = max(peak, abs(channel[0][i])) }
+            HeadsetProbe.queuePeak = max(HeadsetProbe.queuePeak, Int32(peak * 32767))
+            HeadsetProbe.queueBuffers += 1
+        }
         do { try engine.start() } catch { return nil }
         return {
             input.removeTap(onBus: 0)
@@ -86,6 +111,12 @@ enum HeadsetProbe {
                                                  mChannelsPerFrame: 1, mBitsPerChannel: 16, mReserved: 0)
         var queue: AudioQueueRef?
         let callback: AudioQueueInputCallback = { _, queue, buffer, _, _, _ in
+            let samples = buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self)
+            let count = Int(buffer.pointee.mAudioDataByteSize) / 2
+            var peak: Int32 = 0
+            for i in 0..<count { peak = max(peak, abs(Int32(samples[i]))) }
+            HeadsetProbe.queuePeak = max(HeadsetProbe.queuePeak, peak)
+            HeadsetProbe.queueBuffers += 1
             AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
         }
         guard AudioQueueNewInput(&format, callback, nil, nil, nil, 0, &queue) == noErr, let queue else { return nil }

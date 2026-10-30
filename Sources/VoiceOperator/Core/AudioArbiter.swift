@@ -143,8 +143,8 @@ final class AudioArbiter {
     /// voice link that long. The bursts of format changes before it (0.4 s, 0.75 s)
     /// are not the switch: unmuted after them, the music came back for a second and
     /// then dropped out for the reconfiguration (v0.1.115, three in three). So the
-    /// unmute waits for the configuration to end, then 250 ms.
-    private nonisolated static let headsetQuietAtEnd: TimeInterval = 0.25
+    /// unmute waits for the configuration to end, and no longer.
+    private nonisolated static let headsetQuietAtEnd: TimeInterval = 0
     private nonisolated static let headsetSwitchBackSign = "out:cfge"
     private nonisolated static let headsetCapAtEnd: TimeInterval = 4
     /// The watch at key-up keeps listening this long after the unmute, for the log:
@@ -679,7 +679,7 @@ final class AudioArbiter {
                 let provider = live?.leg?.provider.id ?? TranscriptionPreferences.primary
                 self.noteStreamHealth(.degraded(reason: TranscriberError.userMessage(for: error), provider: provider))
                 live?.trace.note("failed: \(TranscriberError.userMessage(for: error))")
-                SoundEffect.transcriptionFailed.play()
+                self.whenOutputIsBack { SoundEffect.transcriptionFailed.play() }
                 self.record(clip: clip, duration: duration, transcript: "", command: isCommand,
                             error: TranscriberError.userMessage(for: error), id: entryID)
             }
@@ -861,7 +861,7 @@ final class AudioArbiter {
                 self.save()
             } catch {
                 self.stopTranscriptionProgressCue()
-                SoundEffect.transcriptionFailed.play()
+                self.whenOutputIsBack { SoundEffect.transcriptionFailed.play() }
             }
         }
     }
@@ -910,7 +910,8 @@ final class AudioArbiter {
             do {
                 try await Task.sleep(for: TranscriptionProgressCue.initialDelay)
                 while !Task.isCancelled {
-                    SoundEffect.transcriptionPending.play()
+                    // Muted while a headset switches back (`outputPending`): skipped, not queued.
+                    if self.outputPending == nil { SoundEffect.transcriptionPending.play() }
                     try await Task.sleep(for: TranscriptionProgressCue.cueDuration)
                     try await Task.sleep(for: TranscriptionProgressCue.repeatGap)
                 }
@@ -964,7 +965,8 @@ final class AudioArbiter {
         // Re-paste keeps the transcript after the dictation is over, so incognito
         // drops it (and any older one) instead.
         lastInsertion = Incognito.isOn ? nil : text
-        TextInserter.insert(text) { SoundEffect.pasted.play() }
+        // After a headset dictation the output is still muted for the switch back: the cue waits for it.
+        TextInserter.insert(text) { [weak self] in self?.whenOutputIsBack { SoundEffect.pasted.play() } }
     }
     private func copy(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     /// What incognito refuses when a dictation would be filed: the clip and the

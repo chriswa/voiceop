@@ -453,7 +453,10 @@ still for 250 ms (2 s cap), and the output is muted only once the cue has played
 out. At key-up the microphone closes first; the output is unmuted, and the
 closing cue played, once the switch back has happened: a full reconfiguration
 of the output (`out:cfgb` … `out:cfge`) about 2.15 s after the microphone closes —
-macOS holds the voice link that long — then 250 ms (4 s cap). The format-change
+macOS holds the voice link that long — and no longer (4 s cap). Every sound
+the dictation makes after key-up (the closing cue, the pasted cue, an error)
+waits for the unmute (`whenOutputIsBack`); the transcribing beep is skipped
+while muted. The format-change
 bursts before it (0.4 s, 0.75 s) are not the switch; unmuting after them brought
 the music back for a second before it dropped out. The cost is the music, and
 the closing cue, about 2.4 s after key-up; holding the microphone open is the

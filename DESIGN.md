@@ -893,6 +893,17 @@ voice instead of standing aside (`SourceState.throughEcho`):
   (`AudioRecorder.setListener`); `MacEchoPath` lines them up, the reference
   60 ms early inside a 300 ms filter. Headsets and every non-`open` route never
   go through it.
+- **Mac, the record:** each reply heard through the canceller, with its
+  ring-out, gets an `echo-path` line in `decisions.jsonl` (`EchoDiagnostics`)
+  and three clips — the raw microphone (`echo-mic`), the reference as fed
+  (`echo-ref`) and the cancelled output (`echo-out`, the two `echo-clip` lines
+  name theirs): how much of the reply had a reference (`refCoveragePercent`),
+  how loud the echo was and how much was taken off (`micDb`, `outDb`,
+  `erleDb`), where the echo sits against the reference (`echoDelayMs`, which
+  the filter covers from 0 to `tailMs`, and its `correlation`), and the taps'
+  health (`refHealth`: buffers, buffers without a host time, the render-ahead).
+  The log gets a one-line summary per reply, and a line each time a speech
+  player's output is tapped.
 - **Phone:** the phone's own voice processing is trusted (it was always on, on
   the speaker); Voice Operator just stops standing aside for it.
 

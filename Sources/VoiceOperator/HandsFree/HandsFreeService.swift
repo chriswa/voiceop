@@ -503,11 +503,21 @@ final class HandsFreeService: @unchecked Sendable {
             macEcho = nil
             return pcm
         }
-        if macEcho == nil {
-            macEcho = MacEchoPath()
+        let path: MacEchoPath
+        if let macEcho { path = macEcho } else {
+            path = MacEchoPath()
+            macEcho = path
             Log.log("hands-free: the Mac's microphone goes through the echo canceller (echo experiment, \(OutputDevice.summary))")
         }
-        return macEcho?.process(pcm, hostTime: hostTime) ?? pcm
+        // Each reply, and its ring-out, kept whole for the record (`EchoDiagnostics`).
+        let ringing = host.speakingOrRinging(tailMs: Self.playbackTailMs)
+        if ringing, path.diagnostics == nil { path.diagnostics = EchoDiagnostics() }
+        let out = path.process(pcm, hostTime: hostTime)
+        if let diagnostics = path.diagnostics, !ringing || diagnostics.full {
+            path.diagnostics = nil
+            diagnostics.report(health: EchoReference.shared.health, resets: path.resets, output: OutputDevice.formatSummary)
+        }
+        return out
     }
 
     private func deliverMac(_ outgoing: HandsFreeEngine.Outgoing) {

@@ -15,6 +15,22 @@ final class EchoReference: @unchecked Sendable {
     private let lock = NSLock()
     private var segments: [(start: UInt64, samples: [Float])] = []
     private var _capturing = false
+    private var _health = Health()
+
+    /// How the taps have fared, for the per-reply record (`EchoDiagnostics`):
+    /// buffers taken, buffers dropped for want of a host time, and how far
+    /// ahead of the moment it was handed over the last buffer was stamped —
+    /// the render-ahead, which the stamp should already allow for.
+    struct Health: Equatable {
+        var taps = 0
+        var buffers = 0
+        var noHostTime = 0
+        var lastAheadMs: Double?
+        var latencyMs: Double?
+        var format: String?
+    }
+
+    var health: Health { lock.withLock { _health } }
 
     /// `--echo-capture` is recording: collect whatever the experiment says.
     var capturing: Bool {
@@ -34,9 +50,32 @@ final class EchoReference: @unchecked Sendable {
               let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Self.sampleRate, channels: 1, interleaved: false),
               let converter = AVAudioConverter(from: format, to: mono) else { return }
         let box = ConverterBox(converter)
+        let described = "\(Int(format.sampleRate)) Hz \(format.channelCount)ch"
+        let latencyMs = (latency() * 1000).rounded()
+        lock.withLock {
+            _health.taps += 1
+            _health.latencyMs = latencyMs
+            _health.format = described
+        }
+        Log.log("hands-free: echo reference taps the speech output (\(described), output latency \(Int(latencyMs)) ms, "
+                + "\(OutputDevice.summary))")
         mixer.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, when in
-            guard let self, when.isHostTimeValid, let pcm = box.convert(buffer, to: mono), !pcm.isEmpty else { return }
+            guard let self else { return }
+            guard when.isHostTimeValid else {
+                let first = self.lock.withLock { () -> Bool in
+                    self._health.noHostTime += 1
+                    return self._health.noHostTime == 1
+                }
+                if first { Log.log("hands-free: echo reference buffer without a host time — dropped, so nothing is cancelled") }
+                return
+            }
+            guard let pcm = box.convert(buffer, to: mono), !pcm.isEmpty else { return }
             let start = when.hostTime &+ AVAudioTime.hostTime(forSeconds: max(0, latency()))
+            let ahead = (AVAudioTime.seconds(forHostTime: when.hostTime) - AVAudioTime.seconds(forHostTime: mach_absolute_time())) * 1000
+            self.lock.withLock {
+                self._health.buffers += 1
+                self._health.lastAheadMs = ahead.rounded()
+            }
             self.append(pcm, at: start)
         }
     }
@@ -184,12 +223,15 @@ final class MacEchoPath {
     private let canceller = EchoCanceller()
     private var nextTime: UInt64?
     private var nextSeconds = 0.0
+    /// Times a gap in the microphone started the canceller over.
+    private(set) var resets = 0
     /// A chunk this far from where the clock says it belongs is a gap: start over.
     static let gapSeconds = 0.08
 
     func process(_ pcm: [Int16], hostTime: UInt64, reference: EchoReference = .shared) -> [Int16] {
         let seconds = AVAudioTime.seconds(forHostTime: hostTime)
         if nextTime == nil || abs(seconds - nextSeconds) > Self.gapSeconds {
+            if nextTime != nil { resets += 1 }
             canceller.reset()
             nextSeconds = seconds
         }
@@ -197,8 +239,13 @@ final class MacEchoPath {
         let ref = EchoCanceller.int16(reference.samples(from: start, count: pcm.count))
         nextSeconds += Double(pcm.count) / EchoReference.sampleRate
         nextTime = AVAudioTime.hostTime(forSeconds: nextSeconds)
-        return canceller.process(mic: pcm, reference: ref)
+        let out = canceller.process(mic: pcm, reference: ref)
+        diagnostics?.add(mic: pcm, reference: ref, out: out)
+        return out
     }
+
+    /// While set, every chunk's microphone, reference and output are kept for the reply's record.
+    var diagnostics: EchoDiagnostics?
 
     func reset() {
         canceller.reset()

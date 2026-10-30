@@ -55,6 +55,32 @@ final class EchoExperimentTests: XCTestCase {
         XCTAssertLessThan(db(out[lastSecond]), db(mic[lastSecond]) - 15)
     }
 
+    /// The record of a reply finds where the echo sits against the reference,
+    /// how much of the reply had one, and how much the canceller took off.
+    func testTheReplysRecordFindsTheEchoDelayAndWhatWasTakenOff() {
+        var seed: UInt64 = 7
+        func noise() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Double(Int64(bitPattern: seed >> 11) % 2000) / 1000 - 1
+        }
+        let rate = 16_000, delay = 1_440   // 90 ms
+        let played: [Int16] = (0..<rate * 10).map { $0 < rate * 8 ? Int16(noise() * 6000) : 0 }
+        let mic: [Int16] = played.indices.map { $0 >= delay ? played[$0 - delay] / 2 : 0 }
+        let out = EchoCapture.cancel(mic, reference: played)
+        let detail = EchoDiagnostics.analyse(mic: mic, reference: played, out: out)
+        XCTAssertEqual(detail["echoDelayMs"] as? Double ?? -1, 90, accuracy: 1)
+        XCTAssertGreaterThan(detail["correlation"] as? Double ?? 0, 0.9)
+        XCTAssertEqual(detail["refCoveragePercent"] as? Int, 80)
+        XCTAssertGreaterThan(detail["erleDb"] as? Double ?? 0, 10)
+    }
+
+    func testAReplyWithNoReferenceSaysSo() {
+        let mic = [Int16](repeating: 1000, count: 16_000)
+        let detail = EchoDiagnostics.analyse(mic: mic, reference: [Int16](repeating: 0, count: 16_000), out: mic)
+        XCTAssertEqual(detail["refCoveragePercent"] as? Int, 0)
+        XCTAssertNil(detail["erleDb"])
+    }
+
     func testTheReferenceIsLaidOutByHostTime() {
         let reference = EchoReference()
         let start = AVAudioTime.hostTime(forSeconds: 100)

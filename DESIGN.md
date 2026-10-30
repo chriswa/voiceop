@@ -451,10 +451,13 @@ audio is no sign the switch is over — on AirPods it is real sound 150 ms in,
 the switch still under way. So the start cue waits until the devices have been
 still for 250 ms (2 s cap), and the output is muted only once the cue has played
 out. At key-up the microphone closes first; the output is unmuted, and the
-closing cue played, once the switch back has shown — a burst of output stream
-changes (`out:spfi`) about 0.4 s after the microphone closes, sometimes twice —
-and 400 ms of quiet have followed it (2.5 s cap); the log lists what changed for
-3 s after the unmute too. The trace (start) and the log (end) list every change seen, with its time,
+closing cue played, once the switch back has happened: a full reconfiguration
+of the output (`out:cfgb` … `out:cfge`) about 2.15 s after the microphone closes —
+macOS holds the voice link that long — then 250 ms (4 s cap). The format-change
+bursts before it (0.4 s, 0.75 s) are not the switch; unmuting after them brought
+the music back for a second before it dropped out. The cost is the music, and
+the closing cue, about 2.4 s after key-up; holding the microphone open is the
+way to have neither. The log lists what changed for 3 s after the unmute too. The trace (start) and the log (end) list every change seen, with its time,
 so what a switch looks like can be read off them. A dictation started meanwhile
 settles that first (`outputIsBack`), or its mute would record "muted" as the user's own state.
 

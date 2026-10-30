@@ -1,7 +1,7 @@
 {
   "name": "handsfree",
   "displayName": "Hands-Free",
-  "version": "0.1.108",
+  "version": "0.1.109",
   "description": "Hands-free voice chat with one Claude Code session through Voice Operator: Kokoro speaks the agent's replies, Parakeet hears yours, with Voice Operator's trigger word, conversation window and talk-over interruption.",
   "author": {
     "name": "chriswa",

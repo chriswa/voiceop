@@ -213,7 +213,7 @@ async function watch($: $): Promise<void> {
       version = Number(state.version ?? -1)
       // Off, or moved to another session: the band goes.
       if (state.attached !== true || state.session_id !== self.sessionId) { detached($); return }
-      const next: Band = {
+      const fresh: Band = {
         phase: String(state.phase ?? 'off'),
         conversation: state.conversation === true,
         standingAside: typeof state.standing_aside === 'string' ? state.standing_aside : null,
@@ -225,7 +225,7 @@ async function watch($: $): Promise<void> {
         echoActive: state.echo_experiment === 'active',
         trigger: String(state.trigger ?? 'claude'),
       }
-      await update($, band, () => next)
+      await update($, band, () => fresh)
     }
   } finally {
     self.watching = false
@@ -298,7 +298,7 @@ export const register: Register = on => {
     if (!b || e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const t = trigger(b)
-    const lamp = (key: string, on: boolean, label: string, color: string) => on
+    const lamp = (key: string, lit: boolean, label: string, color: string) => lit
       ? <Text key={key} color={color} bold>{`  ● ${label}`}</Text>
       : <Text key={key} dimColor>{`  ○ ${label}`}</Text>
     return (

@@ -368,6 +368,18 @@ final class HandsFreeEngine: @unchecked Sendable {
         publishState()
     }
 
+    /// The client was asked to stop listening (its agent heard "stop
+    /// listening" inside a longer dictation): the same as the phrase dictated
+    /// on its own — the window closes as if it had run out, and speech without
+    /// the trigger word gets no cue until it is said again.
+    func stopListening(by client: String) {
+        guard live, triggers[client] != nil else { return }
+        deps.log("\(client) asked to stop listening: the trigger word again from here, and no cue for speech without it")
+        deps.record("stop-listening", ["client": client, "by": "client"])
+        if conversation { closeConversation(why: "stop-listening") } else { emit(client, .cue(.conversationClosed)) }
+        notWakeWordRun = Self.notWakeWordLimit
+    }
+
     /// The source is delivering audio. Turning it on opens the conversation
     /// window, so the first words need no trigger word; `reopened` (a stalled
     /// source back) leaves the window as it was.

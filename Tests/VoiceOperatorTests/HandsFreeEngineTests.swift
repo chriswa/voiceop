@@ -694,6 +694,21 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.cues.last, "notWakeWord")
     }
 
+    func testTheClientCanStopListeningForTheUser() {
+        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Sure, I can look" } }
+        inConversation(h)
+        h.engine.stopListening(by: "nobody")
+        XCTAssertTrue(h.conversation, "only a registered client")
+        h.engine.stopListening(by: "spaceterm")
+        XCTAssertFalse(h.conversation)
+        XCTAssertEqual(h.cues.last, "conversationClosed")
+        XCTAssertEqual(h.phase, .listening, "hands-free stays on")
+        notAddressed(h)
+        notAddressed(h)
+        XCTAssertNotEqual(h.cues.last, "notWakeWord", "no cue for speech without the trigger word")
+        XCTAssertEqual(h.recorded("not-wake-word").map { $0["cued"] as? Bool }, [false, false])
+    }
+
     func testTheNotTheTriggerCuePlaysThreeTimesInARowThenStopsUntilTheTrigger() {
         let h = harness()
         for _ in 0..<5 { notAddressed(h) }

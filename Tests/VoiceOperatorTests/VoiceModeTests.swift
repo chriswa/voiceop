@@ -82,6 +82,7 @@ final class VoiceModeTests: XCTestCase {
     private var cancelled: [String] = []
     private var cues: [SoundEffect] = []
     private var windows = 0
+    private var stops = 0
     private var saved: [VoiceMode.Attachment?] = []
     private var alive: Set<Int32> = [100, 200]
     private var refuse: HandsFreeService.Refusal?
@@ -106,6 +107,7 @@ final class VoiceModeTests: XCTestCase {
             setHandsFree: { [unowned self] in handsFree.append($0) },
             unregisterHandsFree: { [unowned self] in registered.append("-") },
             openConversation: { [unowned self] in windows += 1 },
+            stopListening: { [unowned self] in stops += 1 },
             speak: { [unowned self] text, _ in spoken.append(text); return "job\(spoken.count)" },
             cancelSpeech: { [unowned self] id, _ in cancelled.append(id); return 9 },
             playCue: { [unowned self] in cues.append($0) },
@@ -169,6 +171,22 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertEqual(other, .gone("not_attached"))
         let unattached = await mode.turnEnded(input("s2", ["last_assistant_message": "x"]))
         XCTAssertNil(unattached)
+    }
+
+    func testStopListeningKeepsTheWindowShutUntilTheUserSpeaks() async throws {
+        let mode = make()
+        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
+        XCTAssertFalse(mode.stopListening(sessionID: "s2"), "only the attached session")
+        XCTAssertTrue(mode.stopListening(sessionID: "s1"))
+        XCTAssertEqual(stops, 1)
+        _ = await mode.turnEnded(input("s1", ["last_assistant_message": "Okay, I'll wait."]))
+        XCTAssertEqual(spoken, ["Okay, I'll wait."])
+        XCTAssertEqual(windows, 0, "the reply does not open the window again")
+        // The trigger word, then words: replies open the window again.
+        mode.handsFree(["type": "transcript", "text": "Claude, I'm back.", "trigger": "claude",
+                        "interrupted": false, "reason": "mini", "shutdown": false])
+        _ = await mode.turnEnded(input("s1", ["last_assistant_message": "Welcome back."]))
+        XCTAssertEqual(windows, 1)
     }
 
     func testASonarPlaysWhileTheAgentWorks() async throws {

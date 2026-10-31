@@ -90,6 +90,8 @@ final class VoiceMode {
         var unregisterHandsFree: () -> Void
         /// Our voice is about to speak: the user may answer without the trigger word.
         var openConversation: () -> Void = {}
+        /// The agent was told to stop listening: the trigger word is needed again, without the cue.
+        var stopListening: () -> Void = {}
         /// Speak `text` in `voice`; the speech job's id, or nil.
         var speak: (_ text: String, _ voice: String) async -> String?
         /// Stop job `id`, heard until then; how far into its text it got (UTF-16).
@@ -111,6 +113,7 @@ final class VoiceMode {
             setHandsFree: { HandsFreeService.shared.setLocal(VoiceMode.clientName, on: $0) },
             unregisterHandsFree: { HandsFreeService.shared.unregisterLocal(VoiceMode.clientName) },
             openConversation: { HandsFreeService.shared.openConversationLocal(VoiceMode.clientName) },
+            stopListening: { HandsFreeService.shared.stopListeningLocal(VoiceMode.clientName) },
             speak: { text, voice in
                 guard let result = await SpeechJobManager.shared.enqueue(parts: [.init(text: text, voice: voice)]),
                       result.error == nil else { return nil }
@@ -186,6 +189,9 @@ final class VoiceMode {
     private var heardBeforeCutIn: String?
     private var cutInPending = false
     private var pendingBeep: Task<Void, Never>?
+    /// The agent stopped listening (`stopListening`): its replies leave the
+    /// conversation window shut, until the user next says something.
+    private(set) var listeningStopped = false
     /// The sonar, while the session's main thread works (`setWorking`).
     private var sonar: Task<Void, Never>?
     /// Spaceterm's thinking cue: the first echo after 1.5 s, then one every 2.5 s.
@@ -255,6 +261,7 @@ final class VoiceMode {
         strand(why: "hands-free went off before it was delivered")
         phase = "off"
         conversation = false
+        listeningStopped = false
         standingAside = nil
         setPendingBeep(false)
         setWorking(false)
@@ -446,6 +453,18 @@ final class VoiceMode {
         return true
     }
 
+    /// The agent's `stop_listening` tool: the user said "stop listening" in
+    /// the middle of something longer, which hands-free only catches on its
+    /// own. The window closes now, and the reply that follows does not open it
+    /// again: the trigger word is needed, and speech without it gets no cue.
+    func stopListening(sessionID: String) -> Bool {
+        guard isAttached(sessionID) else { return false }
+        listeningStopped = true
+        deps.stopListening()
+        Log.log("voice mode: the agent stopped listening; the trigger word again from here")
+        return true
+    }
+
     /// A transcript as if hands-free had heard it — for testing the plugin end
     /// to end without speaking (`POST /v1/voice-mode/simulate`). Only for the
     /// session the test attached: if the user's own session took hands-free
@@ -462,8 +481,9 @@ final class VoiceMode {
         let text = VoiceModeText.spoken(markdown)
         guard !text.isEmpty else { return }
         let voice = attachment?.voice ?? KokoroSynthesizer.defaultVoiceID
-        // The agent took longer than the window lasts, most turns: its answer opens it again.
-        deps.openConversation()
+        // The agent took longer than the window lasts, most turns: its answer opens it again,
+        // unless it was told to stop listening.
+        if !listeningStopped { deps.openConversation() }
         guard let job = await deps.speak(text, voice) else {
             Log.log("voice mode: the reply could not be spoken (muted, or speech unavailable)")
             return
@@ -507,6 +527,7 @@ final class VoiceMode {
         let heard = interrupted ? heardBeforeCutIn : nil
         if interrupted { heardBeforeCutIn = nil }
         guard !said.isEmpty || interrupted else { return }
+        listeningStopped = false
         inbox.append(Heard(said: said, interrupted: interrupted, heard: heard))
         Log.log("voice mode: heard \(said.count) chars\(interrupted ? " (over the reply)" : "") for \(attachment?.project ?? "?")")
         let session = attachment?.sessionID

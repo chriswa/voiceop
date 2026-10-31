@@ -1129,10 +1129,17 @@ microphone back automatically when the taker lets go.
   the system prompt while attached, so they outlive compaction and leave when
   it is off. The rules ask the agent to keep its main thread free for talking,
   by doing long work in background subagents.
-- While attached, the model has two tools of the mod's (`$.tool.register`):
-  `mcp__handsfree__stop` and `mcp__handsfree__say`, which its `tool.check`
-  hook allows with nobody at the keyboard. The engine has no unregister, so
-  after detaching they stay, and answer that hands-free is off.
+- While attached, the model has three tools of the mod's (`$.tool.register`):
+  `mcp__handsfree__stop`, `mcp__handsfree__stop_listening` and
+  `mcp__handsfree__say`, which its `tool.check` hook allows with nobody at the
+  keyboard. The engine has no unregister, so after detaching they stay, and
+  answer that hands-free is off.
+- `stop_listening` (`POST stop-listening {session_id}`) is for "stop
+  listening" said inside something longer, which the engine only catches on
+  its own: `HandsFreeEngine.stopListening(by:)` closes the window as the
+  dictated phrase does, with no `notWakeWord` cue until the trigger word, and
+  `VoiceMode` keeps the reply that follows from opening it again, until the
+  user next says something.
 - `prompt.submit` from the keyboard carries any notice that hands-free went off
   under the session (`hooks/user-prompt-submit`).
 - `classic.Notification` reads permission prompts aloud.

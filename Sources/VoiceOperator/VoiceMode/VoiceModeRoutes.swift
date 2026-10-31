@@ -67,6 +67,10 @@ enum VoiceModeRoutes {
             let ok = await VoiceMode.shared.say(sessionID: form["session_id"] ?? "", text: text)
             return ok ? Answer(status: 202, object: ["spoken": true])
                 : Answer(status: 409, object: ["error": "not_attached", "detail": "voice mode is not attached to this session"])
+        case ("POST", "/stop-listening"):
+            let ok = VoiceMode.shared.stopListening(sessionID: Self.form(body)["session_id"] ?? "")
+            return ok ? Answer(status: 202, object: ["stopped": true])
+                : Answer(status: 409, object: ["error": "not_attached", "detail": "voice mode is not attached to this session"])
         case ("POST", "/working"):
             let form = Self.form(body)
             let ok = VoiceMode.shared.setWorking(sessionID: form["session_id"] ?? "", form["on"] == "1" || form["on"] == "true")

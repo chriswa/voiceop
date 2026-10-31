@@ -391,6 +391,13 @@ final class HandsFreeService: @unchecked Sendable {
         queue.async { [self] in mac?.engine.openConversation(by: name) }
     }
 
+    /// The local client was asked to stop listening: the trigger word is
+    /// needed again, with no cue for speech without it
+    /// (`HandsFreeEngine.stopListening(by:)`).
+    func stopListeningLocal(_ name: String) {
+        queue.async { [self] in mac?.engine.stopListening(by: name) }
+    }
+
     func unregisterLocal(_ name: String) {
         queue.async { [self] in
             guard clients[name] != nil else { return }

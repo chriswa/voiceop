@@ -16,7 +16,7 @@ import type { Band } from '../types'
  * - While the main thread works, Voice Operator plays a sonar (`/working`);
  *   anything said meanwhile rides in with the next tool result.
  * - While attached, the system prompt carries the hands-free rules
- *   (hands-free.md), and the model has two tools: `stop` and `say`.
+ *   (hands-free.md), and the model has three tools: `stop`, `stop_listening` and `say`.
  * - While attached, a band above the prompt says what hands-free is doing:
  *   whether the trigger word is needed, or the user can just keep talking.
  */
@@ -28,6 +28,7 @@ const RULES_ID = 'handsfree:rules'
 const STOP = 'mcp__handsfree__stop'
 const band = atom({ plugin: 'handsfree', key: 'band' } as const, null)
 const SAY = 'mcp__handsfree__say'
+const STOP_LISTENING = 'mcp__handsfree__stop_listening'
 
 /** What this session's side knows. Module state: a reload asks Voice Operator again (`resume`). */
 const self = {
@@ -121,7 +122,13 @@ async function attached($: $, generation: number): Promise<void> {
   if (!self.toolsRegistered) {
     await $.tool.register({
       name: 'stop',
-      description: 'Turns hands-free voice chat off for this session: the user\'s voice is no longer listened for and your replies are no longer spoken. Use when the user asks to turn hands-free, voice chat or listening off, or to go back to typing.',
+      description: 'Turns hands-free voice chat off entirely for this session: the user\'s voice is no longer listened for at all and your replies are no longer spoken. Only when they ask to turn hands-free or voice chat off, or to go back to typing. Not for "stop listening": that is `stop_listening`.',
+      inputSchema: { type: 'object', properties: {} },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'stop_listening',
+      description: 'Hands-free stays on, but the user must say the trigger word again before you hear them, and other speech meanwhile makes no warning sound. Use when they say "stop listening", "stop listening for now", "don\'t listen", "I\'m not talking to you", or similar. Your final reply is still spoken.',
       inputSchema: { type: 'object', properties: {} },
       isDeferred: false,
     })
@@ -362,6 +369,12 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: STOP }, async $ => ({ result: await detach($) }))
+  on('tool.call', { tool: STOP_LISTENING }, async $ => {
+    const answer = await vo($, '/stop-listening', { form: { session_id: self.sessionId } })
+    if (answer?.status === 202) return { result: 'Stopped listening: the trigger word is needed again. Your final reply is still spoken.' }
+    if (answer?.status === 404) return { result: 'Not done: this Voice Operator is too old for it. Restart Voice Operator to update it.' }
+    return { result: 'Not done: hands-free is off.' }
+  })
   on('tool.call', { tool: SAY }, async ($, e) => {
     const text = typeof e.text === 'string' ? e.text : ''
     const answer = await vo($, '/say', { form: { session_id: self.sessionId, text } })
@@ -370,6 +383,7 @@ export const register: Register = on => {
   // Its own tools need nobody at the keyboard.
   on('tool.check', { tool: STOP }, () => ({ decision: 'allow' as const, reason: 'hands-free\'s own control' }))
   on('tool.check', { tool: SAY }, () => ({ decision: 'allow' as const, reason: 'hands-free\'s own control' }))
+  on('tool.check', { tool: STOP_LISTENING }, () => ({ decision: 'allow' as const, reason: 'hands-free\'s own control' }))
 
   // Typed at the keyboard: if hands-free went off under the session (Spaceterm took it back,
   // "let me turn this off"), or the user spoke meanwhile, that goes with the prompt.

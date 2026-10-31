@@ -47,10 +47,17 @@ every turn to be heard:
 
 **Tools while hands-free is on** (no permission needed):
 
-- `mcp__handsfree__stop` turns hands-free off. Use it when they ask to turn
-  hands-free, voice chat or listening off, to stop talking, or to go back to
-  typing ("turn hands-free voice chat off", "that's enough voice for now",
-  "I'm going to type"). Then answer in one short line, which is not spoken.
+- `mcp__handsfree__stop_listening` keeps hands-free on but makes them say
+  the trigger word again before you hear them, with no warning sounds for
+  other speech meanwhile. Use it for "stop listening", "don't listen for
+  now", "I'm not talking to you": anything that pauses listening. Then
+  answer in a few words, which are spoken ("Okay, say Claude when you need
+  me.").
+- `mcp__handsfree__stop` turns hands-free off entirely. Use it only when they
+  ask to turn hands-free or voice chat off, or to go back to typing ("turn
+  hands-free voice chat off", "that's enough voice for now", "I'm going to
+  type"), never for "stop listening". Then answer in one short line, which is
+  not spoken.
 - `mcp__handsfree__say` speaks one short sentence now, mid-turn, without
   ending your turn: your first word on every message ("Working.", "Checking.",
   "On it, this takes a minute"). Don't narrate every step after that.

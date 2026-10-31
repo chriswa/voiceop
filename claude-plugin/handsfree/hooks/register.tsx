@@ -338,23 +338,25 @@ export const register: Register = on => {
     return { sections: [...composed.sections, { id: RULES_ID, text: self.rules, scope: 'session' as const }] }
   })
 
+  // `idle` follows the main thread whether attached or not: a turn that turned hands-free off
+  // (the agent's `stop`) left it false for good, so turning it back on never listened (October 31).
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined && self.attached) {
-      self.idle = false
-      await vo($, '/working', { form: { session_id: self.sessionId, on: 1 } })
-    }
+    if (e.agentId !== undefined) return next(e)
+    self.idle = false
+    if (self.attached) await vo($, '/working', { form: { session_id: self.sessionId, on: 1 } })
     return next(e)
   })
 
   // The main thread's answer is spoken, and the next thing said becomes its next prompt.
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId !== undefined || !self.attached) return done
+    if (e.agentId !== undefined) return done
+    self.idle = true
+    if (!self.attached) return done
     const spoken = e.isAborted ? '' : e.answer
     const answer = await vo($, '/hooks/stop', { json: { session_id: self.sessionId, last_assistant_message: spoken } })
     if (answer?.status === 200) self.generation = Number(answer.text) || self.generation
     else if (answer?.status === 204) detached($)
-    self.idle = true
     if (self.attached) void listen($)
     return done
   })

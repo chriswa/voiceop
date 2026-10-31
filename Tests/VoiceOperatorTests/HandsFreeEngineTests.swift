@@ -811,14 +811,14 @@ final class HandsFreeEngineTests: XCTestCase {
 
     // MARK: Through our own voice (the echo experiment)
 
-    func testThroughOurVoiceTheWindowStillNeedsTheTriggerWord() {
+    func testThroughOurVoiceWordsInTheWindowInterruptWithoutTheTriggerWord() {
         let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Yes, and tell Evan" } }
         inConversation(h)
         h.state.voiceOperatorSpeaking = true
         h.state.throughEcho = true
         h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(800))
-        XCTAssertEqual(h.dictations.count, 1, "words without the trigger started a dictation through our own voice")
-        XCTAssertEqual(h.cutIns, [])
+        XCTAssertEqual(h.dictations.count, 2, "words without the trigger in the window interrupt through our own voice")
+        XCTAssertEqual(h.cutIns.count, 1)
         XCTAssertEqual(h.recorded("check").last?["throughEcho"] as? Bool, true)
     }
 

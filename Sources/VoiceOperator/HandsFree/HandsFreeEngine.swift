@@ -543,8 +543,9 @@ final class HandsFreeEngine: @unchecked Sendable {
         }
         for candidate in listener.push([frame]) {
             // In the conversation window any words will do; otherwise they must start with a trigger word.
-            // Through our own voice, only the trigger word: what leaks through is words too.
-            let window = conversation && !state.throughEcho
+            // Through our own voice too: any words interrupt, and what leaks through is told from the user
+            // by `deps.isEcho` (its words are a run of what was just said), not by needing the trigger word.
+            let window = conversation
             let throughEcho = state.throughEcho
             deps.log("speech after \(candidate.noSpeechBeforeMs)ms without speech — checking its start "
                      + (window ? "for words" : "for a trigger word"))
@@ -986,7 +987,9 @@ final class HandsFreeEngine: @unchecked Sendable {
             speechRun = 0
             if frame.p < SpeechGate.stop { quietRun += 1 }
         }
-        if !ducked, speechRun >= SpeechGate.startFrames { setDuck(true) }
+        // Through echo cancellation the volume is not turned down: what sounds like speech is mostly leak,
+        // and a duck that comes and goes with it is the pumping. The check cuts the voice off if it was them.
+        if !ducked, !echoing, speechRun >= SpeechGate.startFrames { setDuck(true) }
         unduckIfDone()
         noteEcho(frame)
     }

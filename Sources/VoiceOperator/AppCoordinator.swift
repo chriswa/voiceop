@@ -193,6 +193,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             arbiter.macMicrophoneChoiceChanged()
             return AudioPreferences.macMicrophoneWithHeadsets
         }
+        menuBar.conversationTimeoutState = { HandsFreePreferences.conversationTimeout }
+        menuBar.onSetConversationTimeout = { timeout in
+            HandsFreePreferences.conversationTimeout = timeout
+            Log.log("hands-free: conversation window closes after \(timeout.rawValue) s of quiet (menu)")
+            HandsFreeRecord.shared.write("conversation-timeout", ["seconds": timeout.rawValue])
+        }
         menuBar.echoExperimentState = { EchoExperiment.isOn }
         menuBar.onToggleEchoExperiment = {
             EchoExperiment.isOn.toggle()

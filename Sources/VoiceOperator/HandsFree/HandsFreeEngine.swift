@@ -28,7 +28,7 @@ import Foundation
 /// After the trigger word, and as hands-free is turned on, a conversation window
 /// opens: speech starts a dictation without the trigger word — the check is only
 /// that it was words, not a cough or filler. It stays open while either side is
-/// speaking and closes once neither has for `conversationMs`. "Let me turn this
+/// speaking and closes once neither has for `conversationMs()`. "Let me turn this
 /// off", or "<trigger>, shutdown", closes it at once; so does "stop listening",
 /// as if it had run out, and hands-free stays on.
 ///
@@ -233,6 +233,9 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// no trigger word said otherwise.
     private var owner: String
     var sourceState: () -> SourceState = { SourceState() }
+    /// How long the conversation window outlasts quiet, read each time it is
+    /// needed so the menu's choice (`HandsFreePreferences`) applies at once.
+    var conversationMs: () -> Double
 
     private(set) var phase: Phase = .off
     private var live = false
@@ -323,6 +326,7 @@ final class HandsFreeEngine: @unchecked Sendable {
     init(owner: String, trigger: String, scorer: FrameScorer, tuning: HandsFreeTuning = .standard, deps: Deps) {
         self.owner = owner
         self.tuning = tuning
+        conversationMs = { tuning.conversationMs }
         self.deps = deps
         self.scorer = scorer
         triggers[owner] = trigger
@@ -395,7 +399,7 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     /// The source stopped delivering: turned off (`final`), or stalled. A
     /// dictation under way is lost. A stalled source keeps the window open for
-    /// `conversationMs`, waiting for it.
+    /// `conversationMs()`, waiting for it.
     func sourceStopped(final: Bool) {
         guard live || final else { return }
         live = false
@@ -408,7 +412,7 @@ final class HandsFreeEngine: @unchecked Sendable {
             deps.log("the source stalled: the conversation window waits for it")
             stalls += 1
             let stall = stalls
-            _ = deps.after(tuning.conversationMs) { [weak self] in
+            _ = deps.after(conversationMs()) { [weak self] in
                 guard let self, !self.live, self.stalls == stall else { return }
                 self.closeConversation(why: "source")
             }
@@ -848,7 +852,7 @@ final class HandsFreeEngine: @unchecked Sendable {
     }
 
     /// Each frame, while the window is open: anyone speaking — the user, or the
-    /// client's voice — holds it open; once both are quiet, `conversationMs`
+    /// client's voice — holds it open; once both are quiet, `conversationMs()`
     /// of that closes it.
     private func tickConversation(_ state: SourceState) {
         guard conversation else { return }
@@ -856,11 +860,12 @@ final class HandsFreeEngine: @unchecked Sendable {
             || state.voiceOperatorSpeaking || state.deaf != nil
         silentFrames = someoneSpeaking ? 0 : silentFrames + 1
         let quietMs = Double(silentFrames) * HandsFreeAudio.frameMs
-        if quietMs >= tuning.conversationMs {
+        let windowMs = conversationMs()
+        if quietMs >= windowMs {
             closeConversation(why: "silence")
             return
         }
-        closesAt = someoneSpeaking ? nil : (closesAt ?? deps.now() + tuning.conversationMs - quietMs)
+        closesAt = someoneSpeaking ? nil : (closesAt ?? deps.now() + windowMs - quietMs)
     }
 
     /// "Stop listening", dictated: the window closes as if it had run out, and

@@ -24,6 +24,8 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let keepMicOpen = NSMenuItem(title: "Keep Microphone Always On", action: #selector(toggleKeepMicOpen), keyEquivalent: "")
     private let keepMicOpenForWireless = NSMenuItem(title: "Only When Using AirPods (Bluetooth)", action: #selector(toggleKeepMicOpenForWireless), keyEquivalent: "")
     private let macMicrophoneWithHeadsets = NSMenuItem(title: "Use the Mac's Microphone with AirPods (Bluetooth)", action: #selector(toggleMacMicrophoneWithHeadsets), keyEquivalent: "")
+    /// How long hands-free keeps listening without the trigger word once everyone is quiet.
+    private let conversationTimeout = NSMenuItem(title: "Hands-Free Listening Timeout", action: nil, keyEquivalent: "")
     private let echoExperiment = NSMenuItem(title: "Echo Cancellation on Speakers (Experimental)", action: #selector(toggleEchoExperiment), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
@@ -106,6 +108,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     /// Reads and flips hands-free's echo experiment (`EchoExperiment`). Off is
     /// how hands-free has always behaved; the flip returns the state afterwards.
     var echoExperimentState: (() -> Bool)?
+    /// Reads and sets the conversation window's timeout (`HandsFreePreferences`).
+    var conversationTimeoutState: (() -> ConversationTimeout)?
+    var onSetConversationTimeout: ((ConversationTimeout) -> Void)?
     var onToggleEchoExperiment: (() -> Bool)?
     var sttHistoryProvider: (() -> [STTHistoryEntry])?
     var commandHistoryProvider: (() -> [CommandHistoryEntry])?
@@ -220,6 +225,14 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         macMicrophoneWithHeadsets.toolTip = "Listen on AirPods or another Bluetooth headset, but record from the Mac's "
             + "own microphone: the headset never switches into its call mode, so the music never drops."
         macMicrophoneWithHeadsets.target = self; menu.addItem(macMicrophoneWithHeadsets)
+        let timeouts = NSMenu()
+        for timeout in ConversationTimeout.allCases {
+            let item = NSMenuItem(title: timeout.title, action: #selector(chooseConversationTimeout(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = timeout.rawValue; timeouts.addItem(item)
+        }
+        conversationTimeout.toolTip = "After the trigger word or a reply, hands-free takes speech without the trigger word "
+            + "until both sides have been quiet this long."
+        conversationTimeout.submenu = timeouts; menu.addItem(conversationTimeout)
         echoExperiment.toolTip = "Off: hands-free does not listen while our voice plays on a speaker the microphone hears. "
             + "On: it listens through echo cancellation, and only \"Control\" cuts in. Headsets are never affected."
         echoExperiment.target = self; menu.addItem(echoExperiment)
@@ -319,6 +332,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         keepMicOpenForWireless.state = (keepMicOpenForWirelessState?() ?? false) ? .on : .off
         macMicrophoneWithHeadsets.state = (macMicrophoneWithHeadsetsState?() ?? false) ? .on : .off
         echoExperiment.state = (echoExperimentState?() ?? false) ? .on : .off
+        let timeout = (conversationTimeoutState?() ?? .s15).rawValue
+        for item in conversationTimeout.submenu!.items {
+            item.state = item.representedObject as? Int == timeout ? .on : .off
+        }
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT,
                 copyRaw: onCopyRawSTT, copyShadow: onCopyShadowSTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand,
@@ -481,6 +498,10 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func toggleKeepMicOpen() { keepMicOpen.state = (onToggleKeepMicOpen?() ?? false) ? .on : .off }
     @objc private func toggleEchoExperiment() {
         echoExperiment.state = (onToggleEchoExperiment?() ?? false) ? .on : .off
+    }
+    @objc private func chooseConversationTimeout(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? Int, let timeout = ConversationTimeout(rawValue: raw) else { return }
+        onSetConversationTimeout?(timeout)
     }
 
     @objc private func toggleMacMicrophoneWithHeadsets() {

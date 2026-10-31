@@ -1083,7 +1083,8 @@ so they are not listened through on speakers. A `cut-in` cancels its replies
 with `heard_until`, and the agent is told the last words heard. `duck` is
 ignored, as Spaceterm ignores it for speech on the Mac. Each reply it speaks
 opens the conversation window again (`openConversationLocal` →
-`HandsFreeEngine.openConversation(by:)`). The window lasts 15 s, and most agent
+`HandsFreeEngine.openConversation(by:)`). The window lasts 15 s by default (the menu's Hands-Free Listening Timeout
+offers up to 5 min), and most agent
 turns take longer than that, so without this the user would need the trigger
 word to answer every reply.
 

@@ -770,6 +770,7 @@ final class HandsFreeService: @unchecked Sendable {
             continuousTurn: { [weak self] in self?.miniModel?.stream() },
             isEcho: { RecentSpeech.shared.isEcho($0) })
         let engine = HandsFreeEngine(owner: owner, trigger: trigger, scorer: EnergyScorer(), deps: deps)
+        engine.conversationMs = { HandsFreePreferences.conversationTimeout.ms }
         if let url = SileroVAD.bundledModelURL() {
             do { engine.setScorer(try SileroVAD(modelURL: url)) } catch {
                 Log.log("hands-free: speech detector unavailable (\(error)) — using loudness, which hears music as speech")

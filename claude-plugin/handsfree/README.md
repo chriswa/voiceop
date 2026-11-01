@@ -53,7 +53,7 @@ To try it from a checkout instead:
 | *(speak while it works)* | Your words reach the agent with its next tool result, so you can redirect it mid-task. |
 | *"Turn hands-free voice chat off"* | The agent turns hands-free off with its `stop` tool and goes back to text. |
 | *"Let me turn this off"* or *"Claude, shutdown"* | Voice Operator turns it off itself. |
-| *"Stop listening"* | Only closes the conversation window, with no warning sounds for other speech until you say "Claude" again. Said on its own, Voice Operator does it; inside a longer sentence, the agent does it with its `stop_listening` tool. |
+| *"Stop listening"* | Only closes the conversation window, with no warning sounds for other speech until you say "Claude" again. Said on its own, voice mode does it; inside a longer sentence, the agent does it with its `stop_listening` tool. |
 | `/handsfree off` | Turns it off from the keyboard. So does **Turn Off Claude Hands-Free** in Voice Operator's menu. |
 | `/handsfree status` | Says whether it's on, for which session, and what hands-free is doing. |
 

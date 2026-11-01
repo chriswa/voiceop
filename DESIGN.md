@@ -1020,6 +1020,7 @@ hands-free:
 | `{"type":"start","source":"mac"}` | Hands-free on, on the Mac's microphone. Answered with `session`. |
 | `{"type":"stop"}` | Off, wherever it is on. |
 | `{"type":"playing","on":bool}` | The client is playing sound of its own on the Mac (a cue): not listened through, plus a tail. |
+| `{"type":"attention","state":"engaged"\|"lapsed"\|"dismissed","closesAt":ms\|null}` | The client's attention, on its Mac session (see "Attention" below). |
 
 **Stream connection** — a device's audio, for a client already registered:
 
@@ -1031,19 +1032,43 @@ hands-free:
 | `{"type":"audio","at":<n>,"data":<base64 s16le mono>}` | `at` is the 16 kHz sample position of the chunk's first sample (at the stream's own rate it is converted). Overlap with what was received is dropped; a hole resets listening. Acked about once a second: `ack {at}` — the SDK may forget audio before it. |
 | `{"type":"playing","on":bool,"speech":bool,"echoCancelled":bool}` | The device is playing; `speech`: the client's voice, which hands-free turns down for the user and can cut off; `echoCancelled`: the microphone does not hear it. |
 | `{"type":"route","route":"ear"\|"open"\|"unsure","voiceProcessing":bool}` | Where the device's sound goes, and whether its echo cancellation is on. Sent on change and after a resume. The echo experiment acts only on `open` with `voiceProcessing`. |
+| `{"type":"attention",…}` | The client's attention, on this stream's session (see "Attention" below). |
 | `{"type":"stop"}` | Off. |
 
 Audio a resumed stream replays from more than 2 s ago resets listening unless a
 dictation was under way: it is history, not the user talking now.
 
+**Attention.** Whether the user needs the trigger word is the client's
+attention (`HandsFreeEngine.Attention`), and only the client changes it — never
+the engine, on a trigger word, a clock or a count:
+
+- `engaged`: the conversation window. Any words start a dictation.
+- `lapsed`: the client let it go, on a timeout of its own, and the user may not
+  know: speech without the trigger word gets the alarm (`notWakeWord`) and the
+  "deciding" beep before it. A session starts here, until the client says.
+- `dismissed`: the user ended it ("stop listening", "stop talking") and knows:
+  speech without the trigger word gets nothing, not even the deciding beep.
+
+Leaving `engaged` plays `conversationClosed`; moving between `lapsed` and
+`dismissed` plays nothing. Only the client whose window it is can end it. What
+the client decides by: `state.quiet` (nobody speaking on the source — not the
+user, not our voice — and nothing checked, dictated or stood aside for), every
+`not-trigger`, and every `notWakeWord` cue. Spaceterm
+(`src/server/hands-free-attention.ts`) and voice mode (`AttentionKeeper`) keep
+it the same way: engaged as a session starts and whenever the user speaks to
+them, lapsed after `conversationMs` of quiet, dismissed after three alarms or
+when the user says to stop listening. Recognising "stop listening" is theirs
+too: Voice Operator sends it as an ordinary transcript.
+
 **Voice Operator sends**, on the connection that started the session:
 
 | Message | Meaning |
 | --- | --- |
-| `session {source, session?}` / `session-ended {why}` | On / off: `off`, `shutdown` (said by voice), `replaced`, `lost`, `restarting` (Voice Operator is quitting — a client may keep hands-free on and start it again when it is back), `incognito`, `unsupported_audio`. |
-| `state {phase, conversation, closesAt, checking, pending, standingAside}` | `phase`: `off`, `listening`, `hearing` (the user is being dictated — hold your own voice), `sending`. `closesAt` (wall ms) when the window closes if nobody speaks; null while held open. `pending`: speech that needs the trigger word is undecided — play a "deciding" beep while true. `standingAside`: while `listening`, why it is not listening to the microphone just now (see "When it does not listen"): `speech` (our own voice is playing where the microphone hears it — Voice Operator on the Mac's speakers, the client's voice on a device without echo cancellation — and its tail), `sound` (the client's other sound, a cue), `dictation` (a Fn dictation has the Mac's microphone); null otherwise. Sent on change. |
+| `session {source, session?, conversationMs}` | On. `conversationMs`: the menu's Hands-Free Listening Timeout, a suggestion for how long the client keeps attention engaged through quiet. |
+| `session-ended {why}` | Off: `off`, `shutdown` (said by voice), `replaced`, `lost`, `restarting` (Voice Operator is quitting — a client may keep hands-free on and start it again when it is back), `incognito`, `unsupported_audio`. |
+| `state {phase, conversation, closesAt, checking, pending, standingAside, quiet, attention}` | `phase`: `off`, `listening`, `hearing` (the user is being dictated — hold your own voice), `sending`. `attention`: as the client last set it; `conversation`: it is `engaged`. `closesAt` (wall ms) when the client said the window closes if nobody speaks; null while held open. `quiet`: nobody is speaking on the source, and nothing is checked, dictated or stood aside for — what a client times attention by. `pending`: speech that needs the trigger word is undecided — play a "deciding" beep while true. `standingAside`: while `listening`, why it is not listening to the microphone just now (see "When it does not listen"): `speech` (our own voice is playing where the microphone hears it — Voice Operator on the Mac's speakers, the client's voice on a device without echo cancellation — and its tail), `sound` (the client's other sound, a cue), `dictation` (a Fn dictation has the Mac's microphone); null otherwise. Sent on change. |
 | `gauge {quietSince, patienceMs, mini, miniPeak, miniThreshold}` | While dictating: the quiet since `quietSince` (wall ms; null while they talk) ends it at `patienceMs`. `mini` is turn-1-mini's latest answer and `miniPeak` its highest since the pause began (null while they talk), against `miniThreshold` (0.5 on trial; the model card's points are 0.06–0.17): it ends the dictation, 0.5 s after it first reaches the threshold in a silence unless speech comes back first. Data points, sent on change — animate between them. |
-| `cue {name, haptic?}` | `ready`, `dictationStart` (tap), `dictationEnd` (double), `notWakeWord` (three in a row at most, and none after "stop listening", until the trigger word opens the window again), `conversationClosed` (triple; the window ran out, or "stop listening" — whose `transcript` is empty), `shutdown`, `error`. The client decides how each sounds or feels. |
+| `cue {name, haptic?}` | `ready`, `dictationStart` (tap), `dictationEnd` (double), `notWakeWord` (the alarm: speech without the trigger word while attention has lapsed — every time; the client counts them and dismisses attention when it has played enough), `conversationClosed` (triple; attention stopped being engaged), `shutdown`, `error`. The client decides how each sounds or feels. |
 | `duck {on}` | Turn the client's voice down (someone is talking over it) or back up. |
 | `not-trigger {heard, throughEcho, echo}` | Speech that needed the trigger word did not start with it: what Apple's model heard, for a client that shows it (Spaceterm ignores it). `throughEcho`: heard while our own voice played, so most likely that voice; `echo`: it matched what that voice just said. Sent whether or not the `notWakeWord` cue is. |
 | `cut-in {msAgo, at}` | The user cut the client's voice off: they began `msAgo` ms ago (`at`, wall ms), which is as far as they heard it. |
@@ -1082,8 +1107,7 @@ tones), including the repeating "deciding" beep. It reports them as `playing`
 so they are not listened through on speakers. A `cut-in` cancels its replies
 with `heard_until`, and the agent is told the last words heard. `duck` is
 ignored, as Spaceterm ignores it for speech on the Mac. Each reply it speaks
-opens the conversation window again (`openConversationLocal` →
-`HandsFreeEngine.openConversation(by:)`). The window lasts 15 s by default (the menu's Hands-Free Listening Timeout
+engages its attention again (`AttentionKeeper`, through `setAttentionLocal`). Attention lasts 15 s of quiet by default (the menu's Hands-Free Listening Timeout
 offers up to 5 min), and most agent
 turns take longer than that, so without this the user would need the trigger
 word to answer every reply.
@@ -1135,11 +1159,10 @@ microphone back automatically when the taker lets go.
   keyboard. The engine has no unregister, so after detaching they stay, and
   answer that hands-free is off.
 - `stop_listening` (`POST stop-listening {session_id}`) is for "stop
-  listening" said inside something longer, which the engine only catches on
-  its own: `HandsFreeEngine.stopListening(by:)` closes the window as the
-  dictated phrase does, with no `notWakeWord` cue until the trigger word, and
-  `VoiceMode` keeps the reply that follows from opening it again, until the
-  user next says something.
+  listening" said inside something longer; `VoiceMode` catches it said on its
+  own. Either way attention is dismissed — no alarm until the trigger word —
+  and the reply that follows does not engage it again, until the user next
+  says something.
 - `prompt.submit` from the keyboard carries any notice that hands-free went off
   under the session (`hooks/user-prompt-submit`).
 - `classic.Notification` reads permission prompts aloud.

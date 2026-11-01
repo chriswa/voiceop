@@ -25,16 +25,21 @@ import Foundation
 /// (`UtteranceEndpointer`). The transcript goes to the client
 /// whose trigger word it was, trigger word and all; the client strips it.
 ///
-/// After the trigger word, and as hands-free is turned on, a conversation window
-/// opens: speech starts a dictation without the trigger word — the check is only
-/// that it was words, not a cough or filler. It stays open while either side is
-/// speaking and closes once neither has for `conversationMs()`. "Let me turn this
-/// off", or "<trigger>, shutdown", closes it at once; so does "stop listening",
-/// as if it had run out, and hands-free stays on.
-///
-/// Speech outside the window that does not start with the trigger word gets the
-/// `notWakeWord` cue, but only `notWakeWordLimit` times in a row, and never
-/// after "stop listening": then nothing until the trigger word opens the window.
+/// Whether the user needs the trigger word is the client's **attention**
+/// (`Attention`), in one of three states: `engaged` — the conversation window:
+/// speech starts a dictation without the trigger word (the check is only that
+/// it was words, not a cough or filler); `lapsed` — the client let it go, on a
+/// timeout of its own, and the user may not know: speech without the trigger
+/// word gets the alarm (`notWakeWord`); `dismissed` — the user ended it
+/// themselves ("stop listening") and knows: speech without the trigger word
+/// gets nothing. Which is the client's to say, and only the client's
+/// (`setAttention`): the engine never changes it by itself, on a trigger word,
+/// on a clock or on a count. It reports what a client needs to decide — `quiet`
+/// in its state (nobody speaking on the source), every `notTrigger`, and every
+/// alarm it plays (the cue, which goes to every client) — and plays
+/// `conversationClosed` whenever attention stops being engaged, so what the
+/// user hears always says what the engine is really listening for. "Let me
+/// turn this off", or "<trigger>, shutdown", ends hands-free altogether.
 ///
 /// It does not listen while the source says it is playing on a device without
 /// echo cancellation (`HandsFreeSourceState.deaf`), nor while a Fn dictation has
@@ -58,7 +63,7 @@ final class HandsFreeEngine: @unchecked Sendable {
         case dictationEnd
         /// Speech that needed the trigger word turned out not to start with it.
         case notWakeWord
-        /// The conversation window ran out, or "stop listening": the trigger word is needed again.
+        /// A client closed the conversation window: the trigger word is needed again.
         case conversationClosed
         /// "Let me turn this off" or "<trigger>, shutdown".
         case shutdown
@@ -80,14 +85,18 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// (`HandsFreeEngine.Outgoing.client`) or, for what concerns whoever is
     /// listening on this source, to all of them.
     enum Event: Equatable {
-        /// What hands-free is doing. `closesAt` (wall-clock ms) is when the
-        /// conversation window closes if nobody speaks; nil while it is held
-        /// open or closed. `checking`: speech is being checked. `pending`:
-        /// speech that needs the trigger word is undecided — the client's cue
-        /// for a repeating "deciding" beep. `standingAside`: listening, but not
-        /// to the microphone, and why.
+        /// What hands-free is doing. `conversation`: attention is engaged
+        /// (`attention` says which of its three states). `closesAt` (wall-clock ms) is when the
+        /// conversation window closes if nobody speaks, as its client last
+        /// said; nil while it is held open or closed. `checking`: speech is
+        /// being checked. `pending`: speech that needs the trigger word is
+        /// undecided — the client's cue for a repeating "deciding" beep.
+        /// `standingAside`: listening, but not to the microphone, and why.
+        /// `quiet`: nobody is speaking on the source — not the user, not our
+        /// voice — and nothing is being checked, dictated or stood aside for:
+        /// what a client times its conversation window by.
         case state(phase: Phase, conversation: Bool, closesAt: Double?, checking: Bool, pending: Bool,
-                   standingAside: StandAside? = nil)
+                   standingAside: StandAside? = nil, quiet: Bool = true, attention: Attention = .lapsed)
         /// The end-of-dictation gauge, as data points the client animates from.
         case gauge(Gauge)
         case cue(Cue)
@@ -106,6 +115,16 @@ final class HandsFreeEngine: @unchecked Sendable {
         /// caught. `interrupted`: it cut the client's voice off. `shutdown`:
         /// it was a phrase that ends the conversation.
         case transcript(text: String, trigger: String?, interrupted: Bool, reason: String, shutdown: Bool)
+    }
+
+    /// The client's attention to the user, as it last said (`setAttention`).
+    enum Attention: String, Sendable {
+        /// The conversation window: any words start a dictation.
+        case engaged
+        /// The client let it go: the trigger word is needed, and speech without it gets the alarm.
+        case lapsed
+        /// The user ended it: the trigger word is needed, and speech without it gets nothing.
+        case dismissed
     }
 
     /// Why hands-free is not listening to its source while it says it is:
@@ -218,9 +237,6 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// what the source heard.
     static let levelsReportMs: Double = 30_000
     static let firstLevelsMs: Double = 5_000
-    /// Times in a row speech without the trigger word gets the `notWakeWord`
-    /// cue before it goes quiet until the trigger word is said again.
-    static let notWakeWordLimit = 3
 
     let tuning: HandsFreeTuning
     private let deps: Deps
@@ -233,16 +249,15 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// no trigger word said otherwise.
     private var owner: String
     var sourceState: () -> SourceState = { SourceState() }
-    /// How long the conversation window outlasts quiet, read each time it is
-    /// needed so the menu's choice (`HandsFreePreferences`) applies at once.
-    var conversationMs: () -> Double
 
     private(set) var phase: Phase = .off
     private var live = false
-    private var conversation = false
+    /// As the client last said; `lapsed` until one says otherwise.
+    private var attention: Attention = .lapsed
+    private var conversation: Bool { attention == .engaged }
     /// The client whose window it is.
     private var conversationClient: String?
-    private var silentFrames = 0
+    /// When the window's client said it closes, for the state it is shown by.
     private var closesAt: Double?
     private var checking = 0
     /// Of those, checks of candidates the listener handed out — not "let me turn
@@ -252,21 +267,17 @@ final class HandsFreeEngine: @unchecked Sendable {
     private var standingAside: StandAside?
     /// Listening through our own voice (`SourceState.throughEcho`), as of the last frame.
     private var throughEcho = false
+    /// Our voice playing on the source (the client's or Voice Operator's), as of the last frame.
+    private var voicePlaying = false
     private var ducked = false
     private var speechRun = 0
     private var quietRun = 0
     private var shutdownWatch: (start: Int, frames: Int, quietFrames: Int)?
-    /// `notWakeWord` cues due since the window last opened; past
-    /// `notWakeWordLimit`, they are not played.
-    private var notWakeWordRun = 0
     /// The dictation under way.
     private var utterance: Utterance?
     private var lastState: Event?
     private var lastGauge: Event?
     private var heardSamples = 0
-    /// Bumped whenever the source stalls: a wait for it to come back counts only
-    /// for the stall it began at.
-    private var stalls = 0
     private var deafTimer: Timer?
     /// The room since the last levels report.
     private var levels = (frames: 0, speechFrames: 0, sumDb: 0.0, maxDb: -120.0)
@@ -326,7 +337,6 @@ final class HandsFreeEngine: @unchecked Sendable {
     init(owner: String, trigger: String, scorer: FrameScorer, tuning: HandsFreeTuning = .standard, deps: Deps) {
         self.owner = owner
         self.tuning = tuning
-        conversationMs = { tuning.conversationMs }
         self.deps = deps
         self.scorer = scorer
         triggers[owner] = trigger
@@ -359,25 +369,35 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     var clients: [String] { Array(triggers.keys) }
 
-    /// The client is talking to the user — its reply is starting — so the
-    /// user may answer without the trigger word: the conversation window opens
-    /// for it (or stays open), and closes as usual once both sides are quiet.
-    func openConversation(by client: String) {
-        guard live, triggers[client] != nil else { return }
-        openConversation(for: client)
+    /// The client says where its attention is (`Attention`). Only a client
+    /// does this; the engine never does it by itself. `closesAt` (wall ms),
+    /// while `engaged`: when the client means to let it lapse if nobody
+    /// speaks, passed on in the state for clients to draw; nil while it holds
+    /// it.
+    ///
+    /// Leaving `engaged` plays `conversationClosed`. Another client's
+    /// engagement is left alone: only the client it belongs to ends it.
+    func setAttention(_ next: Attention, closesAt: Double? = nil, by client: String) {
+        guard triggers[client] != nil else { return }
+        if next == .engaged {
+            openConversation(for: client)
+            self.closesAt = closesAt
+            publishState()
+            return
+        }
+        if conversation {
+            guard conversationClient == client else {
+                deps.log("\(client) closed a window that is \(conversationClient ?? "nobody")'s: left open")
+                return
+            }
+            closeConversation(why: "client", to: next)
+            return
+        }
+        guard next != attention else { return }
+        deps.log("\(client): attention \(next.rawValue) — speech without the trigger word gets \(next == .lapsed ? "the alarm" : "nothing")")
+        deps.record("attention", ["state": next.rawValue, "client": client])
+        attention = next
         publishState()
-    }
-
-    /// The client was asked to stop listening (its agent heard "stop
-    /// listening" inside a longer dictation): the same as the phrase dictated
-    /// on its own — the window closes as if it had run out, and speech without
-    /// the trigger word gets no cue until it is said again.
-    func stopListening(by client: String) {
-        guard live, triggers[client] != nil else { return }
-        deps.log("\(client) asked to stop listening: the trigger word again from here, and no cue for speech without it")
-        deps.record("stop-listening", ["client": client, "by": "client"])
-        if conversation { closeConversation(why: "stop-listening") } else { emit(client, .cue(.conversationClosed)) }
-        notWakeWordRun = Self.notWakeWordLimit
     }
 
     /// The source is delivering audio. Turning it on opens the conversation
@@ -386,7 +406,6 @@ final class HandsFreeEngine: @unchecked Sendable {
     func sourceStarted(reopened: Bool = false) {
         guard !live else { return }
         live = true
-        stalls += 1
         firstLevels = true
         levels = (0, 0, 0, -120)
         framer.reset()
@@ -395,10 +414,7 @@ final class HandsFreeEngine: @unchecked Sendable {
         if phase == .off { setPhase(.listening) }
         deps.log("listening for \(triggers.values.sorted().map { "\"\($0)\"" }.joined(separator: ", "))")
         deps.record("source", ["listening": true])
-        if !reopened {
-            emit(owner, .cue(.ready))
-            openConversation(for: owner)
-        }
+        if !reopened { emit(owner, .cue(.ready)) }
         let heardBefore = heardSamples
         deafTimer?.cancel()
         deafTimer = deps.after(Self.deafAfterMs) { [weak self] in
@@ -410,25 +426,15 @@ final class HandsFreeEngine: @unchecked Sendable {
     }
 
     /// The source stopped delivering: turned off (`final`), or stalled. A
-    /// dictation under way is lost. A stalled source keeps the window open for
-    /// `conversationMs()`, waiting for it.
+    /// dictation under way is lost. A stalled source leaves the window as it
+    /// is, for its client to close if the stall outlasts it.
     func sourceStopped(final: Bool) {
         guard live || final else { return }
         live = false
         deafTimer?.cancel()
         if utterance != nil { end(.lost) }
         shutdownWatch = nil
-        if final {
-            closeConversation(why: "source")
-        } else if conversation {
-            deps.log("the source stalled: the conversation window waits for it")
-            stalls += 1
-            let stall = stalls
-            _ = deps.after(conversationMs()) { [weak self] in
-                guard let self, !self.live, self.stalls == stall else { return }
-                self.closeConversation(why: "source")
-            }
-        }
+        if final { closeConversation(why: "source") }
         if phase == .listening { setPhase(.off) }
         deps.record("source", ["listening": false])
         publishState()
@@ -499,8 +505,8 @@ final class HandsFreeEngine: @unchecked Sendable {
     private func routeFrame(_ frame: ScoredFrame) {
         let state = sourceState()
         throughEcho = state.throughEcho
+        voicePlaying = state.clientSpeaking || state.voiceOperatorSpeaking
         trackPlayback(frame, speaking: state.clientSpeaking, echoing: state.throughEcho)
-        tickConversation(state)
         if phase == .hearing, let utterance {
             utterance.dictation.append(frame.pcm)
             utterance.samples += frame.pcm.count
@@ -640,8 +646,8 @@ final class HandsFreeEngine: @unchecked Sendable {
                          wakeWordStart: Bool) {
         setPhase(.hearing)
         shutdownWatch = nil
+        // The window is the client's to open, on what it makes of the words.
         emit(client, .cue(.dictationStart))
-        openConversation(for: client)
         let backlog = listener.audioSince(candidate.start)
         let backlogMs = HandsFreeAudio.ms(samples: backlog.count)
         let dictation = deps.beginDictation(client, backlog)
@@ -696,11 +702,6 @@ final class HandsFreeEngine: @unchecked Sendable {
             case .success(let text):
                 let trigger = utterance.trigger ?? self.triggers[utterance.client]
                 let shutdown = HandsFreePhrases.isShutdown(text, trigger: trigger)
-                if HandsFreePhrases.isStopListening(text, trigger: trigger) {
-                    self.stopListening(utterance, reason: reason)
-                    self.finishedDictation()
-                    return
-                }
                 self.deps.log("\(text.count) chars to \(utterance.client) (ended on \(reason.rawValue)"
                               + (utterance.interrupted ? ", having cut it off)" : ")"))
                 self.emit(utterance.client, .transcript(text: text, trigger: utterance.trigger,
@@ -835,75 +836,39 @@ final class HandsFreeEngine: @unchecked Sendable {
     // MARK: - The conversation window
 
     private func openConversation(for client: String) {
-        notWakeWordRun = 0
-        silentFrames = 0
         closesAt = nil
         conversationClient = client
         guard !conversation else { return }
-        conversation = true
+        attention = .engaged
         listener.setConversation(true)
         deps.log("conversation window open: no need for the trigger word until both sides have been quiet a while")
         deps.record("conversation", ["open": true])
     }
 
-    /// `silence`: it ran out, and `stop-listening`: as if it had, with a cue.
-    /// `shutdown`: a shutdown phrase, with its own. The source going (`source`)
-    /// or the client leaving close it quietly.
-    private func closeConversation(why: String) {
+    /// `client`: its client ended it, to `next`, with the cue. `shutdown`: a
+    /// shutdown phrase, with its own. The source going (`source`) or the
+    /// client leaving end it without one.
+    private func closeConversation(why: String, to next: Attention = .lapsed) {
         guard conversation else { return }
         let client = conversationClient
-        conversation = false
+        attention = next
         conversationClient = nil
         listener.setConversation(false)
-        silentFrames = 0
         closesAt = nil
         deps.log("conversation window closed (\(why)): the trigger word again from here")
-        deps.record("conversation", ["open": false, "why": why])
+        deps.record("conversation", ["open": false, "why": why, "to": next.rawValue])
         if why == "shutdown" { emit(client, .cue(.shutdown)) }
-        else if why == "silence" || why == "stop-listening" { emit(client, .cue(.conversationClosed)) }
+        else if why == "client" { emit(client, .cue(.conversationClosed)) }
         publishState()
     }
 
-    /// Each frame, while the window is open: anyone speaking — the user, or the
-    /// client's voice — holds it open; once both are quiet, `conversationMs()`
-    /// of that closes it.
-    private func tickConversation(_ state: SourceState) {
-        guard conversation else { return }
-        let someoneSpeaking = phase != .listening || listener.speaking || state.clientSpeaking
-            || state.voiceOperatorSpeaking || state.deaf != nil
-        silentFrames = someoneSpeaking ? 0 : silentFrames + 1
-        let quietMs = Double(silentFrames) * HandsFreeAudio.frameMs
-        let windowMs = conversationMs()
-        if quietMs >= windowMs {
-            closeConversation(why: "silence")
-            return
-        }
-        closesAt = someoneSpeaking ? nil : (closesAt ?? deps.now() + windowMs - quietMs)
-    }
-
-    /// "Stop listening", dictated: the window closes as if it had run out, and
-    /// speech without the trigger word gets no cue at all until it is said again.
-    /// The client gets no words — it waits for a dictation's, so it is told there
-    /// were none — and a voice it cut off stays cut off.
-    private func stopListening(_ utterance: Utterance, reason: EndReason) {
-        deps.log("\"stop listening\": the trigger word again from here, and no cue for speech without it")
-        deps.record("stop-listening", ["client": utterance.client])
-        emit(utterance.client, .transcript(text: "", trigger: utterance.trigger, interrupted: false,
-                                           reason: reason.rawValue, shutdown: false))
-        if conversation { closeConversation(why: "stop-listening") } else { emit(utterance.client, .cue(.conversationClosed)) }
-        notWakeWordRun = Self.notWakeWordLimit
-    }
-
-    /// Speech that needed the trigger word did not start with it: the cue, the
-    /// first `notWakeWordLimit` times in a row.
+    /// Speech that needed the trigger word did not start with it: the alarm,
+    /// while attention has `lapsed`. Every one played goes to the clients, as
+    /// any cue does, for them to count.
     private func notAddressed() {
-        notWakeWordRun += 1
-        deps.record("not-wake-word", ["run": notWakeWordRun, "cued": notWakeWordRun <= Self.notWakeWordLimit])
-        guard notWakeWordRun <= Self.notWakeWordLimit else { return }
-        if notWakeWordRun == Self.notWakeWordLimit {
-            deps.log("\(Self.notWakeWordLimit) in a row without the trigger word: no cue for more until it is said")
-        }
-        emit(nil, .cue(.notWakeWord))
+        let cued = attention == .lapsed
+        deps.record("not-wake-word", ["cued": cued])
+        if cued { emit(nil, .cue(.notWakeWord)) }
     }
 
     // MARK: - "Let me turn this off"
@@ -1078,11 +1043,15 @@ final class HandsFreeEngine: @unchecked Sendable {
 
     /// The state, sent only when it changed.
     private func publishState() {
-        let pending = phase == .listening && live && standingAside == nil && !conversation && !throughEcho
+        // Only where speech without the trigger word gets the alarm: dismissed, the user is talking to others.
+        let pending = phase == .listening && live && standingAside == nil && attention == .lapsed && !throughEcho
             && (listener.undecided || candidatesChecking > 0)
+        let aside = phase == .listening && live ? standingAside : nil
+        let quiet = phase != .hearing && phase != .sending && checking == 0 && aside == nil
+            && !(live && (listener.speaking || voicePlaying))
         let state = Event.state(phase: phase, conversation: conversation, closesAt: closesAt,
-                                checking: checking > 0, pending: pending,
-                                standingAside: phase == .listening && live ? standingAside : nil)
+                                checking: checking > 0, pending: pending, standingAside: aside, quiet: quiet,
+                                attention: attention)
         guard state != lastState else { return }
         lastState = state
         emit(nil, state)

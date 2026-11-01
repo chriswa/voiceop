@@ -42,7 +42,6 @@ struct HandsFreeTuning: Sendable, Equatable {
     var endSilenceRampMs: Double
     var maxUtteranceMs: Double
     var playbackTailMs: Double
-    var conversationMs: Double
 
     static let standard = HandsFreeTuning(
         noSpeechBeforeMs: 700,
@@ -59,8 +58,7 @@ struct HandsFreeTuning: Sendable, Equatable {
         endSilenceMaxMs: 4000,
         endSilenceRampMs: 300_000,
         maxUtteranceMs: 600_000,
-        playbackTailMs: 400,
-        conversationMs: 15_000
+        playbackTailMs: 400
     )
 }
 

@@ -81,8 +81,11 @@ final class VoiceModeTests: XCTestCase {
     private var spoken: [String] = []
     private var cancelled: [String] = []
     private var cues: [SoundEffect] = []
-    private var windows = 0
-    private var stops = 0
+    /// What it told hands-free of its attention, with `closesAt`.
+    private var attentions: [(HandsFreeEngine.Attention, Double?)] = []
+    private var told: [HandsFreeEngine.Attention] { attentions.map(\.0) }
+    /// Attention's timeouts, due when the test fires them.
+    private var timers: [(ms: Double, fire: () -> Void)] = []
     private var saved: [VoiceMode.Attachment?] = []
     private var alive: Set<Int32> = [100, 200]
     private var refuse: HandsFreeService.Refusal?
@@ -106,8 +109,12 @@ final class VoiceModeTests: XCTestCase {
             },
             setHandsFree: { [unowned self] in handsFree.append($0) },
             unregisterHandsFree: { [unowned self] in registered.append("-") },
-            openConversation: { [unowned self] in windows += 1 },
-            stopListening: { [unowned self] in stops += 1 },
+            setAttention: { [unowned self] in attentions.append(($0, $1)) },
+            after: { [unowned self] ms, block in
+                var cancelled = false
+                timers.append((ms, { if !cancelled { block() } }))
+                return { cancelled = true }
+            },
             speak: { [unowned self] text, _ in spoken.append(text); return "job\(spoken.count)" },
             cancelSpeech: { [unowned self] id, _ in cancelled.append(id); return 9 },
             playCue: { [unowned self] in cues.append($0) },
@@ -153,7 +160,7 @@ final class VoiceModeTests: XCTestCase {
         let generation = await mode.turnEnded(input("s1", ["last_assistant_message": "**Hello.** What next?"]))
         XCTAssertEqual(generation, 1)
         XCTAssertEqual(spoken, ["Hello. What next?"])
-        XCTAssertEqual(windows, 1, "the reply opens the conversation window: no trigger word needed to answer")
+        XCTAssertEqual(told, [.engaged], "the reply engages attention: no trigger word needed to answer")
         let waiting = await mode.next(sessionID: "s1", generation: 1, wait: .zero)
         XCTAssertEqual(waiting, .nothingYet)
         // The user speaks.
@@ -178,15 +185,51 @@ final class VoiceModeTests: XCTestCase {
         _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
         XCTAssertFalse(mode.stopListening(sessionID: "s2"), "only the attached session")
         XCTAssertTrue(mode.stopListening(sessionID: "s1"))
-        XCTAssertEqual(stops, 1)
+        XCTAssertEqual(told, [.dismissed])
         _ = await mode.turnEnded(input("s1", ["last_assistant_message": "Okay, I'll wait."]))
         XCTAssertEqual(spoken, ["Okay, I'll wait."])
-        XCTAssertEqual(windows, 0, "the reply does not open the window again")
-        // The trigger word, then words: replies open the window again.
+        XCTAssertEqual(told, [.dismissed], "the reply does not engage it again")
+        // The trigger word, then words: engaged again, and replies engage it.
         mode.handsFree(["type": "transcript", "text": "Claude, I'm back.", "trigger": "claude",
                         "interrupted": false, "reason": "mini", "shutdown": false])
+        XCTAssertEqual(told, [.dismissed, .engaged])
         _ = await mode.turnEnded(input("s1", ["last_assistant_message": "Welcome back."]))
-        XCTAssertEqual(windows, 1)
+        XCTAssertEqual(told, [.dismissed, .engaged, .engaged])
+    }
+
+    func testStopListeningSaidOnItsOwnDismissesAttentionAndTheAgentGetsNoWords() async throws {
+        let mode = make()
+        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
+        mode.handsFree(["type": "transcript", "text": "Stop listening.", "trigger": NSNull(),
+                        "interrupted": false, "reason": "mini", "shutdown": false])
+        XCTAssertEqual(told, [.dismissed])
+        let next = await mode.next(sessionID: "s1", generation: 0, wait: .zero)
+        XCTAssertEqual(next, .nothingYet)
+    }
+
+    func testAttentionLapsesAfterQuietThenIsDismissedAfterThreeAlarms() throws {
+        let mode = make()
+        _ = try mode.attach(sessionID: "s1", claudePID: 100, cwd: "/g", trigger: nil, voice: nil)
+        mode.handsFree(["type": "session", "source": "mac", "conversationMs": 30_000])
+        XCTAssertEqual(told, [.engaged], "engaged as hands-free comes on")
+        XCTAssertNil(attentions.last?.1, "held until hands-free says it is quiet")
+        mode.handsFree(["type": "state", "phase": "listening", "conversation": true, "quiet": true])
+        XCTAssertEqual(told, [.engaged, .engaged])
+        XCTAssertNotNil(attentions.last?.1, "the time it lapses, for the button to draw")
+        XCTAssertEqual(timers.last?.ms, 30_000, "as long as Voice Operator's menu says")
+        // Someone speaks: held again, and the timeout from before no longer counts.
+        let stale = timers.last!.fire
+        mode.handsFree(["type": "state", "phase": "listening", "conversation": true, "quiet": false])
+        stale()
+        XCTAssertEqual(told.last, .engaged)
+        XCTAssertNil(attentions.last?.1)
+        mode.handsFree(["type": "state", "phase": "listening", "conversation": true, "quiet": true])
+        timers.last!.fire()
+        XCTAssertEqual(told.last, .lapsed)
+        for _ in 0..<2 { mode.handsFree(["type": "cue", "name": "notWakeWord"]) }
+        XCTAssertEqual(told.last, .lapsed)
+        mode.handsFree(["type": "cue", "name": "notWakeWord"])
+        XCTAssertEqual(told.last, .dismissed, "three alarms, then no more")
     }
 
     func testASonarPlaysWhileTheAgentWorks() async throws {
@@ -212,7 +255,7 @@ final class VoiceModeTests: XCTestCase {
         var stranded: [String] = []
         let mode = VoiceMode(deps: .init(
             registerHandsFree: { _, _ in nil },
-            setHandsFree: { _ in }, unregisterHandsFree: {}, openConversation: {},
+            setHandsFree: { _ in }, unregisterHandsFree: {},
             speak: { _, _ in "job" }, cancelSpeech: { _, _ in 0 },
             playCue: { _ in }, stopCue: { _ in },
             pidAlive: { _ in true }, save: { _ in }, stranded: { stranded.append($0) }))
@@ -244,7 +287,7 @@ final class VoiceModeTests: XCTestCase {
         var link: HandsFreeClientLink?
         let mode = VoiceMode(deps: .init(
             registerHandsFree: { _, l in link = l; return nil },
-            setHandsFree: { _ in }, unregisterHandsFree: {}, openConversation: {},
+            setHandsFree: { _ in }, unregisterHandsFree: {},
             speak: { _, _ in "job" }, cancelSpeech: { _, _ in 0 },
             playCue: { [unowned self] in cues.append($0) }, stopCue: { _ in },
             pidAlive: { _ in true }, save: { _ in }))

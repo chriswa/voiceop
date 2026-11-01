@@ -3,8 +3,8 @@ import Foundation
 /// What hands-free makes of the words Apple's on-device model heard in a clip:
 /// whether they began with a client's trigger word, whether they were words at
 /// all rather than a cough or filler, and whether they were one of the phrases
-/// that end the conversation hands-free, or "stop listening", which ends the
-/// conversation window.
+/// that end the conversation hands-free, or "stop listening", which a client
+/// takes as the user dismissing its attention.
 ///
 /// Spaceterm used to judge all of this itself, behind `/v1/wake-word`
 /// (`src/server/hands-free.ts`, `src/shared/control-shutdown.ts`); it moved here
@@ -84,8 +84,9 @@ enum HandsFreePhrases {
         return words.joined() == "shutdown" || words == letMeTurnThisOff
     }
 
-    /// "Stop listening" — ends the conversation window as if it had run out, so
-    /// the trigger word is needed again; hands-free stays on.
+    /// "Stop listening" — the user dismisses the client's attention: the trigger
+    /// word is needed again, with no alarm; hands-free stays on. The client's
+    /// to act on (`VoiceMode`); hands-free sends it as any transcript.
     static let stopListening = ["stop", "listening"]
 
     /// Whether `text`, a whole dictation, is "stop listening", optionally after

@@ -114,12 +114,10 @@ private final class Harness {
         engine.sourceState = { [unowned self] in state }
         engine.sourceStarted()
         settle()
-        if !justTurnedOn {
-            // Let the window that turning it on opened run out, and forget its closing cue.
-            let saved = state
-            state = .init()
-            for _ in 0..<16 { hear(Sound.quiet(1000)) }
-            state = saved
+        if justTurnedOn {
+            // As Spaceterm does as hands-free comes on: no trigger word needed to begin with.
+            engine.setAttention(.engaged, by: "spaceterm")
+        } else {
             events.removeAll()
             records.removeAll()
         }
@@ -172,7 +170,7 @@ private final class Harness {
         for e in events {
             switch e.event {
             case .cue(let cue): out.append(cue.rawValue)
-            case .state(_, _, _, _, let p, _) where p != pending:
+            case .state(_, _, _, _, let p, _, _, _) where p != pending:
                 pending = p
                 out.append("pending:\(p ? "on" : "off")")
             default: break
@@ -189,8 +187,10 @@ private final class Harness {
     var cutIns: [Int] { events.compactMap { if case .cutIn(let ms) = $0.event { return ms }; return nil } }
     var ducks: [Bool] { events.compactMap { if case .duck(let on) = $0.event { return on }; return nil } }
     var phase: HandsFreeEngine.Phase { engine.phase }
-    var lastState: (conversation: Bool, closesAt: Double?)? {
-        for e in events.reversed() { if case .state(_, let c, let at, _, _, _) = e.event { return (c, at) } }
+    var lastState: (conversation: Bool, closesAt: Double?, quiet: Bool, attention: HandsFreeEngine.Attention)? {
+        for e in events.reversed() {
+            if case .state(_, let c, let at, _, _, _, let quiet, let attention) = e.event { return (c, at, quiet, attention) }
+        }
         return nil
     }
     var conversation: Bool { lastState?.conversation ?? false }
@@ -198,7 +198,7 @@ private final class Harness {
     var standingAside: [String] {
         var out: [String] = []
         for e in events {
-            guard case .state(_, _, _, _, _, let aside) = e.event else { continue }
+            guard case .state(_, _, _, _, _, let aside, _, _) = e.event else { continue }
             let now = aside?.rawValue ?? "-"
             if out.last != now { out.append(now) }
         }
@@ -401,6 +401,13 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertTrue(listening["standingAside"] is NSNull)
     }
 
+    func testAttentionAndQuietGoOnTheWire() {
+        let wire = HandsFreeService.wire(.state(phase: .listening, conversation: false, closesAt: nil, checking: false,
+                                                pending: false, quiet: false, attention: .dismissed))
+        XCTAssertEqual(wire["attention"] as? String, "dismissed")
+        XCTAssertEqual(wire["quiet"] as? Bool, false)
+    }
+
     func testTheTriggerAloneWaitsForMoreThenSendsIt() {
         let h = harness { $0.transcript = "Control." }
         h.hear(Sound.quiet(1500), Sound.speech(500), Sound.quiet(2500))
@@ -510,27 +517,38 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.transcripts.first?.interrupted, true)
     }
 
-    // MARK: The conversation window
+    // MARK: Attention
 
-    func testWindowOpensAsHandsFreeIsTurnedOn() {
+    func testAttentionIsNeverEngagedButByTheClient() {
+        let h = harness()
+        XCTAssertFalse(h.conversation)
+        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
+        XCTAssertEqual(h.transcripts.count, 1)
+        XCTAssertFalse(h.conversation, "the trigger word does not engage it: the client does, on what it makes of the words")
+    }
+
+    func testEngagedAsHandsFreeComesOnAnyWordsAreDictated() {
         let h = harness(justTurnedOn: true) { $0.heard = { _ in "What is Kevin doing?" }; $0.transcript = "What is Kevin doing?" }
         XCTAssertTrue(h.conversation)
+        XCTAssertEqual(h.lastState?.attention, .engaged)
         XCTAssertEqual(h.cues.first, "ready")
         h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500))
         XCTAssertEqual(h.transcripts.map(\.text), ["What is Kevin doing?"])
     }
 
-    func testWindowLeftQuietClosesAfterConversationMs() {
+    func testEngagedAttentionNeverLapsesByItself() {
         let h = harness(justTurnedOn: true)
-        h.hear(Sound.quiet(15_500))
-        XCTAssertFalse(h.conversation)
-        XCTAssertEqual(h.cues.last, "conversationClosed")
-        XCTAssertEqual(HandsFreeEngine.Cue.conversationClosed.haptic, "triple")
+        h.hear(Sound.quiet(60_000))
+        h.elapse(600_000)
+        XCTAssertTrue(h.conversation)
+        XCTAssertFalse(h.cues.contains("conversationClosed"))
     }
 
+    /// The trigger word said, and the client engaging attention for what comes next, as Spaceterm does.
     private func inConversation(_ h: Harness) {
         h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
         XCTAssertEqual(h.transcripts.count, 1)
+        h.engine.setAttention(.engaged, by: "spaceterm")
         XCTAssertTrue(h.conversation)
     }
 
@@ -560,58 +578,100 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.recorded("ended").last?["reason"] as? String, "mini")
     }
 
-    func testWindowClosesOnceBothSidesAreQuietThenNeedsTheTriggerAgain() {
-        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Yes" } }
+    func testTheClientsClosesAtIsShown() {
+        let h = harness()
         inConversation(h)
-        h.hear(Sound.quiet(10_000))
-        XCTAssertTrue(h.conversation)
-        XCTAssertNotNil(h.lastState?.closesAt)
-        h.hear(Sound.quiet(5500))
+        h.engine.setAttention(.engaged, closesAt: 1_234_567, by: "spaceterm")
+        XCTAssertEqual(h.lastState?.closesAt, 1_234_567)
+    }
+
+    func testQuietSaysWhetherAnyoneIsSpeakingOnTheSource() {
+        let h = harness { $0.heard = { _ in "Hmm" } }
+        h.hear(Sound.quiet(500), Sound.speech(300))
+        XCTAssertEqual(h.lastState?.quiet, false, "the user talking")
+        h.hear(Sound.quiet(2000))
+        XCTAssertEqual(h.lastState?.quiet, true)
+        h.state.clientSpeaking = true
+        h.hear(Sound.quiet(200))
+        XCTAssertEqual(h.lastState?.quiet, false, "our voice playing")
+        h.state.clientSpeaking = false
+        h.hear(Sound.quiet(200))
+        XCTAssertEqual(h.lastState?.quiet, true)
+        h.state.deaf = .init(why: "a Fn dictation", cause: .dictation)
+        h.hear(Sound.quiet(200))
+        XCTAssertEqual(h.lastState?.quiet, false, "standing aside")
+    }
+
+    func testLapsingFromTheClientClosesTheWindowWithItsCueThenAlarms() {
+        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Sure, I can look" } }
+        inConversation(h)
+        h.engine.setAttention(.lapsed, by: "nobody")
+        XCTAssertTrue(h.conversation, "only a registered client")
+        h.engine.setAttention(.lapsed, by: "spaceterm")
         XCTAssertFalse(h.conversation)
+        XCTAssertEqual(h.lastState?.attention, .lapsed)
         XCTAssertEqual(h.cues.last, "conversationClosed")
+        XCTAssertEqual(HandsFreeEngine.Cue.conversationClosed.haptic, "triple")
         h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(500))
         XCTAssertEqual(h.cues.last, "notWakeWord")
     }
 
-    func testTheClientsReplyOpensTheWindowAgain() {
-        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Yes" } }
-        inConversation(h)
-        h.hear(Sound.quiet(15_500))
-        XCTAssertFalse(h.conversation, "the agent took longer than the window")
-        h.engine.openConversation(by: "nobody")
-        XCTAssertFalse(h.conversation)
-        h.engine.openConversation(by: "spaceterm")
-        XCTAssertTrue(h.conversation)
-        h.transcript = "Yes, do it."
-        h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500))
-        XCTAssertEqual(h.transcripts.map(\.text).last, "Yes, do it.", "answered without the trigger word")
-    }
-
-    func testWindowHoldsOpenWhileTheClientSpeaksAndCountsFromWhenItStops() {
+    func testOnlyTheClientWhoseWindowItIsEndsIt() {
         let h = harness()
+        h.engine.addClient("home", trigger: "jarvis")
         inConversation(h)
-        h.state.clientSpeaking = true
-        h.hear(Sound.quiet(20_000))
+        h.engine.setAttention(.dismissed, by: "home")
         XCTAssertTrue(h.conversation)
-        XCTAssertNil(h.lastState?.closesAt)
-        h.state.clientSpeaking = false
-        h.hear(Sound.quiet(10_000))
-        XCTAssertTrue(h.conversation)
-        h.hear(Sound.quiet(5500))
-        XCTAssertFalse(h.conversation)
     }
 
-    func testWindowWaitsForAStalledSourceButNotForever() {
+    func testDismissingClosesTheWindowWithItsCueAndNoAlarmFollows() {
+        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Sure, I can look" } }
+        inConversation(h)
+        h.engine.setAttention(.dismissed, by: "spaceterm")
+        XCTAssertFalse(h.conversation)
+        XCTAssertEqual(h.cues.last, "conversationClosed")
+        XCTAssertEqual(h.phase, .listening, "hands-free stays on")
+        h.events.removeAll()
+        notAddressed(h)
+        notAddressed(h)
+        XCTAssertEqual(h.cues, [])
+        XCTAssertFalse(h.sounds.contains("pending:on"), "no deciding beep either: they are talking to someone else")
+        XCTAssertEqual(h.recorded("not-wake-word").map { $0["cued"] as? Bool }, [false, false])
+        XCTAssertEqual(h.events.filter { if case .notTrigger = $0.event { return true }; return false }.count, 2,
+                       "the client is still told of each")
+    }
+
+    func testMovingBetweenLapsedAndDismissedPlaysNothing() {
+        let h = harness()
+        h.engine.setAttention(.dismissed, by: "spaceterm")
+        h.engine.setAttention(.lapsed, by: "spaceterm")
+        XCTAssertEqual(h.cues, [])
+        XCTAssertEqual(h.lastState?.attention, .lapsed)
+    }
+
+    func testLapsedTheAlarmSoundsEveryTimeForTheClientToCount() {
+        let h = harness()
+        for _ in 0..<5 { notAddressed(h) }
+        XCTAssertEqual(h.cues, Array(repeating: "notWakeWord", count: 5))
+        XCTAssertEqual(h.checks.count, 5, "still listening for the trigger word")
+    }
+
+    func testStopListeningIsTheClientsToActOn() {
+        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Stop listening" } }
+        inConversation(h)
+        h.transcript = "Stop listening."
+        h.hear(Sound.quiet(1000), Sound.speech(1200), Sound.quiet(3500))
+        XCTAssertEqual(h.transcripts.last?.text, "Stop listening.")
+        XCTAssertTrue(h.conversation, "engaged until the client says otherwise")
+    }
+
+    func testWindowStaysThroughAStalledSource() {
         let h = harness()
         inConversation(h)
         h.engine.sourceStopped(final: false)
+        h.elapse(60_000)
         XCTAssertTrue(h.conversation)
-        h.engine.sourceStarted(reopened: true)
-        h.elapse(15_000)
-        XCTAssertTrue(h.conversation, "a stall from before the source came back does not close it later")
-
-        h.engine.sourceStopped(final: false)
-        h.elapse(15_000)
+        h.engine.sourceStopped(final: true)
         XCTAssertFalse(h.conversation)
         XCTAssertNotEqual(h.cues.last, "conversationClosed")
     }
@@ -631,103 +691,30 @@ final class HandsFreeEngineTests: XCTestCase {
 
     // MARK: Shutdown
 
-    func testTriggerShutdownIsSentAndClosesTheWindowWithItsCue() {
-        let h = harness { $0.transcript = "Control, shut down." }
-        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
-        XCTAssertEqual(h.transcripts.first?.shutdown, true)
-        XCTAssertFalse(h.conversation)
-        XCTAssertEqual(h.cues, ["dictationStart", "dictationEnd", "shutdown"])
-        h.heard = { _ in "Sure, I can look" }
-        h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500))
-        XCTAssertEqual(h.cues.last, "notWakeWord")
-    }
-
-    // MARK: Stop listening
-
     /// Speech heard with the window shut that does not start with the trigger word.
     private func notAddressed(_ h: Harness) {
         h.heard = { _ in "Sure, I can look" }
         h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500))
     }
 
-    func testStopListeningClosesTheWindowAsIfItRanOut() {
-        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Stop listening" } }
-        inConversation(h)
-        h.transcript = "Stop listening."
-        h.hear(Sound.quiet(1000), Sound.speech(1200), Sound.quiet(3500))
-        XCTAssertFalse(h.conversation)
-        XCTAssertEqual(h.cues.last, "conversationClosed")
-        XCTAssertEqual(h.transcripts.last?.text, "", "no words for the client")
-        XCTAssertEqual(h.transcripts.last?.shutdown, false)
-        XCTAssertEqual(h.phase, .listening, "hands-free stays on")
-        XCTAssertEqual(h.recorded("stop-listening").count, 1)
-    }
-
-    func testStopListeningAfterTheTrigger() {
-        let h = harness { $0.transcript = "Control, stop listening." }
+    func testTriggerShutdownIsSentWithItsCue() {
+        let h = harness { $0.transcript = "Control, shut down." }
         h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
-        XCTAssertFalse(h.conversation)
-        XCTAssertEqual(h.cues, ["dictationStart", "dictationEnd", "conversationClosed"])
-        XCTAssertEqual(h.transcripts.map(\.text), [""])
+        XCTAssertEqual(h.transcripts.first?.shutdown, true)
+        XCTAssertEqual(h.cues, ["dictationStart", "dictationEnd", "shutdown"])
     }
 
-    func testStopListeningInsideALongerRequestDoesNotCount() {
-        let h = harness { $0.transcript = "Control, tell Kevin to stop listening." }
-        h.hear(Sound.quiet(1500), Sound.speech(2500), Sound.quiet(3500))
-        XCTAssertEqual(h.transcripts.map(\.text), ["Control, tell Kevin to stop listening."])
-        XCTAssertTrue(h.conversation)
-    }
-
-    func testAfterStopListeningNoCueForSpeechWithoutTheTriggerUntilItIsSaid() {
-        let h = harness { $0.transcript = "Control, stop listening." }
-        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
-        notAddressed(h)
-        notAddressed(h)
-        XCTAssertFalse(h.cues.contains("notWakeWord"))
-        XCTAssertEqual(h.recorded("not-wake-word").map { $0["cued"] as? Bool }, [false, false])
-        // The trigger word again: the cue comes back once the window has run out.
-        h.heard = { _ in "Control, what" }
-        h.transcript = "Control, what is Kevin doing?"
-        h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500), Sound.quiet(16_000))
+    func testShutdownEndsAnEngagedWindowWithItsCue() {
+        let h = harness(justTurnedOn: true) { $0.transcript = "Shut down."; $0.heard = { _ in "Shut down" } }
+        h.hear(Sound.quiet(1000), Sound.speech(1000), Sound.quiet(3500))
         XCTAssertFalse(h.conversation)
-        notAddressed(h)
-        XCTAssertEqual(h.cues.last, "notWakeWord")
-    }
-
-    func testTheClientCanStopListeningForTheUser() {
-        let h = harness { $0.heard = { $0 == 0 ? "Control, what" : "Sure, I can look" } }
-        inConversation(h)
-        h.engine.stopListening(by: "nobody")
-        XCTAssertTrue(h.conversation, "only a registered client")
-        h.engine.stopListening(by: "spaceterm")
-        XCTAssertFalse(h.conversation)
-        XCTAssertEqual(h.cues.last, "conversationClosed")
-        XCTAssertEqual(h.phase, .listening, "hands-free stays on")
-        notAddressed(h)
-        notAddressed(h)
-        XCTAssertNotEqual(h.cues.last, "notWakeWord", "no cue for speech without the trigger word")
-        XCTAssertEqual(h.recorded("not-wake-word").map { $0["cued"] as? Bool }, [false, false])
-    }
-
-    func testTheNotTheTriggerCuePlaysThreeTimesInARowThenStopsUntilTheTrigger() {
-        let h = harness()
-        for _ in 0..<5 { notAddressed(h) }
-        XCTAssertEqual(h.cues, Array(repeating: "notWakeWord", count: 3))
-        XCTAssertEqual(h.checks.count, 5, "still listening for the trigger word")
-        h.heard = { _ in "Control, what" }
-        h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500), Sound.quiet(16_000))
-        XCTAssertEqual(h.transcripts.count, 1)
-        XCTAssertFalse(h.conversation)
-        h.events.removeAll()
-        for _ in 0..<4 { notAddressed(h) }
-        XCTAssertEqual(h.cues, Array(repeating: "notWakeWord", count: 3))
+        XCTAssertEqual(h.cues.last, "shutdown")
     }
 
     func testShutdownInsideALongerRequestDoesNotCount() {
         let h = harness { $0.transcript = "Control, shut down the dev server." }
         h.hear(Sound.quiet(1500), Sound.speech(2500), Sound.quiet(3500))
         XCTAssertEqual(h.transcripts.first?.shutdown, false)
-        XCTAssertTrue(h.conversation)
     }
 
     func testLetMeTurnThisOffWithoutTheTriggerIsCheckedWholeOnceItEnds() {
@@ -745,7 +732,7 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.ducks, [true, false])
     }
 
-    func testLetMeTurnThisOffThatWasSomethingElseGetsTheSadTune() {
+    func testLetMeTurnThisOffThatWasSomethingElseGetsTheAlarm() {
         let h = harness { $0.heard = { $0 == 0 ? "Let me turn" : "Let me turn the page" } }
         h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(1000))
         XCTAssertEqual(h.transcripts.count, 0)

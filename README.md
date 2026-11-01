@@ -218,12 +218,17 @@ and asks, and nothing outlives that connection. While it is on:
   its score first reaches its threshold in a pause, unless you speak again
   first. A silence timeout (3 s, 4 s at most in a long dictation) is the
   fallback. The transcript goes to the client.
-- After that, a **conversation window** lets you reply without the trigger word
-  until both sides have been quiet for 15 seconds. "Stop listening" (or
-  "<trigger>, stop listening") closes it at once, as if the 15 seconds had run
-  out; hands-free stays on.
-- Speech that does not start with the trigger word gets a cue, three times in a
-  row at most, and none after "stop listening", until the trigger word is said.
+- Whether you need the trigger word is the client's **attention**, which it
+  sets and Voice Operator follows: **engaged** (the conversation window — any
+  words are taken down), **lapsed** (the client let it go, on a timeout of its
+  own: speech without the trigger word gets an alarm, since you may not know),
+  or **dismissed** (you ended it — "stop listening" — and know: no alarm).
+  Voice Operator never changes it by itself; it reports what the client needs
+  (who is speaking, each alarm it plays), and plays "conversation closed"
+  whenever attention stops being engaged. Spaceterm and Claude Code voice mode
+  engage it as hands-free comes on and when you speak to them, let it lapse
+  after the menu's Hands-Free Listening Timeout of quiet, and dismiss it after
+  three alarms.
 - Talking over the client's own voice turns it down, and cuts it off once it is
   clear you meant it, counted to when you began.
 - "Let me turn this off" — or "<trigger>, shutdown" — turns hands-free off.

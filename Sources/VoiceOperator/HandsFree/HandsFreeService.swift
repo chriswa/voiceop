@@ -263,6 +263,12 @@ final class HandsFreeService: @unchecked Sendable {
             startMac(connection.client)
         case (.control, "stop"):
             stopClient(connection.client, why: "off")
+        case (.control, "attention"):
+            guard let engine = mac?.engine, engine.clients.contains(connection.client) else { return }
+            Self.setAttention(engine, message, by: connection.client, reply: connection)
+        case (.stream, "attention"):
+            guard let session = connection.session else { return }
+            Self.setAttention(session.engine, message, by: session.client, reply: connection)
         case (.control, "playing"):
             connection.playing = message["on"] as? Bool ?? false
             if !connection.playing { connection.playingEndedAt = Date() }
@@ -297,6 +303,17 @@ final class HandsFreeService: @unchecked Sendable {
         default:
             connection.send(["type": "error", "error": "unknown_type", "detail": type])
         }
+    }
+
+    /// `{"type":"attention","state":"engaged"|"lapsed"|"dismissed","closesAt":ms|null}`:
+    /// the client says where its attention is (`HandsFreeEngine.setAttention`).
+    private static func setAttention(_ engine: HandsFreeEngine, _ message: [String: Any], by client: String,
+                                     reply: Connection) {
+        guard let state = (message["state"] as? String).flatMap(HandsFreeEngine.Attention.init(rawValue:)) else {
+            reply.send(["type": "error", "error": "unknown_attention", "detail": "\(message["state"] ?? "none")"])
+            return
+        }
+        engine.setAttention(state, closesAt: message["closesAt"] as? Double, by: client)
     }
 
     private func hello(_ message: [String: Any], from connection: Connection) {
@@ -384,18 +401,10 @@ final class HandsFreeService: @unchecked Sendable {
         }
     }
 
-    /// The local client's voice is about to speak to the user: the
-    /// conversation window opens, so they can answer without the trigger word
-    /// (`HandsFreeEngine.openConversation(by:)`).
-    func openConversationLocal(_ name: String) {
-        queue.async { [self] in mac?.engine.openConversation(by: name) }
-    }
-
-    /// The local client was asked to stop listening: the trigger word is
-    /// needed again, with no cue for speech without it
-    /// (`HandsFreeEngine.stopListening(by:)`).
-    func stopListeningLocal(_ name: String) {
-        queue.async { [self] in mac?.engine.stopListening(by: name) }
+    /// The local client says how hands-free on the Mac's microphone listens —
+    /// `attention` on a control connection (`HandsFreeEngine.setAttention`).
+    func setAttentionLocal(_ name: String, _ attention: HandsFreeEngine.Attention, closesAt: Double? = nil) {
+        queue.async { [self] in mac?.engine.setAttention(attention, closesAt: closesAt, by: name) }
     }
 
     func unregisterLocal(_ name: String) {
@@ -455,7 +464,7 @@ final class HandsFreeService: @unchecked Sendable {
         }
         engine.sourceState = { [weak self] in self?.macState() ?? .init() }
         mac = MacSource(engine: engine)
-        registered.connection.send(["type": "session", "source": "mac"])
+        registered.connection.send(["type": "session", "source": "mac", "conversationMs": Self.conversationMs])
         Log.log("hands-free: \(client) turned it on, on the Mac's microphone")
         let queue = self.queue
         setMicrophoneListener?({ [weak self, weak engine] data, hostTime in
@@ -543,7 +552,7 @@ final class HandsFreeService: @unchecked Sendable {
     private func deliverMac(_ outgoing: HandsFreeEngine.Outgoing) {
         let targets = outgoing.client.map { [$0] } ?? (mac?.engine.clients ?? [])
         for name in targets { clients[name]?.connection.send(Self.wire(outgoing.event)) }
-        if case .state(let phase, let conversation, _, _, _, _) = outgoing.event {
+        if case .state(let phase, let conversation, _, _, _, _, _, _) = outgoing.event {
             setBusy("mac", phase == .hearing || phase == .sending)
             switch phase {
             case .off: setMacLook(nil)
@@ -583,7 +592,7 @@ final class HandsFreeService: @unchecked Sendable {
         let engine = makeEngine(owner: client, trigger: registered.trigger, sessionKey: id) { [weak self] outgoing in
             guard let self, let session else { return }
             session.connection?.send(Self.wire(outgoing.event))
-            if case .state(let phase, _, _, _, _, _) = outgoing.event {
+            if case .state(let phase, _, _, _, _, _, _, _) = outgoing.event {
                 self.setBusy(id, phase == .hearing || phase == .sending)
             }
             if case .transcript(_, _, _, _, true) = outgoing.event {
@@ -601,7 +610,7 @@ final class HandsFreeService: @unchecked Sendable {
         streams[id] = created
         connection.session = created
         created.connection = connection
-        connection.send(["type": "session", "source": "stream", "session": id])
+        connection.send(["type": "session", "source": "stream", "session": id, "conversationMs": Self.conversationMs])
         Log.log("hands-free: \(client) turned it on, streaming from \(connection.device)")
         engine.sourceStarted()
         sendSetup(created)
@@ -777,7 +786,6 @@ final class HandsFreeService: @unchecked Sendable {
             continuousTurn: { [weak self] in self?.miniModel?.stream() },
             isEcho: { RecentSpeech.shared.isEcho($0) })
         let engine = HandsFreeEngine(owner: owner, trigger: trigger, scorer: EnergyScorer(), deps: deps)
-        engine.conversationMs = { HandsFreePreferences.conversationTimeout.ms }
         if let url = SileroVAD.bundledModelURL() {
             do { engine.setScorer(try SileroVAD(modelURL: url)) } catch {
                 Log.log("hands-free: speech detector unavailable (\(error)) — using loudness, which hears music as speech")
@@ -807,13 +815,20 @@ final class HandsFreeService: @unchecked Sendable {
 
     // MARK: - Wire format
 
+    /// How long the user wants attention to stay engaged through quiet (the
+    /// menu's Hands-Free Listening Timeout), told to each client with its
+    /// `session`. Only a suggestion: letting it lapse is the client's.
+    static var conversationMs: Double { HandsFreePreferences.conversationTimeout.ms }
+
     static func wire(_ event: HandsFreeEngine.Event) -> [String: Any] {
         func opt(_ value: Double?) -> Any { value.map { $0 } ?? NSNull() }
         switch event {
-        case .state(let phase, let conversation, let closesAt, let checking, let pending, let standingAside):
+        case .state(let phase, let conversation, let closesAt, let checking, let pending, let standingAside, let quiet,
+                    let attention):
             return ["type": "state", "phase": phase.rawValue, "conversation": conversation,
                     "closesAt": opt(closesAt), "checking": checking, "pending": pending,
-                    "standingAside": standingAside.map { $0.rawValue as Any } ?? NSNull()]
+                    "standingAside": standingAside.map { $0.rawValue as Any } ?? NSNull(), "quiet": quiet,
+                    "attention": attention.rawValue]
         case .gauge(let g):
             return ["type": "gauge", "quietSince": opt(g.quietSince), "patienceMs": opt(g.patienceMs),
                     "mini": opt(g.mini), "miniPeak": opt(g.miniPeak), "miniThreshold": g.miniThreshold]

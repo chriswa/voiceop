@@ -88,10 +88,16 @@ final class VoiceMode {
         var registerHandsFree: (_ trigger: String, _ link: HandsFreeClientLink) -> HandsFreeService.Refusal?
         var setHandsFree: (_ on: Bool) -> Void
         var unregisterHandsFree: () -> Void
-        /// Our voice is about to speak: the user may answer without the trigger word.
-        var openConversation: () -> Void = {}
-        /// The agent was told to stop listening: the trigger word is needed again, without the cue.
-        var stopListening: () -> Void = {}
+        /// Where this client's attention is (`AttentionKeeper`), for hands-free to listen by.
+        var setAttention: (_ attention: HandsFreeEngine.Attention, _ closesAt: Double?) -> Void = { _, _ in }
+        /// Run `block` after `ms`; the closure returned cancels it. Attention's timeout.
+        var after: (_ ms: Double, _ block: @escaping @MainActor () -> Void) -> () -> Void = { ms, block in
+            let task = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(Int(ms.rounded())))
+                if !Task.isCancelled { block() }
+            }
+            return { task.cancel() }
+        }
         /// Speak `text` in `voice`; the speech job's id, or nil.
         var speak: (_ text: String, _ voice: String) async -> String?
         /// Stop job `id`, heard until then; how far into its text it got (UTF-16).
@@ -112,8 +118,7 @@ final class VoiceMode {
             },
             setHandsFree: { HandsFreeService.shared.setLocal(VoiceMode.clientName, on: $0) },
             unregisterHandsFree: { HandsFreeService.shared.unregisterLocal(VoiceMode.clientName) },
-            openConversation: { HandsFreeService.shared.openConversationLocal(VoiceMode.clientName) },
-            stopListening: { HandsFreeService.shared.stopListeningLocal(VoiceMode.clientName) },
+            setAttention: { HandsFreeService.shared.setAttentionLocal(VoiceMode.clientName, $0, closesAt: $1) },
             speak: { text, voice in
                 guard let result = await SpeechJobManager.shared.enqueue(parts: [.init(text: text, voice: voice)]),
                       result.error == nil else { return nil }
@@ -189,9 +194,15 @@ final class VoiceMode {
     private var heardBeforeCutIn: String?
     private var cutInPending = false
     private var pendingBeep: Task<Void, Never>?
-    /// The agent stopped listening (`stopListening`): its replies leave the
-    /// conversation window shut, until the user next says something.
+    /// The user dismissed our attention ("stop listening", or the agent's
+    /// `stop_listening`): its replies leave it dismissed, until the user next
+    /// says something.
     private(set) var listeningStopped = false
+    /// Whether the user needs the trigger word: ours to decide (`AttentionKeeper`).
+    private(set) lazy var attention = AttentionKeeper(deps: .init(
+        send: { [weak self] attention, closesAt in self?.deps.setAttention(attention, closesAt) },
+        after: { [weak self] ms, block in self?.deps.after(ms, block) ?? {} },
+        now: { [weak self] in (self?.deps.now() ?? Date()).timeIntervalSince1970 * 1000 }))
     /// The sonar, while the session's main thread works (`setWorking`).
     private var sonar: Task<Void, Never>?
     /// Spaceterm's thinking cue: the first echo after 1.5 s, then one every 2.5 s.
@@ -262,6 +273,7 @@ final class VoiceMode {
         phase = "off"
         conversation = false
         listeningStopped = false
+        attention.reset()
         standingAside = nil
         setPendingBeep(false)
         setWorking(false)
@@ -454,15 +466,20 @@ final class VoiceMode {
     }
 
     /// The agent's `stop_listening` tool: the user said "stop listening" in
-    /// the middle of something longer, which hands-free only catches on its
-    /// own. The window closes now, and the reply that follows does not open it
-    /// again: the trigger word is needed, and speech without it gets no cue.
+    /// the middle of something longer, which `heard` only catches on its own.
     func stopListening(sessionID: String) -> Bool {
         guard isAttached(sessionID) else { return false }
-        listeningStopped = true
-        deps.stopListening()
-        Log.log("voice mode: the agent stopped listening; the trigger word again from here")
+        dismissAttention(why: "the agent stopped listening")
         return true
+    }
+
+    /// The user ended our attention: dismissed now, and the reply that follows
+    /// does not engage it again. The trigger word is needed, and speech
+    /// without it gets no alarm — they know.
+    private func dismissAttention(why: String) {
+        listeningStopped = true
+        attention.dismiss()
+        Log.log("voice mode: \(why); the trigger word again from here")
     }
 
     /// A transcript as if hands-free had heard it — for testing the plugin end
@@ -481,9 +498,9 @@ final class VoiceMode {
         let text = VoiceModeText.spoken(markdown)
         guard !text.isEmpty else { return }
         let voice = attachment?.voice ?? KokoroSynthesizer.defaultVoiceID
-        // The agent took longer than the window lasts, most turns: its answer opens it again,
-        // unless it was told to stop listening.
-        if !listeningStopped { deps.openConversation() }
+        // The agent took longer than attention lasts, most turns: its answer engages it again,
+        // unless the user dismissed it.
+        if !listeningStopped { attention.engage() }
         guard let job = await deps.speak(text, voice) else {
             Log.log("voice mode: the reply could not be spoken (muted, or speech unavailable)")
             return
@@ -523,7 +540,14 @@ final class VoiceMode {
     }
 
     private func heard(text: String, trigger: String?, interrupted: Bool) {
+        // "Stop listening", on its own: the user dismisses our attention, and the agent gets no words.
+        if HandsFreePhrases.isStopListening(text, trigger: trigger ?? attachment?.trigger) {
+            dismissAttention(why: "\"stop listening\"")
+            return
+        }
         let said = VoiceModeText.withoutTrigger(text, trigger: trigger ?? attachment?.trigger)
+        // Spoken to: no trigger word needed for what comes next.
+        attention.engage()
         let heard = interrupted ? heardBeforeCutIn : nil
         if interrupted { heardBeforeCutIn = nil }
         guard !said.isEmpty || interrupted else { return }
@@ -562,11 +586,15 @@ final class VoiceMode {
             conversation = message["conversation"] as? Bool == true
             standingAside = message["standingAside"] as? String
             if before != (phase, conversation, standingAside) { version += 1 }
+            attention.see(quiet: message["quiet"] as? Bool ?? false)
             setPendingBeep(message["pending"] as? Bool == true)
         case "cue":
             setPendingBeep(false)
             let name = message["name"] as? String
-            if name == "notWakeWord" { setMissedTrigger(true) }
+            if name == "notWakeWord" {
+                setMissedTrigger(true)
+                attention.alarmed()
+            }
             if name == "dictationStart" {
                 setMissedTrigger(false)
                 missedHeard = nil
@@ -595,6 +623,13 @@ final class VoiceMode {
                 return
             }
             heard(text: text, trigger: message["trigger"] as? String, interrupted: interrupted)
+        case "session":
+            // Hands-free came on: no trigger word needed to begin with.
+            if let ms = (message["conversationMs"] as? NSNumber)?.doubleValue { attention.engagedMs = ms }
+            listeningStopped = false
+            attention.engage()
+        case "resumed":
+            attention.restate()
         case "setup":
             let before = (route, echoExperiment)
             route = message["route"] as? String
@@ -610,7 +645,7 @@ final class VoiceMode {
             default: detach(.handsFree(why))
             }
         default:
-            break   // `session`, `gauge`, `duck`: nothing to do here
+            break   // `gauge`, `duck`: nothing to do here
         }
     }
 

@@ -2,8 +2,8 @@ import Foundation
 
 /// `--hands-free-test [text]`: a hands-free client end to end, against the
 /// running app. It registers the trigger word "computer", streams `say`-made
-/// speech as a phone would — silence while the conversation window that
-/// turning it on opens runs out, then "Computer, <text>" — and prints every
+/// speech as a phone would — a moment's silence, then "Computer, <text>",
+/// never engaging attention, so the trigger word is needed — and prints every
 /// message Voice Operator sends back, until the transcript arrives.
 ///
 /// Everything a phone's session exercises runs for real: the socket protocol,
@@ -42,7 +42,6 @@ enum HandsFreeTestClient {
             }
             return nil
         }
-        // The window that turning it on opens runs out on audio, not the clock: send its silence fast.
         let rate = HandsFreeAudio.sampleRate
         var at = 0
         func send(_ samples: [Int16], realTime: Bool) async {
@@ -56,7 +55,6 @@ enum HandsFreeTestClient {
             }
         }
         let hiss = { (ms: Int) in (0..<(ms * rate / 1000)).map { _ in Int16.random(in: -8...8) } }
-        await send(hiss(16_500), realTime: false)
         await send(hiss(1_500), realTime: true)
         await send(speech, realTime: true)
         let tail = Task { await send(hiss(25_000), realTime: true) }

@@ -1018,7 +1018,7 @@ hands-free:
 | --- | --- |
 | `{"type":"hello","protocol":1,"client":"spaceterm","trigger":"control"}` | Register. `welcome` or `refused` (`protocol`, `invalid_client`, `invalid_trigger`, `client_taken`, `trigger_taken`) and the connection is closed. Registration lasts as long as the connection. |
 | `{"type":"start","source":"mac"}` | Hands-free on, on the Mac's microphone. Answered with `session`. |
-| `{"type":"stop"}` | Off, wherever it is on. |
+| `{"type":"stop"}` | Off, wherever it is on. A dictation under way (on the Mac's microphone with no other client on it, or on the client's streams) is finished first, as if the user had stopped speaking: its `transcript` (`reason: "stopped"`) goes out, then `session-ended {why:"off"}`. Nothing heard after the `stop` is dictated; a transcription that takes over 10 s is dropped. |
 | `{"type":"playing","on":bool}` | The client is playing sound of its own on the Mac (a cue): not listened through, plus a tail. |
 | `{"type":"attention","state":"engaged"\|"lapsed"\|"dismissed","closesAt":ms\|null}` | The client's attention, on its Mac session (see "Attention" below). |
 
@@ -1033,7 +1033,7 @@ hands-free:
 | `{"type":"playing","on":bool,"speech":bool,"echoCancelled":bool}` | The device is playing; `speech`: the client's voice, which hands-free turns down for the user and can cut off; `echoCancelled`: the microphone does not hear it. |
 | `{"type":"route","route":"ear"\|"open"\|"unsure","voiceProcessing":bool}` | Where the device's sound goes, and whether its echo cancellation is on. Sent on change and after a resume. The echo experiment acts only on `open` with `voiceProcessing`. |
 | `{"type":"attention",…}` | The client's attention, on this stream's session (see "Attention" below). |
-| `{"type":"stop"}` | Off. |
+| `{"type":"stop"}` | Off. A dictation under way is finished first, as if the user had stopped speaking: its `transcript` (`reason: "stopped"`) goes out on this connection, then `session-ended {why:"off"}` — keep the connection open until that arrives. Audio sent after the `stop` is ignored; a transcription that takes over 10 s is dropped. A stream that drops (or a session that is lost) abandons a dictation instead. |
 
 Audio a resumed stream replays from more than 2 s ago resets listening unless a
 dictation was under way: it is history, not the user talking now.

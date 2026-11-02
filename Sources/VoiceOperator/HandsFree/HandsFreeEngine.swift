@@ -275,6 +275,11 @@ final class HandsFreeEngine: @unchecked Sendable {
     private var shutdownWatch: (start: Int, frames: Int, quietFrames: Int)?
     /// The dictation under way.
     private var utterance: Utterance?
+    /// A dictation that has ended and is being transcribed: at most one, as nothing starts while `sending`.
+    private var transcribing: Utterance?
+    /// Turned off on purpose (`stop`): what runs once the dictation in flight has sent its transcript, and the
+    /// timer that gives up on it.
+    private var stopping: (done: () -> Void, timer: Timer)?
     private var lastState: Event?
     private var lastGauge: Event?
     private var heardSamples = 0
@@ -404,7 +409,7 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// window, so the first words need no trigger word; `reopened` (a stalled
     /// source back) leaves the window as it was.
     func sourceStarted(reopened: Bool = false) {
-        guard !live else { return }
+        guard !live, stopping == nil else { return }
         live = true
         firstLevels = true
         levels = (0, 0, 0, -120)
@@ -431,6 +436,7 @@ final class HandsFreeEngine: @unchecked Sendable {
     func sourceStopped(final: Bool) {
         guard live || final else { return }
         live = false
+        if final { stopping?.timer.cancel(); stopping = nil }
         deafTimer?.cancel()
         if utterance != nil { end(.lost) }
         shutdownWatch = nil
@@ -438,6 +444,52 @@ final class HandsFreeEngine: @unchecked Sendable {
         if phase == .listening { setPhase(.off) }
         deps.record("source", ["listening": false])
         publishState()
+    }
+
+    /// Turned off on purpose (a client's `stop`): a dictation under way ends
+    /// right there, as if the speaker had finished, and `done` runs once its
+    /// transcript has gone out — or after `stopTimeoutMs`, the dictation then
+    /// dropped — and the source has stopped for good. Nothing pushed after this
+    /// is heard. With no dictation under way, `done` runs at once. A source
+    /// that is lost (`sourceStopped`) abandons a dictation instead.
+    func stop(then done: @escaping () -> Void) {
+        if let first = stopping?.done {
+            stopping?.done = { first(); done() }
+            return
+        }
+        live = false
+        deafTimer?.cancel()
+        shutdownWatch = nil
+        if utterance != nil { end(.stopped) }
+        guard let pending = transcribing else {
+            sourceStopped(final: true)
+            done()
+            return
+        }
+        deps.log("turned off mid-dictation: sending it first")
+        let timer = deps.after(Self.stopTimeoutMs) { [weak self, weak pending] in
+            guard let self, self.stopping != nil else { return }
+            self.deps.log("turned off: the dictation's transcript took over \(Int(Self.stopTimeoutMs / 1000))s — dropped")
+            if let pending, self.transcribing === pending {
+                pending.dictation.cancel()
+                self.transcribing = nil   // its answer, if it comes, is not sent
+                self.finishedDictation()
+            }
+            self.stopped()
+        }
+        stopping = (done, timer)
+    }
+
+    /// How long a `stop` waits for the dictation it ended to be transcribed.
+    static let stopTimeoutMs: Double = 10_000
+
+    /// A `stop`'s wait is over: the source stops for good, then its `done`.
+    private func stopped() {
+        guard let stopping else { return }
+        self.stopping = nil
+        stopping.timer.cancel()
+        sourceStopped(final: true)
+        stopping.done()
     }
 
     /// The source skipped audio (a stream resuming after a gap): speech in the
@@ -668,7 +720,8 @@ final class HandsFreeEngine: @unchecked Sendable {
     }
 
     /// `mini`: turn-1-mini said they had finished, and they stayed quiet `miniHoldMs`.
-    private enum EndReason: String { case mini, silence, tooLong = "too-long", lost }
+    /// `stopped`: turned off on purpose mid-dictation (`stop`).
+    private enum EndReason: String { case mini, silence, tooLong = "too-long", lost, stopped }
 
     /// After turn-1-mini first reaches its threshold in a silence, how long the
     /// quiet must go on before the dictation ends: speech in it cancels the ending.
@@ -696,8 +749,10 @@ final class HandsFreeEngine: @unchecked Sendable {
         }
         setPhase(.sending)
         publishGauge(keepingTurn: utterance)
+        transcribing = utterance
         utterance.dictation.finish { [weak self] result in
-            guard let self else { return }
+            guard let self, self.transcribing === utterance else { return }
+            self.transcribing = nil
             switch result {
             case .success(let text):
                 let trigger = utterance.trigger ?? self.triggers[utterance.client]
@@ -714,6 +769,7 @@ final class HandsFreeEngine: @unchecked Sendable {
                 if utterance.interrupted { self.carryOn(utterance) }
             }
             self.finishedDictation()
+            self.stopped()
         }
     }
 

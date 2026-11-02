@@ -453,4 +453,20 @@ final class HandsFreeHandoverTests: XCTestCase {
         service.queue.sync {}
         XCTAssertEqual(service.snapshot()["clients"] as? [String], [])
     }
+    func testTurnedOffWithNothingDictatedEndsAtOnce() {
+        let wasIncognito = Incognito.isOn
+        Incognito.isOn = false
+        defer { Incognito.isOn = wasIncognito }
+        let service = HandsFreeService()
+        let client = Recorder()
+        XCTAssertNil(service.registerLocal("spaceterm", trigger: "control", link: client))
+        service.setLocal("spaceterm", on: true)
+        service.setLocal("spaceterm", on: false)
+        service.queue.sync {}
+        XCTAssertEqual(client.messages.filter { $0["type"] as? String == "session-ended" }.map { $0["why"] as? String },
+                       ["off"])
+        XCTAssertEqual((service.snapshot()["sessions"] as? [[String: Any]])?.count, 0)
+        service.unregisterLocal("spaceterm")
+        service.queue.sync {}
+    }
 }

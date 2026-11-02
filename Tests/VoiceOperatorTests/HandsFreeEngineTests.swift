@@ -40,6 +40,8 @@ private final class Harness {
     var transcript = "Control, what is Kevin doing?"
     /// Hold checks until `answerChecks`: the Mac taking its time.
     var slowChecks = false
+    /// Transcriptions that never answer: a stuck provider.
+    var stuckTranscriptions = false
     var state = HandsFreeEngine.SourceState()
 
     var checks: [Int] = []
@@ -60,6 +62,8 @@ private final class Harness {
         let backlogSeconds: Double
         var finished = false
         var cancelled = false
+        /// Samples fed after the backlog.
+        var appended = 0
         let text: () -> String
         let run: (@escaping () -> Void) -> Void
         init(backlog: Int, text: @escaping () -> String, run: @escaping (@escaping () -> Void) -> Void) {
@@ -67,7 +71,7 @@ private final class Harness {
             self.text = text
             self.run = run
         }
-        func append(_ pcm: [Int16]) {}
+        func append(_ pcm: [Int16]) { appended += pcm.count }
         func finish(_ done: @escaping (Result<String, Error>) -> Void) {
             finished = true
             let text = text()
@@ -95,7 +99,7 @@ private final class Harness {
             },
             beginDictation: { [unowned self] _, backlog in
                 let d = FakeDictation(backlog: backlog.count, text: { [unowned self] in transcript },
-                                      run: { [unowned self] in queued.append($0) })
+                                      run: { [unowned self] in if !stuckTranscriptions { queued.append($0) } })
                 dictations.append(d)
                 return d
             },
@@ -784,6 +788,66 @@ final class HandsFreeEngineTests: XCTestCase {
         XCTAssertEqual(h.sounds, ["pending:on"])
         h.engine.sourceStopped(final: true)
         XCTAssertEqual(h.sounds, ["pending:on", "pending:off"])
+        XCTAssertEqual(h.phase, .off)
+    }
+
+    // MARK: Turned off on purpose
+
+    func testStopMidDictationSendsItsTranscriptThenStops() {
+        let h = harness()
+        h.hear(Sound.quiet(1500), Sound.speech(1500))
+        XCTAssertEqual(h.phase, .hearing)
+        var eventsWhenDone: Int?
+        h.engine.stop { eventsWhenDone = h.events.count }
+        h.settle()
+        XCTAssertEqual(h.transcripts.map(\.text), ["Control, what is Kevin doing?"])
+        let transcriptAt = h.events.firstIndex { if case .transcript = $0.event { return true }; return false }
+        XCTAssertNotNil(eventsWhenDone)
+        XCTAssertLessThan(transcriptAt!, eventsWhenDone!)
+        XCTAssertEqual(h.recorded("ended").last?["reason"] as? String, "stopped")
+        XCTAssertFalse(h.dictations[0].cancelled)
+        XCTAssertEqual(h.phase, .off)
+        // Audio after the stop is not dictated, and starts nothing.
+        let appended = h.dictations[0].appended
+        h.hear(Sound.speech(1500), Sound.quiet(3500))
+        XCTAssertEqual(h.dictations[0].appended, appended)
+        XCTAssertEqual(h.dictations.count, 1)
+        XCTAssertEqual(h.transcripts.count, 1)
+    }
+
+    func testStopWhileListeningStopsAtOnce() {
+        let h = harness()
+        h.hear(Sound.quiet(1500))
+        var done = false
+        h.engine.stop { done = true }
+        XCTAssertTrue(done)
+        XCTAssertEqual(h.transcripts.count, 0)
+        XCTAssertEqual(h.phase, .off)
+    }
+
+    func testStopGivesUpOnAStuckTranscription() {
+        let h = harness { $0.stuckTranscriptions = true }
+        h.hear(Sound.quiet(1500), Sound.speech(1500))
+        var done = false
+        h.engine.stop { done = true }
+        h.elapse(HandsFreeEngine.stopTimeoutMs - 100)
+        XCTAssertFalse(done)
+        h.elapse(200)
+        XCTAssertTrue(done)
+        XCTAssertTrue(h.dictations[0].cancelled)
+        XCTAssertEqual(h.transcripts.count, 0)
+        XCTAssertEqual(h.phase, .off)
+    }
+
+    func testALostSourceMidDictationAbandonsIt() {
+        let h = harness()
+        h.hear(Sound.quiet(1500), Sound.speech(1500))
+        XCTAssertEqual(h.phase, .hearing)
+        h.engine.sourceStopped(final: true)
+        h.settle()
+        XCTAssertTrue(h.dictations[0].cancelled)
+        XCTAssertEqual(h.transcripts.count, 0)
+        XCTAssertEqual(h.recorded("ended").last?["reason"] as? String, "lost")
         XCTAssertEqual(h.phase, .off)
     }
 

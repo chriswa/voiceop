@@ -262,7 +262,7 @@ final class HandsFreeService: @unchecked Sendable {
             }
             startMac(connection.client)
         case (.control, "stop"):
-            stopClient(connection.client, why: "off")
+            stopClient(connection.client, why: "off", finishing: true)
         case (.control, "attention"):
             guard let engine = mac?.engine, engine.clients.contains(connection.client) else { return }
             Self.setAttention(engine, message, by: connection.client, reply: connection)
@@ -295,7 +295,7 @@ final class HandsFreeService: @unchecked Sendable {
             session.voiceProcessing = message["voiceProcessing"] as? Bool ?? false
             sendSetup(session)
         case (.stream, "stop"):
-            if let session = connection.session { end(session, why: "off") }
+            if let session = connection.session { stop(session) }
         case (.speaker, "progress"):
             guard let token = connection.speaker, let id = message["id"] as? String, let index = message["index"] as? Int,
                   let event = message["event"] as? String else { return }
@@ -397,7 +397,7 @@ final class HandsFreeService: @unchecked Sendable {
     func setLocal(_ name: String, on: Bool) {
         queue.async { [self] in
             guard clients[name] != nil else { return }
-            if on { startMac(name) } else { stopClient(name, why: "off") }
+            if on { startMac(name) } else { stopClient(name, why: "off", finishing: true) }
         }
     }
 
@@ -433,9 +433,18 @@ final class HandsFreeService: @unchecked Sendable {
         }
     }
 
-    private func stopClient(_ client: String, why: String) {
-        if mac?.engine.clients.contains(client) == true { stopMac(client, why: why) }
-        for session in streams.values where session.client == client { end(session, why: why) }
+    /// `finishing`: turned off on purpose, so a dictation under way is finished and sent first (`HandsFreeEngine.stop`).
+    private func stopClient(_ client: String, why: String, finishing: Bool = false) {
+        if mac?.engine.clients.contains(client) == true {
+            if finishing, let engine = mac?.engine, engine.clients == [client] {
+                engine.stop { [weak self] in self?.stopMac(client, why: why) }
+            } else {
+                stopMac(client, why: why)
+            }
+        }
+        for session in streams.values where session.client == client {
+            if finishing { stop(session) } else { end(session, why: why) }
+        }
     }
 
     // MARK: - The Mac's microphone
@@ -697,6 +706,15 @@ final class HandsFreeService: @unchecked Sendable {
         }
         session.expiry = expiry
         queue.asyncAfter(deadline: .now() + .milliseconds(Int(Self.resumeWindowMs)), execute: expiry)
+    }
+
+    /// The client turned it off: a dictation under way is finished and its transcript sent before `session-ended`.
+    private func stop(_ session: StreamSession) {
+        guard streams[session.id] != nil else { return }
+        session.engine.stop { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.end(session, why: "off")
+        }
     }
 
     private func end(_ session: StreamSession, why: String) {

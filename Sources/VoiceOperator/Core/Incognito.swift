@@ -19,7 +19,7 @@ enum Incognito {
 
     /// UserDefaults is thread-safe, so this is read from any actor or queue.
     static var isOn: Bool {
-        get { UserDefaults.standard.bool(forKey: key) }
+        get { !ServiceMode.isService && UserDefaults.standard.bool(forKey: key) }
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 

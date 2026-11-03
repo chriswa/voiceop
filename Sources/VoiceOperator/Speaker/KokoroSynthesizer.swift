@@ -20,7 +20,7 @@ import Foundation
 struct KokoroSynthesizer: SpeechSynthesizer {
     /// The local Kokoro. An IPv4 literal, not `localhost`: the server binds
     /// 127.0.0.1 only, and `localhost` would try `::1` first.
-    static let baseURL = "http://127.0.0.1:56841"
+    static var baseURL: String { "http://127.0.0.1:\(KokoroService.port)" }
     /// Kokoro's own default voice, used when a caller names none.
     static let defaultVoiceID = "af_heart"
     /// Ephemeral: nothing about a request reaches the disk. The shared session

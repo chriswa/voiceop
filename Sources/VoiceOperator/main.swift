@@ -1,5 +1,11 @@
 import AppKit
 
+// Service mode and `--home` first: every path below may move (see ServiceMode).
+if let problem = ServiceMode.configure(CommandLine.arguments) {
+    FileHandle.standardError.write(Data("VoiceOperator: \(problem)\n".utf8))
+    exit(2)
+}
+
 // Dev self-test: `swift run VoiceOperator --asr-test [text]` synthesizes speech
 // locally with `say`, transcodes to the ASR WAV format, and runs exactly one
 // WisprTranscriber call. Mic-free and deterministic — validates the Swift STT
@@ -118,6 +124,13 @@ if CommandLine.arguments.contains("--tts-test") {
         text: CommandLine.arguments.last.flatMap { $0 == "--tts-test" ? nil : $0 }
             ?? "The transcript reader is now running through the voice operator.")
     exit(0)
+}
+
+// Headless: the speech engine alone, for another program (DESIGN.md "Service mode").
+if ServiceMode.isService {
+    let service = ServiceCoordinator()
+    service.start()
+    ServiceCoordinator.runForever()
 }
 
 ApplicationsRelocator.relocateIfNeeded()

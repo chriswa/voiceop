@@ -10,6 +10,7 @@ enum Log {
         if NSClassFromString("XCTestCase") != nil {
             return FileManager.default.temporaryDirectory.appendingPathComponent("VoiceOperator-tests.log")
         }
+        if let home = ServiceMode.home { return home.appendingPathComponent("voice.log") }
         let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

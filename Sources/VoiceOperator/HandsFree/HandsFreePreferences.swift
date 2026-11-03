@@ -21,7 +21,10 @@ enum HandsFreePreferences {
 
     /// Defaults to `HandsFreeTuning.standard`'s 15 s.
     static var conversationTimeout: ConversationTimeout {
-        get { ConversationTimeout(rawValue: UserDefaults.standard.integer(forKey: conversationKey)) ?? .s15 }
+        get {
+            if ServiceMode.isService { return .s15 }
+            return ConversationTimeout(rawValue: UserDefaults.standard.integer(forKey: conversationKey)) ?? .s15
+        }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: conversationKey) }
     }
 }

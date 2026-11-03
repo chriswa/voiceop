@@ -1210,6 +1210,38 @@ because the engine refuses any module that declares `on` or `next` again. `scrip
 ten more turns, and "turn hands-free voice chat off". It speaks each reply
 aloud.
 
+## Service mode (2026-11-03)
+
+A headless instance of the speech engine for another program to run as its own,
+beside the app, sharing nothing at runtime (vibeagame runs one for its phone app).
+
+    scripts/make-service.sh <outdir>          # release build → <outdir>/VoiceOperatorService.app + voice-service
+    <outdir>/voice-service --home <dir> [--kokoro-port N]   # = VoiceOperator --service --home <dir>
+
+- **Paths** (`ServiceMode`): `--home` replaces `~/Library/Application Support/VoiceOperator`
+  everywhere (`HistoryStore.supportDir`): `speech-service.json` (same discovery format),
+  `hands-free.sock`, `hands-free/` records, `models/` (turn-1-mini, 6 MB), `kokoro/` (venv, ~1 GB),
+  `kokoro.log`; the log is `<home>/voice.log` (and stderr). `--home` alone (no `--service`) points a
+  debug client at it: `VoiceOperator --home <dir> --hands-free-test`. Parakeet's CoreML models stay
+  in FluidAudio's own cache (`~/Library/Application Support/FluidAudio`), shared and read-only.
+  Keep `<home>` short: espeak-ng needs the venv's data path under 160 characters.
+- **What runs** (`ServiceCoordinator`): the loopback HTTP API and the hands-free socket (streams,
+  speaker devices, remote transcription), Parakeet (forced, whatever any defaults say), and Kokoro.
+  Nothing else: no menu bar, hotkeys, Mac microphone (a `start source:mac` is ended with
+  `why: no-microphone`), Mac playback (`POST /v1/speech` without `device` is 400 `device_required`),
+  cues, Wispr, clean-up, voice mode, launch at login or restart. Incognito, the echo experiment and
+  the conversation timeout are fixed at off/off/15 s. The bundle has its own id
+  (`com.chriswa.voiceoperator.service`), so no UserDefaults are shared with the app.
+- **Kokoro** is the service's child process on its own port (default 56851, never 56841), installed
+  into `<home>/kokoro` on first run as the app installs its own (`KokoroService` with
+  `Paths.child`), respawned 10 s after an unasked-for exit, stopped with the service (SIGTERM or
+  SIGINT); one orphaned by a crash is stopped at the next start (`server.pid`). No launchd agent.
+- **`/v1/status`** adds `service: true`, `kokoro` (`installing`, `starting`, `ready`, `failed`,
+  `missing`) and `kokoro_detail` (the step, or why it failed).
+- Measured on the dev Mac: the service ~165 MB RSS; its Kokoro ~0.8 GB RSS, 1.7 GB by its own
+  `/health` (`memory_mb`, MPS included). A first install downloads ~900 MB of Python packages
+  (fast from a warm `uv` cache) and the Kokoro model (~330 MB, Hugging Face cache, shared).
+
 ## Speech on a device (2026-10-25)
 
 Speech a client wants heard on a device that plays it itself — a phone, through

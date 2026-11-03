@@ -15,6 +15,8 @@ struct HistoryStore {
 
     /// Shared app-support directory (also used for the STT clip store).
     static var supportDir: URL {
+        // Service mode keeps everything in its own home (`ServiceMode`).
+        if let home = ServiceMode.home { return home }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VoiceOperator", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

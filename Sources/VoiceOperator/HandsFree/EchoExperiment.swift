@@ -30,7 +30,7 @@ enum EchoExperiment {
 
     /// The checkbox. Read on any thread; `HandsFreeService.host.echoExperiment` carries it to hands-free.
     static var isOn: Bool {
-        get { UserDefaults.standard.bool(forKey: key) }
+        get { !ServiceMode.isService && UserDefaults.standard.bool(forKey: key) }
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 

@@ -53,6 +53,9 @@ final class SpeechHTTPService: @unchecked Sendable {
         var shadow: TranscriptionProviderID?
         /// Incognito mode (see `Incognito`): nothing saved, nothing sent.
         var incognito = false
+        /// Service mode only (`ServiceCoordinator`): its Kokoro's state, `installing`,
+        /// `starting`, `ready` or `failed`, and what it is doing or why it failed.
+        var kokoro: (state: String, detail: String?)?
 
         var object: [String: Any] {
             var o: [String: Any] =
@@ -67,6 +70,13 @@ final class SpeechHTTPService: @unchecked Sendable {
             o["transcription_provider"] = provider.rawValue
             if let shadow { o["shadow_provider"] = shadow.rawValue }
             o["incognito"] = incognito
+            if ServiceMode.isService {
+                o["service"] = true
+                if let kokoro {
+                    o["kokoro"] = kokoro.state
+                    if let detail = kokoro.detail { o["kokoro_detail"] = detail }
+                }
+            }
             return o
         }
     }
@@ -144,7 +154,7 @@ final class SpeechHTTPService: @unchecked Sendable {
             guard let snapshot else { return .init(status: 503, object: ["error": "status_unavailable"]) }
             var object = await snapshot().object
             object["hands_free"] = HandsFreeService.shared.snapshot()
-            object["voice_mode"] = await VoiceModeRoutes.status().object
+            if !ServiceMode.isService { object["voice_mode"] = await VoiceModeRoutes.status().object }
             return .init(status: 200, object: object)
         }
         // Ask the app to restart itself. Immediate when idle (200); deferred until
@@ -252,12 +262,14 @@ final class SpeechHTTPService: @unchecked Sendable {
                 case .refused(let blocked): return Self.refused(blocked)
                 }
             }
+            // Service mode never plays on the Mac: speech is for a device only.
+            if ServiceMode.isService { return .init(status: 400, object: ["error": "device_required"]) }
             guard let result = await SpeechJobManager.shared.enqueue(parts: parts) else { return .init(status: 503, object: ["error": "speech_unavailable"]) }
             if result.error == "speech_muted" { return .init(status: 503, object: ["error": "speech_muted"]) }
             return .init(status: 202, object: object(result))
         }
         // Claude Code voice mode: the plugin's hooks and its `voice-mode` command. See `VoiceModeRoutes`.
-        if r.path == "/v1/voice-mode" || r.path.hasPrefix("/v1/voice-mode/") {
+        if !ServiceMode.isService, r.path == "/v1/voice-mode" || r.path.hasPrefix("/v1/voice-mode/") {
             let answer = await VoiceModeRoutes.handle(method: r.method, path: r.path, query: r.query, body: r.body)
             if let text = answer.text {
                 return .init(status: answer.status, object: nil, raw: (Data(text.utf8), "text/plain; charset=utf-8"))

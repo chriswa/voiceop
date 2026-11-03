@@ -456,6 +456,12 @@ final class HandsFreeService: @unchecked Sendable {
 
     private func startMac(_ client: String) {
         guard let registered = clients[client] else { return }
+        // Service mode never opens the Mac's microphone: streams only.
+        if ServiceMode.isService {
+            registered.connection.send(["type": "session-ended", "why": "no-microphone",
+                                        "detail": "this is a headless service: stream audio instead"])
+            return
+        }
         if let refusal = Incognito.refusal(Self.incognitoActivity) {
             registered.connection.send(["type": "session-ended", "why": "incognito", "detail": refusal.description])
             return

@@ -28,7 +28,11 @@ enum TranscriptionPreferences {
 
     /// The provider whose transcript is pasted.
     static var primary: TranscriptionProviderID {
-        get { UserDefaults.standard.string(forKey: primaryKey).flatMap(TranscriptionProviderID.init) ?? defaultPrimary }
+        get {
+            // Service mode is on-device only, whatever a defaults domain says.
+            if ServiceMode.isService { return .parakeet }
+            return UserDefaults.standard.string(forKey: primaryKey).flatMap(TranscriptionProviderID.init) ?? defaultPrimary
+        }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: primaryKey) }
     }
 
@@ -45,6 +49,7 @@ enum TranscriptionPreferences {
     /// comparison. Never the primary: choosing the shadow as primary clears it.
     static var shadow: TranscriptionProviderID? {
         get {
+            if ServiceMode.isService { return nil }
             let id = UserDefaults.standard.string(forKey: shadowKey).flatMap(TranscriptionProviderID.init)
             return id == primary ? nil : id
         }
@@ -54,7 +59,7 @@ enum TranscriptionPreferences {
     /// Whether the primary's transcripts go through the on-device clean-up pass
     /// (`CleanedUpProvider`) before they are pasted. Off until chosen.
     static var cleanup: Bool {
-        get { UserDefaults.standard.bool(forKey: cleanupKey) }
+        get { !ServiceMode.isService && UserDefaults.standard.bool(forKey: cleanupKey) }
         set { UserDefaults.standard.set(newValue, forKey: cleanupKey) }
     }
 }

@@ -26,7 +26,8 @@ import Foundation
 @MainActor
 final class KokoroService {
     nonisolated static let label = "com.chriswa.voiceoperator.kokoro"
-    nonisolated static let port = 56841
+    /// 56841 for the app; service mode's own (`ServiceMode.kokoroPort`) never collides with it.
+    nonisolated static var port: Int { ServiceMode.isService ? ServiceMode.kokoroPort : 56841 }
     /// The files that make up an install, as shipped in the bundle.
     static let serverFiles = ["kokoro_server.py", "requirements.txt"]
     static let blocklistFile = "blocked_voices.json"
@@ -63,6 +64,11 @@ final class KokoroService {
         /// Where a downloaded `uv` lives (only when the Mac has none of its own).
         var privateUV: URL { installDir.appendingPathComponent("uv/uv") }
         var server: URL { installDir.appendingPathComponent("kokoro_server.py") }
+        /// Service mode: the server is this process's child, not a launchd agent
+        /// (it dies with the service, and nothing is left in ~/Library/LaunchAgents).
+        var child = false
+        /// The child's pid, so one orphaned by a crash is stopped at the next start.
+        var childPID: URL { installDir.appendingPathComponent("server.pid") }
         var plist: URL { launchAgents.appendingPathComponent("\(KokoroService.label).plist") }
         var espeakData: URL {
             venv.appendingPathComponent("lib/python3.13/site-packages/espeakng_loader/espeak-ng-data")
@@ -70,6 +76,16 @@ final class KokoroService {
 
         static var standard: Paths {
             let fm = FileManager.default
+            if ServiceMode.isService, let home = ServiceMode.home {
+                let bundled = Bundle.main.resourceURL?.appendingPathComponent("kokoro", isDirectory: true)
+                return Paths(installDir: home.appendingPathComponent("kokoro", isDirectory: true),
+                             launchAgents: home.appendingPathComponent("unused-launch-agents", isDirectory: true),
+                             log: home.appendingPathComponent("kokoro.log"),
+                             bundled: bundled.flatMap {
+                                 fm.fileExists(atPath: $0.appendingPathComponent("kokoro_server.py").path) ? $0 : nil
+                             },
+                             child: true)
+            }
             let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("VoiceOperator", isDirectory: true)
             let library = fm.urls(for: .libraryDirectory, in: .userDomainMask)[0]
@@ -174,6 +190,7 @@ final class KokoroService {
     /// Our agent is set up (plist written and venv built).
     var isInstalled: Bool {
         let fm = FileManager.default
+        if paths.child { return fm.fileExists(atPath: paths.server.path) && fm.fileExists(atPath: paths.python.path) }
         return fm.fileExists(atPath: paths.plist.path) && fm.fileExists(atPath: paths.python.path)
     }
 
@@ -211,6 +228,9 @@ final class KokoroService {
         } else if updateAvailable {
             Log.log("kokoro service: the app ships a different server — updating automatically")
             update()
+        } else if paths.child {
+            // A child is not running until started; launchd's agent is.
+            start(.restart) { try await self.performLaunch() }
         }
     }
 
@@ -272,7 +292,8 @@ final class KokoroService {
         guard espeakLength < espeakLimit else { throw Failure.pathTooLong(espeakLength) }
         // Our plist alone (even with no venv) means our agent may be loaded and
         // holding the port; anyone else on it is a conflict to report, not kill.
-        let ours = FileManager.default.fileExists(atPath: paths.plist.path)
+        if paths.child { stopOrphan() }
+        let ours = paths.child ? child != nil : FileManager.default.fileExists(atPath: paths.plist.path)
         if !ours, let holder = try await portHolder() { throw Failure.portInUse(holder) }
         trimLog()
         try appendToLog("=== install \(Date()) ===\n")
@@ -299,13 +320,17 @@ final class KokoroService {
         cancellable = false
         if ours {
             try await waitUntilIdle()
-            _ = try? await launchctl(["bootout", "\(Self.domain)/\(Self.label)"])
+            if paths.child { stopChild() } else { _ = try? await launchctl(["bootout", "\(Self.domain)/\(Self.label)"]) }
         }
         report("starting the server", progress: 0.85)
         try await waitForPortFree()
-        try writePlist()
-        try await step("starting the launchd agent", "/bin/launchctl",
-                       ["bootstrap", Self.domain, paths.plist.path])
+        if paths.child {
+            try startChild()
+        } else {
+            try writePlist()
+            try await step("starting the launchd agent", "/bin/launchctl",
+                           ["bootstrap", Self.domain, paths.plist.path])
+        }
         report("starting (the first start downloads the voice model)", progress: 0.9)
         try await waitForHealth(timeout: startTimeout)
         Log.log("kokoro service: installed and running")
@@ -372,14 +397,33 @@ final class KokoroService {
         Log.log("kokoro service: restarting — memory before restart: \(health?.memoryMB.map { "\($0) MB" } ?? "unknown")")
         trimLog()
         report("restarting")
-        try await step("restarting the server", "/bin/launchctl", ["kickstart", "-k", "\(Self.domain)/\(Self.label)"])
+        if paths.child {
+            stopChild()
+            try await waitForPortFree()
+            try startChild()
+        } else {
+            try await step("restarting the server", "/bin/launchctl", ["kickstart", "-k", "\(Self.domain)/\(Self.label)"])
+        }
         try await waitForHealth(timeout: .seconds(120))
+    }
+
+    /// Service mode at launch: start the installed server as a child (the first
+    /// start may download the voice model).
+    private func performLaunch() async throws {
+        report("starting")
+        trimLog()
+        try appendToLog("=== start \(Date()) ===\n")
+        stopOrphan()
+        try await waitForPortFree()
+        try startChild()
+        try await waitForHealth(timeout: startTimeout)
+        Log.log("kokoro service: running on port \(Self.port) (pid \(child?.processIdentifier ?? 0))")
     }
 
     private func performUninstall() async throws {
         try await waitUntilIdle()
         report("uninstalling")
-        _ = try? await launchctl(["bootout", "\(Self.domain)/\(Self.label)"])
+        if paths.child { stopChild() } else { _ = try? await launchctl(["bootout", "\(Self.domain)/\(Self.label)"]) }
         let fm = FileManager.default
         if fm.fileExists(atPath: paths.plist.path) { try fm.removeItem(at: paths.plist) }
         if fm.fileExists(atPath: paths.installDir.path) { try fm.removeItem(at: paths.installDir) }
@@ -440,6 +484,80 @@ final class KokoroService {
             try await Task.sleep(for: pollInterval)
         }
         if let holder = try await portHolder() { throw Failure.portInUse(holder) }
+    }
+
+    // MARK: - The child (service mode)
+
+    private var child: Process?
+    /// Set while the child is being stopped on purpose, so it is not respawned.
+    private var stoppingChild = false
+
+    /// Start the server as this process's child, its output in the Kokoro log.
+    /// Respawned 10 s after an exit nobody asked for, as launchd's KeepAlive would.
+    private func startChild() throws {
+        stopOrphan()
+        let fm = FileManager.default
+        try fm.createDirectory(at: paths.log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: paths.log.path) { fm.createFile(atPath: paths.log.path, contents: nil) }
+        let out = try FileHandle(forWritingTo: paths.log)
+        try out.seekToEnd()
+        let process = Process()
+        process.executableURL = paths.python
+        process.arguments = ["-W", "ignore", paths.server.path]
+        process.currentDirectoryURL = paths.installDir
+        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
+                               "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+                               "PORT": String(Self.port)]
+        process.standardOutput = out
+        process.standardError = out
+        process.terminationHandler = { [weak self] ended in
+            let status = ended.terminationStatus
+            Task { @MainActor in
+                guard let self, self.child === ended else { return }
+                self.child = nil
+                try? FileManager.default.removeItem(at: self.paths.childPID)
+                guard !self.stoppingChild else { return }
+                Log.log("kokoro service: the server exited (\(status)) — starting it again in 10 s")
+                try? await Task.sleep(for: .seconds(10))
+                guard self.child == nil, !self.stoppingChild, self.isInstalled else { return }
+                do { try self.startChild() } catch { Log.log("kokoro service: restart failed — \(error.localizedDescription)") }
+            }
+        }
+        stoppingChild = false
+        try process.run()
+        child = process
+        try? String(process.processIdentifier).write(to: paths.childPID, atomically: true, encoding: .utf8)
+        Log.log("kokoro service: started the server as a child (pid \(process.processIdentifier), port \(Self.port))")
+    }
+
+    /// Stop the child and wait (at most 5 s, then SIGKILL) for it to go.
+    func stopChild() {
+        guard let process = child else { return }
+        stoppingChild = true
+        child = nil
+        process.terminate()
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning, Date() < deadline { usleep(50_000) }
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        try? FileManager.default.removeItem(at: paths.childPID)
+        Log.log("kokoro service: stopped the server (pid \(process.processIdentifier))")
+    }
+
+    /// A child left running by a service that crashed: stopped, if it is still our server.
+    private func stopOrphan() {
+        guard child == nil,
+              let text = try? String(contentsOf: paths.childPID, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else { return }
+        try? FileManager.default.removeItem(at: paths.childPID)
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return }
+        let path = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        // The venv's python resolves into the install's own uv-managed CPython.
+        guard path.hasPrefix(paths.installDir.resolvingSymlinksInPath().path) else { return }
+        Log.log("kokoro service: stopping a server left over from an earlier run (pid \(pid))")
+        kill(pid, SIGTERM)
+        for _ in 0..<100 where kill(pid, 0) == 0 { usleep(50_000) }
+        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
     }
 
     private func writePlist() throws {

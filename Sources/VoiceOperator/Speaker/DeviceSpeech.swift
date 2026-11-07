@@ -278,11 +278,17 @@ final class DeviceSpeech: @unchecked Sendable {
         job.audio[index] = Audio(seconds: clip.wav.duration, words: clip.words)
         // For hands-free's echo experiment: what the device's microphone hears of this is not the user.
         RecentSpeech.shared.note(job.segments[index].text)
-        device.send([
+        // Where the sentence is in the job's text (UTF-16), and its words' timings
+        // ([start s, end s, character end within the sentence]), so a device that keeps
+        // the audio can follow and seek it word by word.
+        var line: [String: Any] = [
             "type": "sentence", "id": id, "index": index, "count": job.segments.count,
             "sampleRate": clip.wav.sampleRate, "pcm": clip.wav.samples.base64EncodedString(),
             "sentAt": deps.now(), "synthMs": Int(synthMs.rounded()),
-        ])
+            "start": job.segments[index].start, "end": job.segments[index].end,
+        ]
+        if let words = clip.words { line["words"] = words.map { [$0.start, $0.end, Double($0.characterEnd)] } }
+        device.send(line)
         return true
     }
 

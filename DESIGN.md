@@ -1274,7 +1274,7 @@ No trigger word or control connection is needed.
 
 | Voice Operator sends | Meaning |
 | --- | --- |
-| `sentence {id, index, count, sampleRate, pcm, sentAt, synthMs}` | One sentence to play after whatever is queued: base64 s16le mono at `sampleRate`. `sentAt` (wall ms) and `synthMs` are for the device's record. |
+| `sentence {id, index, count, sampleRate, pcm, sentAt, synthMs, start, end, words?}` | One sentence to play after whatever is queued: base64 s16le mono at `sampleRate`. `sentAt` (wall ms) and `synthMs` are for the device's record. `start`/`end`: where it is in the job's text (UTF-16); `words`, when timed: `[start s, end s, character end within the sentence]` each, for a device that keeps the audio to follow and seek it. Sentences are sent as soon as they are made, not paced to playback. |
 | `ended {id, state, characterOffset}` | The job is over; stop anything left of it unless `state` is `completed`. |
 | `replaced` | Another connection is this device now. |
 

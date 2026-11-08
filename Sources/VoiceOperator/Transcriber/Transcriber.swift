@@ -64,6 +64,14 @@ enum TranscriptionPreferences {
     }
 }
 
+/// A word of a transcript and when it was said: in milliseconds from the first
+/// sample of the audio that was transcribed.
+struct TranscribedWord: Sendable, Equatable {
+    var word: String
+    var startMs: Int
+    var endMs: Int
+}
+
 /// What a provider made of one dictation.
 struct Transcript: Sendable, Equatable {
     /// What gets pasted.
@@ -71,6 +79,11 @@ struct Transcript: Sendable, Equatable {
     /// What recognition produced before a clean-up pass rewrote it into `text`;
     /// nil when no clean-up ran (or it failed, and `text` is the raw text).
     var raw: String? = nil
+    /// `text` word by word, punctuation attached as it is there, timed against
+    /// the dictation's whole audio (every sample the session or the clip was
+    /// given, trimmed of nothing). Nil from a provider that gives no timings
+    /// (Wispr), and after a clean-up pass, whose text they would not describe.
+    var words: [TranscribedWord]? = nil
 }
 
 /// Everything from the user's audio to the text that gets pasted — recognition

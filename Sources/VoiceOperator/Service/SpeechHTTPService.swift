@@ -28,8 +28,10 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// `HandsFreeService`); 17 added speech on a device — `client` and
     /// `device` on `POST /v1/speech`, and `ds_` job ids (see `DeviceSpeech`);
     /// 18 added Claude Code voice mode — `/v1/voice-mode/…` and `voice_mode`
-    /// in `/v1/status` (see `VoiceMode`).
-    static let discoveryVersion = 18
+    /// in `/v1/status` (see `VoiceMode`); 19 added word timings — `words` and
+    /// `audio_started_at` on `/v1/transcriptions/{id}/finish`, and `words` and
+    /// `startedAt` on the hands-free `transcript`.
+    static let discoveryVersion = 19
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -357,7 +359,7 @@ final class SpeechHTTPService: @unchecked Sendable {
                 try await manager.append(id: id, pcm: body)
                 return .init(status: 204, object: nil)
             case .finish(let id):
-                return .init(status: 200, object: ["text": try await manager.finish(id: id)])
+                return .init(status: 200, object: try await manager.finish(id: id).json)
             case .cancel(let id):
                 try await manager.cancel(id: id)
                 return .init(status: 204, object: nil)

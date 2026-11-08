@@ -113,8 +113,17 @@ final class HandsFreeEngine: @unchecked Sendable {
         case cutIn(msAgo: Int)
         /// What was dictated, trigger word included. Empty when nothing was
         /// caught. `interrupted`: it cut the client's voice off. `shutdown`:
-        /// it was a phrase that ends the conversation.
-        case transcript(text: String, trigger: String?, interrupted: Bool, reason: String, shutdown: Bool)
+        /// it was a phrase that ends the conversation. `timing`: its words, when
+        /// the provider gives timings and no audio was lost from the middle of it.
+        case transcript(text: String, trigger: String?, interrupted: Bool, reason: String, shutdown: Bool,
+                        timing: TranscriptTiming? = nil)
+    }
+
+    /// A hands-free transcript's words: their times are ms from the dictation's
+    /// first sample, which was made at wall-clock ms `startedAt`.
+    struct TranscriptTiming: Equatable, Sendable {
+        let startedAt: Double
+        let words: [TranscribedWord]
     }
 
     /// The client's attention to the user, as it last said (`setAttention`).
@@ -163,7 +172,7 @@ final class HandsFreeEngine: @unchecked Sendable {
     /// `finish` answers on the engine's queue.
     protocol Dictation: AnyObject {
         func append(_ pcm: [Int16])
-        func finish(_ done: @escaping (Result<String, Error>) -> Void)
+        func finish(_ done: @escaping (Result<Transcript, Error>) -> Void)
         func cancel()
     }
 
@@ -313,8 +322,14 @@ final class HandsFreeEngine: @unchecked Sendable {
         let interrupted: Bool
         /// Samples dictated so far, the backlog included: where in the dictation a pause or an ending is.
         var samples: Int
-        /// Wall ms of the first syllable (the backlog's start, not the check's answer).
+        /// Wall ms of the first syllable (the backlog's start, not the check's
+        /// answer): the earliest any frame's arrival allows, so that audio arriving
+        /// late or in a burst does not date the dictation late (`heard`).
         var startedAt: Double = 0
+        /// Samples of the source since the first syllable, this dictation's and any after it while it is transcribed.
+        var sourceSamples: Int
+        /// Audio was lost from the middle (`gap`): its words after that would be dated early, so it has none.
+        var lostAudio = false
         var backstop: Timer?
         var ended = false
         /// turn-1-mini on this dictation, its latest answer, and its highest since the pause began.
@@ -336,6 +351,14 @@ final class HandsFreeEngine: @unchecked Sendable {
             self.endpointer = endpointer
             self.interrupted = interrupted
             self.samples = samples
+            self.sourceSamples = samples
+        }
+
+        /// A frame of the source arrived. Audio can be delivered late but never
+        /// early, so the first syllable was at the latest this long ago.
+        func heard(_ count: Int, at now: Double) {
+            sourceSamples += count
+            startedAt = min(startedAt, now - HandsFreeAudio.ms(samples: sourceSamples))
         }
     }
 
@@ -498,6 +521,7 @@ final class HandsFreeEngine: @unchecked Sendable {
         framer.reset()
         listener.resume()
         shutdownWatch = nil
+        utterance?.lostAudio = true
     }
 
     /// 16 kHz s16le mono, in arrival order.
@@ -555,6 +579,7 @@ final class HandsFreeEngine: @unchecked Sendable {
     // MARK: - Frames
 
     private func routeFrame(_ frame: ScoredFrame) {
+        (utterance ?? transcribing)?.heard(frame.pcm.count, at: deps.now())
         let state = sourceState()
         throughEcho = state.throughEcho
         voicePlaying = state.clientSpeaking || state.voiceOperatorSpeaking
@@ -754,14 +779,18 @@ final class HandsFreeEngine: @unchecked Sendable {
             guard let self, self.transcribing === utterance else { return }
             self.transcribing = nil
             switch result {
-            case .success(let text):
+            case .success(let transcript):
+                let text = transcript.text
                 let trigger = utterance.trigger ?? self.triggers[utterance.client]
                 let shutdown = HandsFreePhrases.isShutdown(text, trigger: trigger)
                 self.deps.log("\(text.count) chars to \(utterance.client) (ended on \(reason.rawValue)"
                               + (utterance.interrupted ? ", having cut it off)" : ")"))
+                let timing = utterance.lostAudio ? nil : transcript.words.map {
+                    TranscriptTiming(startedAt: utterance.startedAt, words: $0)
+                }
                 self.emit(utterance.client, .transcript(text: text, trigger: utterance.trigger,
                                                         interrupted: utterance.interrupted,
-                                                        reason: reason.rawValue, shutdown: shutdown))
+                                                        reason: reason.rawValue, shutdown: shutdown, timing: timing))
                 if shutdown { self.sentAway(client: utterance.client, how: "dictated") }
             case .failure(let error):
                 self.deps.log("dictation failed: \(error)")

@@ -56,6 +56,7 @@ enum HandsFreeTestClient {
         }
         let hiss = { (ms: Int) in (0..<(ms * rate / 1000)).map { _ in Int16.random(in: -8...8) } }
         await send(hiss(1_500), realTime: true)
+        print("speech starts at \(Int(Date().timeIntervalSince1970 * 1000)) (wall ms; compare the transcript's startedAt and words)")
         await send(speech, realTime: true)
         let tail = Task { await send(hiss(25_000), realTime: true) }
         let transcript = await reader.value

@@ -135,7 +135,7 @@ speech plays through the SDK natively, see phase 5).
 `turn {p, threshold}`, `sampling {threshold | null}`,
 `signal {name, haptic?}` (`ready`, `checkingStart/Stop`, `dictationStart`,
 `dictationEnd`, `notWakeWord`, `conversationClosed`, `shutdown`, `error`),
-`cut-in {at}` and `duck {on}`, `transcript {text, trigger, interrupted}`
+`cut-in {at}` and `duck {on}`, `transcript {text, trigger, interrupted, startedAt?, words?}`
 (`text` empty when nothing followed the trigger — the client still hears of it,
 as Control does today), `session-ended {why: replaced | shutdown | lost | off}`.
 Timestamps are wall-clock ms; phone sessions resolve against the stream's own

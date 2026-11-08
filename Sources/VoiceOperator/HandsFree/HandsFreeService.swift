@@ -577,7 +577,7 @@ final class HandsFreeService: @unchecked Sendable {
             }
         }
         // "Let me turn this off" ends hands-free hands-free: after the words and the cue have gone.
-        if case .transcript(_, _, _, _, true) = outgoing.event, let client = outgoing.client {
+        if case .transcript(_, _, _, _, true, _) = outgoing.event, let client = outgoing.client {
             queue.async { [weak self] in self?.stopMac(client, why: "shutdown") }
         }
     }
@@ -610,7 +610,7 @@ final class HandsFreeService: @unchecked Sendable {
             if case .state(let phase, _, _, _, _, _, _, _) = outgoing.event {
                 self.setBusy(id, phase == .hearing || phase == .sending)
             }
-            if case .transcript(_, _, _, _, true) = outgoing.event {
+            if case .transcript(_, _, _, _, true, _) = outgoing.event {
                 self.queue.async { [weak self, weak session] in
                     if let self, let session { self.end(session, why: "shutdown") }
                 }
@@ -866,9 +866,14 @@ final class HandsFreeService: @unchecked Sendable {
             return ["type": "not-trigger", "heard": heard, "throughEcho": throughEcho, "echo": echo]
         case .cutIn(let msAgo):
             return ["type": "cut-in", "msAgo": msAgo, "at": Date().timeIntervalSince1970 * 1000 - Double(msAgo)]
-        case .transcript(let text, let trigger, let interrupted, let reason, let shutdown):
-            return ["type": "transcript", "text": text, "trigger": trigger.map { $0 as Any } ?? NSNull(),
-                    "interrupted": interrupted, "reason": reason, "shutdown": shutdown]
+        case .transcript(let text, let trigger, let interrupted, let reason, let shutdown, let timing):
+            var message: [String: Any] = ["type": "transcript", "text": text, "trigger": trigger.map { $0 as Any } ?? NSNull(),
+                                          "interrupted": interrupted, "reason": reason, "shutdown": shutdown]
+            if let timing {
+                message["startedAt"] = timing.startedAt
+                message["words"] = timing.words.map { ["word": $0.word, "startMs": $0.startMs, "endMs": $0.endMs] as [String: Any] }
+            }
+            return message
         }
     }
 
@@ -952,7 +957,7 @@ final class HandsFreeTranscription: HandsFreeEngine.Dictation, @unchecked Sendab
         leg.append(data)
     }
 
-    func finish(_ completion: @escaping (Result<String, Error>) -> Void) {
+    func finish(_ completion: @escaping (Result<Transcript, Error>) -> Void) {
         guard !done else { return }
         done = true
         let clip = WAVFile(sampleRate: HandsFreeAudio.sampleRate, samples: pcm).data
@@ -967,7 +972,7 @@ final class HandsFreeTranscription: HandsFreeEngine.Dictation, @unchecked Sendab
                 leg.trace.note("\(outcome.text.count) chars")
                 leg.trace.flush()
                 record.write("dictation", ["client": client, "text": outcome.text, "seconds": seconds])
-                queue.async { completion.value(.success(outcome.text)) }
+                queue.async { completion.value(.success(outcome.transcript)) }
             } catch {
                 leg.trace.note("failed: \(TranscriberError.userMessage(for: error))")
                 leg.trace.flush()

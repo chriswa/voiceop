@@ -34,8 +34,28 @@ reachable instance. `version` is the API generation: 2 added `/v1/status` and
 | `POST` | `/v1/restart` | Ask the app to relaunch itself. `200 {"restart":"restarting"}` when idle; `202 {"restart":"pending","reason":"dictating"}` when a dictation is in flight — it fires once that dictation has been pasted. Idempotent. |
 | `POST` | `/v1/transcriptions` | Open a remote dictation. Optional body `{"sample_rate": N}` (default 16000; any rate 8000–192000 is resampled to 16 kHz). Opens the Flow stream immediately, as key-down does. `201 {"id"}`; `400` bad body; `422` unsupported rate. |
 | `POST` | `/v1/transcriptions/{id}/audio` | Raw s16le mono PCM at the session's rate (`application/octet-stream`, chunks may split samples). Encoded to opus and streamed up as it arrives. `204`; `404` unknown id; `409` already finished. |
-| `POST` | `/v1/transcriptions/{id}/finish` | Commit and wait for the formatted transcript: `200 {"text"}` (`""` for no audio). `502`/`503` `{"error":"transcription_failed","detail"}` on upstream failure (503 = signed out); `404`/`409` as above. |
+| `POST` | `/v1/transcriptions/{id}/finish` | Commit and wait for the formatted transcript: `200 {"text", "words"?, "audio_started_at"?}` (`""` for no audio). `words` is `[{"word","start_ms","end_ms"}]`, in ms from the first sample of the audio sent; `audio_started_at` is the wall-clock ms that sample was made, as well as the chunks' arrival can tell (see "Word timings"), so a word's wall time is `audio_started_at + start_ms`. Both are absent when the provider gives no timings (Wispr) or a clean-up pass rewrote the text. `502`/`503` `{"error":"transcription_failed","detail"}` on upstream failure (503 = signed out); `404`/`409` as above. |
 | `DELETE` | `/v1/transcriptions/{id}` | Discard a session in any state. `204`; `404` unknown id. |
+
+**Word timings.** Parakeet's words come back on both paths: `words` on the
+finish response and on the hands-free `transcript`, each `{word, start, end}` in
+ms from the first sample of the audio that was transcribed (nothing is trimmed:
+the backlog before the first syllable is part of it, and the trigger word is
+among the words). A word's span leaves out its punctuation, which the model
+times in the silence after it. That first sample's wall-clock ms is
+`audio_started_at` / `startedAt`, on the Mac's clock. Audio is only ever
+delivered late, never early, so each chunk says the first sample
+was at the latest `arrival − samples before it`; the lowest of those, over the
+dictation and whatever of the stream follows it while it is transcribed, is
+the anchor. A burst after a dropout therefore dates the audio by the part that
+arrived on time, and audio sent faster than real time would date its start too
+early (nothing live does that). A hands-free dictation that lost audio from
+its middle (`gap`) has no words, since the words after the hole would be dated
+early.
+Measured on `say` speech with word positions known by construction: word starts
+within sentences are 60 ms early on average (±60 ms, the model's frame is 80 ms),
+starts after a long silence 200–440 ms early, and the ends of sentence-final
+words up to 0.6 s late. Good enough for "the frame when they said this".
 
 Remote transcription (`RemoteTranscriptionManager`) exists for the Spaceterm
 phone client, relayed by the Spaceterm server: browsers cannot speak Wispr's
@@ -1072,7 +1092,7 @@ too: Voice Operator sends it as an ordinary transcript.
 | `duck {on}` | Turn the client's voice down (someone is talking over it) or back up. |
 | `not-trigger {heard, throughEcho, echo}` | Speech that needed the trigger word did not start with it: what Apple's model heard, for a client that shows it (Spaceterm ignores it). `throughEcho`: heard while our own voice played, so most likely that voice; `echo`: it matched what that voice just said. Sent whether or not the `notWakeWord` cue is. |
 | `cut-in {msAgo, at}` | The user cut the client's voice off: they began `msAgo` ms ago (`at`, wall ms), which is as far as they heard it. |
-| `transcript {text, trigger, interrupted, reason, shutdown}` | The dictation, trigger word included — strip it yourself. Empty when nothing was caught; `interrupted`: it cut the client's voice off (with empty text: say you had not finished, and carry on). `shutdown`: "let me turn this off" or "<trigger>, shutdown" — hands-free turns itself off: `session-ended {why:"shutdown"}` follows. |
+| `transcript {text, trigger, interrupted, reason, shutdown, startedAt?, words?}` | The dictation, trigger word included — strip it yourself. Empty when nothing was caught; `interrupted`: it cut the client's voice off (with empty text: say you had not finished, and carry on). `shutdown`: "let me turn this off" or "<trigger>, shutdown" — hands-free turns itself off: `session-ended {why:"shutdown"}` follows. `words`: `[{word, startMs, endMs}]`, the trigger word among them, in ms from the first sample of the dictation's audio; `startedAt`: that sample's wall-clock ms ("Word timings"). Absent when the provider gives no timings or audio was lost from the middle of the dictation. |
 | `setup {route, echoExperiment}` | Where the source's sound goes (`ear`, `open`, `unsure`; null until a stream says), and the echo experiment there: `off` (the checkbox is off), `standby` (on, not acting on this route), `active` (listening through our own voice when it plays). Sent as a session starts or resumes and whenever either changes. |
 | `ack {at}`, `resumed {session, at}` | Stream bookkeeping, above. |
 

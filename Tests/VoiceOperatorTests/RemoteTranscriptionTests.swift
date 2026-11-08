@@ -60,6 +60,35 @@ final class RemoteTranscriptionTests: XCTestCase {
 
     // MARK: - Session bookkeeping
 
+    func testFinishCarriesWordsAndWhenTheFirstSampleWasMade() async throws {
+        let word = TranscribedWord(word: "hello", startMs: 120, endMs: 400)
+        let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: FakeSession(result: .success("hello"), words: [word])) })
+        let id = try await manager.create(sampleRate: 16_000)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        let second = sine(rate: 16_000, seconds: 1)
+        // The first half second arrives late, 300 ms after it was made; the next half arrives as it is made.
+        try await manager.append(id: id, pcm: second.prefix(16_000), now: t0.addingTimeInterval(0.8))
+        try await manager.append(id: id, pcm: second.dropFirst(16_000), now: t0.addingTimeInterval(1.0))
+        let result = try await manager.finish(id: id)
+        XCTAssertEqual(result.words, [word])
+        XCTAssertEqual(try XCTUnwrap(result.audioStartedAt), 1_000_000, accuracy: 1)   // 1 000 s; the on-time chunk says so
+        let json = result.json
+        XCTAssertEqual(json["text"] as? String, "hello")
+        XCTAssertEqual(json["audio_started_at"] as? Double, result.audioStartedAt)
+        let wire = try XCTUnwrap((json["words"] as? [[String: Any]])?.first)
+        XCTAssertEqual(wire["word"] as? String, "hello")
+        XCTAssertEqual(wire["start_ms"] as? Int, 120)
+        XCTAssertEqual(wire["end_ms"] as? Int, 400)
+    }
+
+    func testAProviderWithoutTimingsAddsNothingToTheBody() async throws {
+        let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: FakeSession(result: .success("hi"))) })
+        let id = try await manager.create(sampleRate: 16_000)
+        try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 1))
+        let json = try await manager.finish(id: id).json
+        XCTAssertEqual(json as? [String: String], ["text": "hi"])
+    }
+
     func testStreamsAudioAndReturnsTheCommittedText() async throws {
         let session = FakeSession(result: .success("hello world"))
         let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: session) })
@@ -68,7 +97,7 @@ final class RemoteTranscriptionTests: XCTestCase {
         let second = sine(rate: 16_000, seconds: 1)
         try await manager.append(id: id, pcm: second.prefix(4_000))
         try await manager.append(id: id, pcm: second.dropFirst(4_000))
-        let text = try await manager.finish(id: id)
+        let text = try await manager.finish(id: id).text
         XCTAssertEqual(text, "hello world")
         // Every byte of the second reaches the session, between sends and the commit.
         let (sent, committed) = await session.byteCounts
@@ -91,7 +120,7 @@ final class RemoteTranscriptionTests: XCTestCase {
         let session = FakeSession(result: .success("should not be used"))
         let manager = RemoteTranscriptionManager(provider: { FakeProvider(session: session) })
         let id = try await manager.create()
-        let text = try await manager.finish(id: id)
+        let text = try await manager.finish(id: id).text
         XCTAssertEqual(text, "")
         await session.waitUntilCancelled()
         let committed = await session.byteCounts.committed
@@ -106,7 +135,7 @@ final class RemoteTranscriptionTests: XCTestCase {
         })
         let id = try await manager.create(sampleRate: 16_000)
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.5))
-        let text = try await manager.finish(id: id)
+        let text = try await manager.finish(id: id).text
         XCTAssertEqual(text, "from fallback")
         let wav = try WAVFile.parse(await clips.first!)
         XCTAssertEqual(wav.sampleRate, 16_000)
@@ -120,7 +149,7 @@ final class RemoteTranscriptionTests: XCTestCase {
         })
         let id = try await manager.create()
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.3))
-        let text = try await manager.finish(id: id)
+        let text = try await manager.finish(id: id).text
         XCTAssertEqual(text, "rescued")
     }
 

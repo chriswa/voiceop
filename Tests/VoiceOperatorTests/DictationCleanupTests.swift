@@ -110,6 +110,15 @@ final class CleanedUpProviderTests: XCTestCase {
         XCTAssertEqual(viaSession, expected)
     }
 
+    func testACleanedTranscriptHasNoWordsAFailedCleanUpKeepsThem() async throws {
+        let word = TranscribedWord(word: "um", startMs: 0, endMs: 200)
+        let cleaned = await CleanedUpProvider(base: Fixed(text: "um hi")) { _ in "Hi." }
+            .cleanUp(Transcript(text: "um hi", words: [word]), trace: nil)
+        XCTAssertNil(cleaned.words)
+        let raw = await unreachable("um hi").cleanUp(Transcript(text: "um hi", words: [word]), trace: nil)
+        XCTAssertEqual(raw.words, [word])
+    }
+
     func testAFailedCleanUpPastesTheRawTranscript() async throws {
         let provider = unreachable("um send it Wednesday")
         let viaClip = try await provider.transcribe(wavData: Data())

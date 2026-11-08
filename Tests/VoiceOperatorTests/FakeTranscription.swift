@@ -35,13 +35,14 @@ struct FakeProvider: TranscriptionProvider {
 /// Records every byte it is sent, in order, and answers the commit with `result`.
 actor FakeSession: TranscriptionSession {
     private let result: Result<String, Error>
+    private let words: [TranscribedWord]?
     private(set) var received = Data()
     private var sent = 0
     private var committed = 0
     private(set) var cancelled = false
     private var cancelWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(result: Result<String, Error>) { self.result = result }
+    init(result: Result<String, Error>, words: [TranscribedWord]? = nil) { self.result = result; self.words = words }
 
     var byteCounts: (sent: Int, committed: Int) { (sent, committed) }
 
@@ -52,7 +53,7 @@ actor FakeSession: TranscriptionSession {
     func commit(pcm: Data) throws -> Transcript {
         committed = pcm.count
         received.append(pcm)
-        return Transcript(text: try result.get())
+        return Transcript(text: try result.get(), words: words)
     }
     func cancel() {
         cancelled = true

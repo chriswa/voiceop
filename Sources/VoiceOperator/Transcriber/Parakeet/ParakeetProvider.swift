@@ -33,7 +33,7 @@ struct ParakeetProvider: TranscriptionProvider {
     }
 
     func transcribe(wavData: Data) async throws -> Transcript {
-        Transcript(text: try await ParakeetEngine.shared.transcribe(pcm: WAVFile.parse(wavData).samples))
+        try await ParakeetEngine.shared.transcribe(pcm: WAVFile.parse(wavData).samples)
     }
 
     func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript {
@@ -53,10 +53,10 @@ actor ParakeetSession: TranscriptionSession {
     func commit(pcm: Data) async throws -> Transcript {
         self.pcm.append(pcm)
         trace?.mark("commit")
-        let text = try await ParakeetEngine.shared.transcribe(pcm: self.pcm)
+        let transcript = try await ParakeetEngine.shared.transcribe(pcm: self.pcm)
         trace?.mark("result")
         trace?.note(String(format: "%.1fs audio on device", Double(self.pcm.count / 2) / 16_000))
-        return Transcript(text: text)
+        return transcript
     }
 
     func cancel() { pcm = Data() }
@@ -134,15 +134,32 @@ actor ParakeetEngine {
         }
     }
 
-    /// Transcribe 16 kHz mono PCM16. Waits up to `loadWait` for a load in
-    /// progress, then gives up with `stillLoading`.
-    func transcribe(pcm: Data) async throws -> String {
+    /// Transcribe 16 kHz mono PCM16, with each word's time from its first
+    /// sample. Waits up to `loadWait` for a load in progress, then gives up with
+    /// `stillLoading`.
+    func transcribe(pcm: Data) async throws -> Transcript {
         let manager = try await readyManager()
         let samples = Self.floatSamples(pcm)
-        guard !samples.isEmpty else { return "" }
+        guard !samples.isEmpty else { return Transcript(text: "") }
         var state = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
         let result = try await manager.transcribe(samples, decoderState: &state)
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Transcript(text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                          words: Self.words(from: result.tokenTimings))
+    }
+
+    /// FluidAudio's token timings as words; nil if it gave none. A word's span
+    /// leaves out its punctuation tokens (a sentence's full stop is timed in the
+    /// silence after it, up to a second past the last syllable).
+    static func words(from timings: [TokenTiming]?) -> [TranscribedWord]? {
+        let timings = timings ?? []
+        let words = buildWordTimings(from: timings)
+        guard !words.isEmpty else { return nil }
+        let spoken = buildWordTimings(from: timings.filter { $0.token.contains(where: { $0.isLetter || $0.isNumber }) })
+        let spans = spoken.count == words.count ? spoken : words
+        return zip(words, spans).map { word, span in
+            TranscribedWord(word: word.word, startMs: Int((span.startTime * 1000).rounded()),
+                            endMs: Int((span.endTime * 1000).rounded()))
+        }
     }
 
     private func readyManager() async throws -> AsrManager {

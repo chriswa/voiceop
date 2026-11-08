@@ -26,6 +26,28 @@ final class RemoteTranscriptionActivity: @unchecked Sendable {
     }
 }
 
+/// What `RemoteTranscriptionManager.finish` answers: the text, and when it has
+/// word timings, the wall-clock ms the first sample of the audio was made
+/// (`audioStartedAt`, the least late any chunk's arrival allows — see `append`).
+/// Each word's time is ms from that first sample, so a client anchors a word
+/// with `audioStartedAt + word.startMs`.
+struct RemoteTranscript: Sendable, Equatable {
+    var text: String
+    var words: [TranscribedWord]? = nil
+    var audioStartedAt: Double? = nil
+
+    /// The `/v1/transcriptions/{id}/finish` body. Additive: `words` and
+    /// `audio_started_at` are absent when the provider has no timings.
+    var json: [String: Any] {
+        var object: [String: Any] = ["text": text]
+        if let words, let audioStartedAt {
+            object["words"] = words.map { ["word": $0.word, "start_ms": $0.startMs, "end_ms": $0.endMs] as [String: Any] }
+            object["audio_started_at"] = audioStartedAt
+        }
+        return object
+    }
+}
+
 /// Dictation for clients that cannot run it themselves — the Spaceterm phone
 /// client, relayed by the Spaceterm server over the loopback HTTP API.
 ///
@@ -91,12 +113,13 @@ actor RemoteTranscriptionManager {
         guard !converted.isEmpty else { return }
         if session.pcm.isEmpty { session.trace.mark("first-audio") }
         session.pcm.append(converted)
+        session.heard(atWallMs: now.timeIntervalSince1970 * 1000)
         session.leg.append(converted)
     }
 
     /// Commit the session and wait for its transcript. Falls back to transcribing
     /// the whole clip without streaming if the live session never opened or failed.
-    func finish(id: String, now: Date = Date()) async throws -> String {
+    func finish(id: String, now: Date = Date()) async throws -> RemoteTranscript {
         let session = try openSession(id)
         session.phase = .finishing
         session.lastActivity = now
@@ -118,7 +141,7 @@ actor RemoteTranscriptionManager {
         guard !session.pcm.isEmpty else {
             session.trace.note("no audio")
             session.leg.cancel()
-            return ""
+            return RemoteTranscript(text: "")
         }
 
         let clip = WAVFile(sampleRate: PCM16Resampler.outputRate, samples: session.pcm).data
@@ -127,7 +150,8 @@ actor RemoteTranscriptionManager {
                                                        clip: { clip })
             guard session.phase == .finishing else { throw Failure.alreadyFinished }   // cancelled meanwhile
             session.trace.note("\(outcome.text.count) chars")
-            return outcome.text
+            let words = outcome.transcript.words
+            return RemoteTranscript(text: outcome.text, words: words, audioStartedAt: words == nil ? nil : session.firstSampleAt)
         } catch {
             guard session.phase == .finishing, !(error is CancellationError) else { throw Failure.alreadyFinished }
             let message = TranscriberError.userMessage(for: error)
@@ -210,12 +234,23 @@ actor RemoteTranscriptionManager {
         var lastActivity: Date
         /// Every 16 kHz sample received — the fallback transcribes this.
         var pcm = Data()
+        /// Wall-clock ms the first sample was made, as well as this session can
+        /// tell: `heard` lowers it.
+        var firstSampleAt = Double.infinity
 
         init(id: String, resampler: PCM16Resampler, leg: TranscriptionLeg, now: Date) {
             self.id = id
             self.resampler = resampler
             self.leg = leg
             self.lastActivity = now
+        }
+
+        /// Audio just arrived, up to the end of `pcm`. Its first sample was made at
+        /// the latest this long before now: audio that arrives late or in bursts
+        /// only ever says "no later than", so the lowest of these is the truth, or
+        /// as near as a chunk's arrival can say.
+        func heard(atWallMs now: Double) {
+            firstSampleAt = min(firstSampleAt, now - Double(pcm.count / 2) * 1000 / Double(PCM16Resampler.outputRate))
         }
     }
 }

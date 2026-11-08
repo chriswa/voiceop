@@ -38,6 +38,8 @@ private final class Harness {
     /// What Apple's model "hears" in each check, numbered from 0.
     var heard: (Int) -> String = { _ in "Control, what is Kevin doing?" }
     var transcript = "Control, what is Kevin doing?"
+    /// The word timings each dictation's transcript comes with.
+    var words: [TranscribedWord]?
     /// Hold checks until `answerChecks`: the Mac taking its time.
     var slowChecks = false
     /// Transcriptions that never answer: a stuck provider.
@@ -66,16 +68,18 @@ private final class Harness {
         var appended = 0
         let text: () -> String
         let run: (@escaping () -> Void) -> Void
+        /// The word timings the transcript comes with.
+        var words: [TranscribedWord]?
         init(backlog: Int, text: @escaping () -> String, run: @escaping (@escaping () -> Void) -> Void) {
             backlogSeconds = Double(backlog) / Double(Sound.rate)
             self.text = text
             self.run = run
         }
         func append(_ pcm: [Int16]) { appended += pcm.count }
-        func finish(_ done: @escaping (Result<String, Error>) -> Void) {
+        func finish(_ done: @escaping (Result<Transcript, Error>) -> Void) {
             finished = true
             let text = text()
-            run { done(.success(text)) }
+            run { [words] in done(.success(Transcript(text: text, words: words))) }
         }
         func cancel() { cancelled = true }
     }
@@ -100,6 +104,7 @@ private final class Harness {
             beginDictation: { [unowned self] _, backlog in
                 let d = FakeDictation(backlog: backlog.count, text: { [unowned self] in transcript },
                                       run: { [unowned self] in if !stuckTranscriptions { queued.append($0) } })
+                d.words = words
                 dictations.append(d)
                 return d
             },
@@ -152,6 +157,16 @@ private final class Harness {
         if !queued.isEmpty { settle() }
     }
 
+    /// Audio delivered all at once: the clock does not move while it arrives (a stalled stream catching up).
+    func hearBurst(_ part: [Int16]) {
+        var i = 0
+        while i < part.count {
+            engine.push(Array(part[i..<min(i + 1600, part.count)]))
+            settle()
+            i += 1600
+        }
+    }
+
     /// Let `ms` pass with no audio.
     func elapse(_ ms: Double) {
         clock += ms
@@ -184,9 +199,12 @@ private final class Harness {
     }
     var transcripts: [(text: String, interrupted: Bool, shutdown: Bool)] {
         events.compactMap {
-            if case .transcript(let text, _, let interrupted, _, let shutdown) = $0.event { return (text, interrupted, shutdown) }
+            if case .transcript(let text, _, let interrupted, _, let shutdown, _) = $0.event { return (text, interrupted, shutdown) }
             return nil
         }
+    }
+    var timings: [HandsFreeEngine.TranscriptTiming?] {
+        events.compactMap { if case .transcript(_, _, _, _, _, let timing) = $0.event { return timing }; return nil }
     }
     var cutIns: [Int] { events.compactMap { if case .cutIn(let ms) = $0.event { return ms }; return nil } }
     var ducks: [Bool] { events.compactMap { if case .duck(let on) = $0.event { return on }; return nil } }
@@ -549,6 +567,66 @@ final class HandsFreeEngineTests: XCTestCase {
     }
 
     /// The trigger word said, and the client engaging attention for what comes next, as Spaceterm does.
+    // MARK: - Word timings
+
+    private let someWords = [TranscribedWord(word: "Control,", startMs: 0, endMs: 300),
+                             TranscribedWord(word: "go", startMs: 400, endMs: 700)]
+
+    func testATranscriptCarriesItsWordsDatedFromTheBacklogsFirstSample() throws {
+        let h = harness { $0.words = someWords }
+        h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
+        let timing = try XCTUnwrap(h.timings.first ?? nil)
+        XCTAssertEqual(timing.words, someWords)
+        // Audio arrives in real time and the harness's clock (1,000,000) first ticks after the first 100 ms, so
+        // the speech, 1500 ms in, was at 1,001,400; the backlog starts just before it.
+        XCTAssertLessThanOrEqual(timing.startedAt, 1_001_400)
+        XCTAssertGreaterThan(timing.startedAt, 1_001_400 - 1000)
+    }
+
+    func testAudioThatStallsThenCatchesUpIsDatedByTheStreamNotItsArrival() throws {
+        // The same audio twice: once in real time, once with the speech held up 2 s and then delivered at once.
+        let steady = harness { $0.words = someWords }
+        steady.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500))
+        let stalled = harness { $0.words = someWords }
+        stalled.hear(Sound.quiet(1000))
+        stalled.elapse(2000)
+        stalled.hearBurst(Sound.speech(1500))
+        stalled.hear(Sound.quiet(3500))
+        let a = try XCTUnwrap(steady.timings.first ?? nil), b = try XCTUnwrap(stalled.timings.first ?? nil)
+        // It was 2000 ms late, minus the 1500 ms of audio the burst caught up, and later arrivals pinned that down.
+        XCTAssertEqual(b.startedAt - a.startedAt, 500, accuracy: 1)
+    }
+
+    func testADictationThatLostAudioHasNoWordTimings() {
+        let h = harness { $0.words = someWords }
+        h.hear(Sound.quiet(1000), Sound.speech(2000))
+        XCTAssertEqual(h.phase, .hearing)
+        h.engine.gap()
+        h.hear(Sound.speech(500), Sound.quiet(3500))
+        XCTAssertEqual(h.transcripts.count, 1)
+        XCTAssertNil(h.timings.first ?? nil)
+    }
+
+    func testNoWordTimingsWhenTheProviderHasNone() {
+        let h = harness()
+        h.hear(Sound.quiet(1000), Sound.speech(1500), Sound.quiet(3500))
+        XCTAssertEqual(h.timings.count, 1)
+        XCTAssertNil(h.timings.first ?? nil)
+    }
+
+    func testTheTranscriptOnTheWireCarriesItsWordsOnlyWhenTimed() {
+        let bare = HandsFreeService.wire(.transcript(text: "hi", trigger: nil, interrupted: false, reason: "mini", shutdown: false))
+        XCTAssertNil(bare["words"])
+        XCTAssertNil(bare["startedAt"])
+        let timing = HandsFreeEngine.TranscriptTiming(startedAt: 5_000, words: [TranscribedWord(word: "hi", startMs: 40, endMs: 120)])
+        let timed = HandsFreeService.wire(.transcript(text: "hi", trigger: nil, interrupted: false, reason: "mini", shutdown: false, timing: timing))
+        XCTAssertEqual(timed["startedAt"] as? Double, 5_000)
+        let word = (timed["words"] as? [[String: Any]])?.first
+        XCTAssertEqual(word?["word"] as? String, "hi")
+        XCTAssertEqual(word?["startMs"] as? Int, 40)
+        XCTAssertEqual(word?["endMs"] as? Int, 120)
+    }
+
     private func inConversation(_ h: Harness) {
         h.hear(Sound.quiet(1500), Sound.speech(1500), Sound.quiet(3500))
         XCTAssertEqual(h.transcripts.count, 1)

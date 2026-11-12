@@ -334,6 +334,13 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   comparison. The shadow never pastes, never delays anything, and never touches
   `StreamHealth`, which follows the primary only. Remote dictation uses the primary, without
   a shadow (it has no history entry to file one on).
+- **Dictation corpus (2026-10-31).** `DictationCorpus` appends one line to
+  `dictation-corpus/entries.jsonl` for every recognition from local dictation, command mode,
+  history retries, phone and hands-free dictation: source, provider, model, whether the
+  fallback ran, the recognized text before shaping and clean-up, the cleaned text, length,
+  input device, app version and the clip's path. Phone and hands-free clips live in
+  `dictation-corpus/clips/`, since nothing else keeps them. It exists to score recognition
+  and to train on this user's voice, so it is never pruned.
 - **Dictation clean-up (2026-10-20).** "Clean Up Transcripts", a top-level menu checkbox
   (`TranscriptionPreferences.cleanup`) wraps the primary in `CleanedUpProvider`
   (`Cleanup/`), so dictation, history retries and phone dictation all paste cleaned text and
@@ -1319,6 +1326,7 @@ error. `IncognitoTests` asks each gate directly.
 |---|---|
 | Wispr Flow (gRPC stream, `/llm/asr`, token refresh, dictionary sync) | `FlowChannel.sharedChannel`, `WisprTranscriber`, `WisprToken.refresh`, `WisprDictionary.fetchEntries`; `WisprFlowProvider` fails first so the error names Wispr. As primary that is a loud `StreamHealth` ("Dictation is off … choose Parakeet"); a Wispr shadow is skipped (a shadow's only product is a history entry). Turning incognito on also closes the keepalive'd channel. |
 | Clipboard summaries (Claude via `claude-print-daemon`) | `ClaudeSummarizer.askHaiku`, before the prompt file is written |
+| Dictation corpus | `DictationCorpus.record` |
 | Dictation history and clips | `AudioArbiter.record`/`persist`, `HistoryStore.save`. Nothing is filed, not even in memory, and re-paste forgets the last transcript. The recorder no longer writes a temp WAV at all (in either mode): the clip stays in memory and is only written when history keeps it. |
 | TTS audio cache | `AudioCache.store`. `TTSEngine` keeps lookahead clips in memory instead, each dropped once played and all of them (and the word timings) on `stop()` |
 | Words in the log | `Log.clip` logs only the length |

@@ -14,6 +14,19 @@ import Foundation
 /// renamed to anything, and every other Bluetooth headset has exactly the same
 /// problem, so matching on "AirPods" would be both leaky and needlessly narrow.
 enum OutputDevice {
+    /// The default **input** device's name, filed with each dictation in the
+    /// corpus, since a model trained on one microphone may not suit another.
+    static var defaultInputName: String? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var id = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id) == noErr,
+              id != kAudioObjectUnknown else { return nil }
+        return name(id)
+    }
+
     /// Whether the default output device is a Bluetooth headset (AirPods & co).
     /// False when there is no output device at all, which is the safe answer:
     /// nothing to hold the microphone open for.
@@ -134,7 +147,7 @@ enum OutputDevice {
         return value
     }
 
-    private static func name(_ device: AudioObjectID) -> String? {
+    static func name(_ device: AudioObjectID) -> String? {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioObjectPropertyName,
             mScope: kAudioObjectPropertyScopeGlobal,

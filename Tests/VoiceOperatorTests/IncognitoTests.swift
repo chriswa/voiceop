@@ -99,6 +99,22 @@ final class IncognitoTests: XCTestCase {
         XCTAssertEqual(HistoryStore(fileURL: file).load().stt.first?.transcript, "secret words")
     }
 
+    func testDictationCorpusIsNotWritten() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("vo-corpus-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let corpus = DictationCorpus(directory: directory)
+        let recognition = DictationCorpus.Recognition(source: .phone, provider: ParakeetProvider(),
+                                                      transcript: Transcript(text: "secret words"), fellBack: false,
+                                                      seconds: 1, mic: nil)
+        corpus.record(recognition, keeping: Data(count: 44))
+        corpus.record(recognition, clipAt: URL(fileURLWithPath: "/a.wav"))
+        XCTAssertTrue(corpus.entries().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        Incognito.isOn = false
+        corpus.record(recognition, clipAt: URL(fileURLWithPath: "/a.wav"))
+        XCTAssertEqual(corpus.entries().first?.recognition.recognized, "secret words")
+    }
+
     /// URLSession.shared's disk cache kept TTS text, timings and audio.
     func testKokoroRequestsLeaveNoHTTPCacheOnDisk() {
         XCTAssertEqual(KokoroSynthesizer.session.configuration.urlCache?.diskCapacity ?? 0, 0)

@@ -93,6 +93,10 @@ struct Transcript: Sendable, Equatable {
 protocol TranscriptionProvider: Sendable {
     var id: TranscriptionProviderID { get }
 
+    /// The model behind this provider, filed with what it recognizes so a corpus
+    /// can tell one model's output from another's.
+    var modelName: String { get }
+
     /// Open a live session. Called the instant the trigger key goes down,
     /// concurrently with microphone start-up, so it must not need any audio yet.
     func openSession(target: DictationTarget, trace: DictationTrace?) async throws -> any TranscriptionSession
@@ -122,6 +126,7 @@ protocol TranscriptionProvider: Sendable {
 
 extension TranscriptionProvider {
     var retriesAfterLiveFailure: Bool { true }
+    var modelName: String { id.rawValue }
 
     func transcribe(wavURL: URL) async throws -> Transcript {
         try await transcribe(wavData: Data(contentsOf: wavURL))

@@ -150,6 +150,7 @@ actor RemoteTranscriptionManager {
                                                        clip: { clip })
             guard session.phase == .finishing else { throw Failure.alreadyFinished }   // cancelled meanwhile
             session.trace.note("\(outcome.text.count) chars")
+            DictationCorpus.shared.record(.init(source: .phone, outcome: outcome, seconds: seconds, mic: nil), keeping: clip)
             let words = outcome.transcript.words
             return RemoteTranscript(text: outcome.text, words: words, audioStartedAt: words == nil ? nil : session.firstSampleAt)
         } catch {

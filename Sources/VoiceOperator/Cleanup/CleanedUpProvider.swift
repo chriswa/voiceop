@@ -21,6 +21,7 @@ struct CleanedUpProvider: TranscriptionProvider {
     }
 
     var id: TranscriptionProviderID { base.id }
+    var modelName: String { base.modelName }
     var fallbackLabel: String { base.fallbackLabel }
     var retriesAfterLiveFailure: Bool { base.retriesAfterLiveFailure }
 

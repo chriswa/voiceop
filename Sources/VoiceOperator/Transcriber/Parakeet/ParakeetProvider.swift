@@ -16,6 +16,7 @@ struct ParakeetProvider: TranscriptionProvider {
     /// The session only buffers audio; a failed commit is the model failing,
     /// and running it again on the same audio would fail the same way.
     let retriesAfterLiveFailure = false
+    var modelName: String { "parakeet-tdt-0.6b-\(ParakeetEngine.version)" }
 
     func prewarm() async -> String? {
         do {

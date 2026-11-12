@@ -972,6 +972,8 @@ final class HandsFreeTranscription: HandsFreeEngine.Dictation, @unchecked Sendab
                 leg.trace.note("\(outcome.text.count) chars")
                 leg.trace.flush()
                 record.write("dictation", ["client": client, "text": outcome.text, "seconds": seconds])
+                DictationCorpus.shared.record(.init(source: .handsFree, outcome: outcome, seconds: seconds,
+                                                    mic: OutputDevice.defaultInputName), keeping: clip)
                 queue.async { completion.value(.success(outcome.transcript)) }
             } catch {
                 leg.trace.note("failed: \(TranscriberError.userMessage(for: error))")

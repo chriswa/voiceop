@@ -13,6 +13,7 @@ import Foundation
 /// order is load-bearing and two tasks racing into the session could reorder them.
 final class TranscriptionLeg: @unchecked Sendable {
     struct Outcome: Sendable {
+        let provider: any TranscriptionProvider
         let transcript: Transcript
         var text: String { transcript.text }
         /// Why the live session is not what produced `text` — nil when it is. The
@@ -104,7 +105,7 @@ final class TranscriptionLeg: @unchecked Sendable {
             do {
                 let transcript = try await session.commit(pcm: ready.unsent + tail)
                 releaseCommitted()
-                return Outcome(transcript: transcript, liveFailure: nil)
+                return Outcome(provider: provider, transcript: transcript, liveFailure: nil)
             } catch {
                 if isAbandoned { throw CancellationError() }
                 guard provider.retriesAfterLiveFailure else {
@@ -122,7 +123,7 @@ final class TranscriptionLeg: @unchecked Sendable {
         cancel()
         trace.note("fell back to \(provider.fallbackLabel)")
         let transcript = try await provider.transcribeAfterLiveFailure(wavData: try clip())
-        return Outcome(transcript: transcript, liveFailure: liveFailure ?? "stream unavailable")
+        return Outcome(provider: provider, transcript: transcript, liveFailure: liveFailure ?? "stream unavailable")
     }
 
     /// Abandon the leg. Idempotent, and safe whether or not the session ever opened.

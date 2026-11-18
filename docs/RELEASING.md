@@ -13,7 +13,7 @@ Key constants:
 - **Team ID:** `7H2524M5TN`
 - **Notary keychain profile:** `claude-usage-notary` (shared with AI Spend Tracker —
   it's Apple credentials, not app-specific)
-- **GitHub repo:** `chris-spare/voiceop`
+- **GitHub repo:** `chriswa/voiceop`
 - App / bundle / zip names come from `Resources/Info.plist` and `scripts/make-release.sh`.
   The commands below use the current names; if it's renamed again, the script prints
   the exact output paths.
@@ -115,7 +115,7 @@ build output, so they keep working if the app is renamed. Run them from the repo
    VER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
    gh release create "v$VER" \
      "build/$EXE.zip#$NAME.app (Apple Silicon, notarized)" \
-     --repo chris-spare/voiceop \
+     --repo chriswa/voiceop \
      --target main \
      --title "$NAME v$VER" \
      --notes "What changed, plus install steps."
@@ -124,7 +124,7 @@ build output, so they keep working if the app is renamed. Run them from the repo
 5. **Confirm the asset uploaded:**
    ```bash
    VER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
-   gh release view "v$VER" --repo chris-spare/voiceop \
+   gh release view "v$VER" --repo chriswa/voiceop \
      --json assets --jq '.assets[] | {name, state}'
    ```
 

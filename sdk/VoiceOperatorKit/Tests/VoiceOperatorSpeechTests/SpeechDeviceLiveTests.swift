@@ -96,7 +96,6 @@ final class SpeechDeviceLiveTests: XCTestCase {
         let (device, socket, events) = try speaker()
         let text = "One small sentence. And a second one."
         let (status, job) = try http("POST", "/v1/speech", ["text": text, "client": "sdk-test", "device": "sdk-test-speaker"])
-        if status == 403 { throw XCTSkip("Voice Operator is in incognito mode") }
         XCTAssertEqual(status, 202, "\(job)")
         let id = try XCTUnwrap(job["id"] as? String)
         XCTAssertTrue(id.hasPrefix("ds_"))
@@ -121,7 +120,6 @@ final class SpeechDeviceLiveTests: XCTestCase {
         let (device, socket, events) = try speaker()
         let (status, job) = try http("POST", "/v1/speech", ["text": "First sentence here. Second sentence never heard.",
                                                            "client": "sdk-test", "device": "sdk-test-speaker"])
-        if status == 403 { throw XCTSkip("Voice Operator is in incognito mode") }
         let id = try XCTUnwrap(job["id"] as? String)
         while let line = socket.readLine() {
             device.receive(line: line)
@@ -143,7 +141,6 @@ final class SpeechDeviceLiveTests: XCTestCase {
 
     func testAnUnknownDeviceIs404() throws {
         let (status, body) = try http("POST", "/v1/speech", ["text": "Nobody hears this.", "client": "sdk-test", "device": "no-such-device"])
-        if status == 403 { throw XCTSkip("Voice Operator is in incognito mode") }
         XCTAssertEqual(status, 404)
         XCTAssertEqual(body["error"] as? String, "unknown_device")
     }

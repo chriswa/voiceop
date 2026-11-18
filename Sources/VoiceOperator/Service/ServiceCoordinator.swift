@@ -8,7 +8,7 @@ import Foundation
 /// transcription), the hands-free socket (streams and speaker devices), on-device
 /// Parakeet, and a Kokoro server of its own as a child process. What does not:
 /// the menu bar, hotkeys, the Mac's microphone and speakers (no cues, no
-/// playback, no permission prompts), Wispr, clean-up, voice mode, subscribers,
+/// playback, no permission prompts), clean-up, voice mode, subscribers,
 /// launch at login and the restart machinery. SIGTERM or SIGINT stops it cleanly.
 @MainActor
 final class ServiceCoordinator {
@@ -29,7 +29,7 @@ final class ServiceCoordinator {
         speechService.snapshot = { [unowned self] in
             .init(status: .idle, dictating: false, speaking: DeviceSpeech.shared.isSpeaking, restart: .none,
                   stream: .streaming, remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active,
-                  provider: .parakeet, shadow: nil, incognito: false, kokoro: kokoroState())
+                  kokoro: kokoroState())
         }
         // Kokoro's progress, in the log (the menu shows it in the app).
         var lastPhase: KokoroService.Phase?

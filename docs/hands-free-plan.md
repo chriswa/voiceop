@@ -15,8 +15,7 @@ What was built, where it differs from the plan:
 - Spaceterm: the server registers `control` and relays phone streams
   (`voice-operator-hands-free.ts`); the page follows VO's messages
   (`src/mobile/hands-free.ts`); the listener, Silero, Smart Turn, the voice
-  record, the tuning file and onnxruntime are gone. Audio is still PCM (opus is
-  a follow-up), and the phone's button dictation still goes through the page's
+  record, the tuning file and onnxruntime are gone. Audio is PCM, and the phone's button dictation still goes through the page's
   own path (`/v1/transcriptions`), on audio the SDK engine hands the page.
 - Phase 5 (VO speech to a device), 2026-10-25: VO keeps the job
   (`DeviceSpeech`, DESIGN.md "Speech on a device") and Spaceterm's
@@ -102,7 +101,7 @@ VO:
   newline JSON to a client's socket. One-way.
 - `AudioRecorder` with an always-on mode; `AudioArbiter` owns dictation;
   `TranscriptionProvider`/`TranscriptionLeg`; `haltSpeech(heardUntil:)`;
-  FluidAudio (Silero VAD streaming available); vendored libopus.
+  FluidAudio (Silero VAD streaming available).
 
 ## The split
 
@@ -113,7 +112,7 @@ VO:
 | Endpointing: silence patience + Smart Turn | Streaming with sequence numbers, ack, resume buffer | Play cues / haptics for VO's signals |
 | Transcription via the user's provider, fed from the start of speech | Transport-agnostic: the app supplies send/receive bytes | Strip the trigger word; run Control on transcripts |
 | Stand-aside rules (a Fn dictation wins) | | Drop its speech job on a cut-in signal (`DELETE …?heard_until=`) |
-| Decision record, incognito gating | | Relay the SDK's bytes to VO opaquely (phone case) |
+| Decision record | | Relay the SDK's bytes to VO opaquely (phone case) |
 
 ## Protocol (outline — to be specified in DESIGN.md before code)
 
@@ -143,8 +142,7 @@ sequence clock.
 
 **Phone transport.** VO stays loopback-only. Spaceterm's server opens one VO
 connection per phone session and pipes the SDK's frames through its existing
-phone WebSocket without parsing them. Audio starts as 16 kHz s16le (≈115 MB/h);
-opus (≈7 MB/h; VO already vendors libopus) is a later step.
+phone WebSocket without parsing them. Audio is 16 kHz s16le (≈115 MB/h).
 
 **Dropouts.** The SDK keeps the last 60 s of audio, numbered; VO acks; on
 reconnect the SDK resumes from the last ack and VO processes the backlog late.
@@ -169,7 +167,7 @@ Each phase leaves both apps working.
    to Swift on that consumer, Silero on ONNX Runtime. Wake check is `WakeWordCheck` with
    all registered words. Transcription through `TranscriptionProvider`, fed the
    backlog from speech start then live. Fn dictation preempts. Decision record
-   (`hands-free/decisions.jsonl` + clips, newest 400) behind `Incognito`.
+   (`hands-free/decisions.jsonl` + clips, newest 400).
    Spaceterm's Mac button switches to VO; `desktop-hands-free.ts` removed.
    **Regression check:** replay Spaceterm's 400 kept clips through the wake
    check and compare with `voice-decisions.jsonl`.
@@ -229,18 +227,13 @@ Each phase leaves both apps working.
   words, the filler list, `wakeFreeShutdown` (start-of-phrase → watch the whole
   utterance), "lemme". One `SpeechTranscriber` analyzer is kept warm while a
   session is on.
-- **Incognito ends hands-free.** Turning it on ends every session
-  (`session-ended {why: incognito}`); `hands-free on` is refused while it is on.
-  (Today the checks are already refused, so the microphone listens for nothing.)
 - **Phone timing.** VO converts stream time to Mac wall time (arrival minus the
   unprocessed backlog) for `heard_until`, capped as today (10 s). A gap over
   ~2 s resets the listener (`listener.resume()` semantics): late audio is
   transcribed if a dictation was already under way, but never starts a new one
   or cuts Control off retroactively.
-- **Audio is opus from the start of phase 4**, in binary frames — raw base64
-  PCM would be ~340 kbit/s through Spaceterm's server event loop.
-- **The SDK is a separate Swift package** (VO's `Package.swift` links libopus
-  with `unsafeFlags`, which SwiftPM refuses in a remote dependency). A small
+- **The SDK is a separate Swift package**, so an iOS app does not pull VO's
+  macOS-only dependencies. A small
   platform-agnostic protocol target is shared, VO depending on it by path.
 - **Mac on speakers:** while VO's own speech plays on a non-headphone output,
   hands-free stands aside (plus the playback tail); voice cut-in works on
@@ -281,10 +274,8 @@ Each phase leaves both apps working.
   speech plays on non-headphone outputs? (VO's `NarrationDucker` already runs a
   Voice Processing I/O graph during speech — and DESIGN.md notes that a plain
   input stream alongside it distorts all output on the EPOS dongle.)
-- **Packaging the SDK.** VO's `Package.swift` is macOS-only and pulls grpc,
-  FluidAudio and libopus. A separate iOS product in the same package, or a
+- **Packaging the SDK.** VO's `Package.swift` is macOS-only and pulls
+  FluidAudio. A separate iOS product in the same package, or a
   second package? The wire-protocol types should be shared by both sides.
 - **Two Spaceterm instances** (SpacetermBar can start a second client) both
   registering `control`: refuse the second, or last wins?
-- **Incognito.** Does turning it on end hands-free sessions, or only stop the
-  record and the provider's network calls as today?

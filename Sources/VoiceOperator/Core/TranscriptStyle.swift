@@ -7,7 +7,7 @@ import Foundation
 ///
 /// ## Why
 ///
-/// Wispr Flow returns a finished *sentence*: first word capitalised, a full stop
+/// Recognition returns a finished *sentence*: first word capitalised, a full stop
 /// at the end. That is right when the transcript stands alone and wrong when it is
 /// being injected into the middle of something already written, where the same
 /// text wants to read as a fragment. Fixing that by hand after every paste is the

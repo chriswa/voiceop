@@ -1,23 +1,22 @@
 import Foundation
 
 /// One provider's share of one dictation: its live session, opened the moment the
-/// dictation starts, the audio that arrives before that session is ready, and the
-/// decision at the end between the session's answer and the provider's fallback.
+/// dictation starts, the audio that arrives before that session is ready, and,
+/// when the session never opened, the recorded clip transcribed whole instead.
 ///
-/// `AudioArbiter` (local dictation) and `RemoteTranscriptionManager` (the phone)
-/// both drive dictation through this, and a dictation with a shadow provider is
-/// simply two legs fed the same audio.
+/// `AudioArbiter` (local dictation), `HandsFreeService` and
+/// `RemoteTranscriptionManager` (the phone) all drive dictation through this.
 ///
 /// Audio is taken synchronously (`append`) from whichever thread captured it and
-/// sent in order: sends are chained rather than fired concurrently, because packet
-/// order is load-bearing and two tasks racing into the session could reorder them.
+/// sent in order: sends are chained rather than fired concurrently, because
+/// audio order is load-bearing and two tasks racing into the session could
+/// reorder them.
 final class TranscriptionLeg: @unchecked Sendable {
     struct Outcome: Sendable {
         let provider: any TranscriptionProvider
         let transcript: Transcript
         var text: String { transcript.text }
-        /// Why the live session is not what produced `text` — nil when it is. The
-        /// arbiter turns this into `StreamHealth`.
+        /// Why the live session is not what produced `text` — nil when it is.
         let liveFailure: String?
     }
 
@@ -32,8 +31,8 @@ final class TranscriptionLeg: @unchecked Sendable {
     private var pending = Data()
     private var sendChain: Task<Void, Never>?
     private var opening: Task<Void, Never>?
-    /// Set when the live session is unusable, so we stop feeding it and fall back
-    /// once the user finishes.
+    /// Set when the live session is unusable, so we stop feeding it and
+    /// transcribe the clip once the user finishes.
     private var failure: String?
     /// Set once this leg is definitively over and its session should be thrown
     /// away. Also stops a late-arriving open from installing a session nobody
@@ -62,14 +61,14 @@ final class TranscriptionLeg: @unchecked Sendable {
                 // abandoned) — that path already said so, and `CancellationError`
                 // renders as noise. Don't report it twice under a different name.
                 guard !Task.isCancelled, let self else { return }
-                self.openFailed(TranscriberError.userMessage(for: error))
+                self.openFailed(TranscriptionFailure.message(for: error))
             }
         }
         lock.withLock { opening = task }
     }
 
-    /// True once the live session is known to be unusable — the dictation will go
-    /// the long way round.
+    /// True once the live session is known to be unusable — the dictation will be
+    /// transcribed from the recorded clip.
     var isBroken: Bool { lock.withLock { failure != nil } }
 
     /// Newly captured audio, in capture order.
@@ -82,24 +81,23 @@ final class TranscriptionLeg: @unchecked Sendable {
         }
     }
 
-    /// The audio has ended. Waits up to `openGrace` for a session still opening,
-    /// commits `tail`, and if the live session is unusable or fails, transcribes
-    /// `clip` (the whole recording as WAV) through the provider's fallback.
+    /// The audio has ended. Waits up to `openGrace` for a session still opening
+    /// and commits `tail`. If the session never opened, transcribes `clip` (the
+    /// whole recording as WAV) instead. A failed commit throws: running the model
+    /// again on the same audio would fail the same way.
     ///
-    /// Throws `CancellationError` if the leg was cancelled while committing,
-    /// rather than spending a fallback on a dictation nobody wants.
+    /// Throws `CancellationError` if the leg was cancelled while committing.
     func finish(tail: Data, openGrace: Duration, clip: @escaping @Sendable () throws -> Data) async throws -> Outcome {
         // The lock is only ever taken in the synchronous helpers below, never in
         // a closure inside this async function: swiftc 6.3 hangs in its
         // closure-lifetime pass on `withLock` closures spread across the awaits.
         if let opening = openingStillPending(), await !Self.wait(for: opening, grace: openGrace) {
-            Log.log("\(logPrefix): stream still opening \(openGrace) after key-up — using the recorded clip")
-            trace.note("stream open timed out")
-            markFailed("stream did not open in time")
+            Log.log("\(logPrefix): session still opening \(openGrace) after key-up — using the recorded clip")
+            trace.note("session open timed out")
+            markFailed("session did not open in time")
         }
 
         let ready = takeForCommit()
-        var liveFailure = ready.failure
         if let session = ready.session, ready.failure == nil {
             _ = await ready.chain?.value   // preserve ordering ahead of the commit
             do {
@@ -107,23 +105,17 @@ final class TranscriptionLeg: @unchecked Sendable {
                 releaseCommitted()
                 return Outcome(provider: provider, transcript: transcript, liveFailure: nil)
             } catch {
+                releaseCommitted()
                 if isAbandoned { throw CancellationError() }
-                guard provider.retriesAfterLiveFailure else {
-                    releaseCommitted()
-                    throw error
-                }
-                let reason = TranscriberError.userMessage(for: error)
-                Log.log("\(logPrefix): live stream failed after commit (\(reason)) — re-transcribing the recorded clip")
-                trace.note("live failed: \(reason)")
-                liveFailure = reason
+                throw error
             }
         }
-        // Whatever went wrong, this session is done: release it rather than
+        // The session never opened: release whatever is left of it rather than
         // leaving it and its tasks alive.
         cancel()
-        trace.note("fell back to \(provider.fallbackLabel)")
-        let transcript = try await provider.transcribeAfterLiveFailure(wavData: try clip())
-        return Outcome(provider: provider, transcript: transcript, liveFailure: liveFailure ?? "stream unavailable")
+        trace.note("transcribed the recorded clip")
+        let transcript = try await provider.transcribe(wavData: try clip())
+        return Outcome(provider: provider, transcript: transcript, liveFailure: ready.failure ?? "session unavailable")
     }
 
     /// Abandon the leg. Idempotent, and safe whether or not the session ever opened.
@@ -192,8 +184,8 @@ final class TranscriptionLeg: @unchecked Sendable {
             return true
         }
         guard report else { return }
-        Log.log("\(logPrefix): live stream unavailable (\(reason)) — will transcribe the clip afterwards")
-        trace.note("stream open failed: \(reason)")
+        Log.log("\(logPrefix): live session unavailable (\(reason)) — will transcribe the clip afterwards")
+        trace.note("session open failed: \(reason)")
         onOpenFailed(reason)
     }
 
@@ -209,8 +201,8 @@ final class TranscriptionLeg: @unchecked Sendable {
     /// Whether `task` finished inside `grace`. Cancels it if not.
     ///
     /// A race on a continuation rather than a task group: a group drains its
-    /// children before returning, so an open that ignores cancellation (a stalled
-    /// token fetch) would hold the "grace period" open for as long as it liked.
+    /// children before returning, so an open that ignores cancellation would
+    /// hold the "grace period" open for as long as it liked.
     /// Here the losing waiter is simply left behind.
     static func wait(for task: Task<Void, Never>, grace: Duration) async -> Bool {
         let finished = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in

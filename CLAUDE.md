@@ -2,87 +2,30 @@
 
 macOS menu-bar app (SwiftPM). Architecture and plans are in `DESIGN.md`.
 
-## The Wispr Flow app is the ground truth — READ IT, don't guess
+## Dictation transcription
 
-This app depends on Wispr Flow's **private, unversioned** HTTP API (STT) — no
-public docs exist. The **only** reliable source of truth for how those endpoints
-work is the Wispr Flow Electron app itself. Treat its bundle as the holy grail:
-before touching any Wispr request/response shape, field name, encoding, or
-endpoint, **read the real implementation** rather than probing the live API and
-guessing from error messages.
+Everything is on this Mac. Dictation goes through `TranscriptionProviders.primary`:
+**Parakeet** (FluidAudio, CoreML; raw — no fix-up, no custom words), wrapped in
+`CleanedUpProvider` when clean-up is on. The arbiter, hands-free and phone
+dictation know only `TranscriptionProvider` / `TranscriptionLeg`: a session opens
+on key-down and is fed audio while the user speaks, so only the tail remains at
+key-up. If the session never opened, the leg transcribes the recorded clip; a
+failed commit is reported, not retried. Every dictation logs one `trace …` line
+with the full phase timeline. Live-test with `--provider-test [text]`.
 
-```bash
-# Extract the bundle (192 MB; the main bundle holds the STT client):
-asar extract "/Applications/Wispr Flow.app/Contents/Resources/app.asar" /tmp/wispr-app
-# It's minified — grep for the symbol, then read a character window around it:
-grep -a -c "serializeFlowRequest" /tmp/wispr-app/.webpack/main/index.js
-```
-
-Key entry points in `.webpack/main/index.js`: `serializeFlowRequest` (the full
-`/llm/asr_audio_chunks` flow-request body), `transcribeOpenAIAudio` /
-`transcribeOpenAIAudioChunks` (the `/llm/asr*` calls), and the packet serializer
-(`packet_duration`, `byte_encoding: "ascii85"`, `audio_encoding: "opus"`).
-Black-box probing wastes real API calls, risks account rate-limits, and silently
-gets encodings wrong (the server accepts a base64 string where it wants ascii85
-and just decodes garbage). **Never experiment against these third-party APIs
-without first confirming the exact behavior in the app bundle.** When you decode
-something new, record it in `DESIGN.md` + `spike/` so it's never lost.
-
-## Dictation transcription paths
-
-Dictation goes through a **transcription provider**, picked from the menu bar's
-**Transcription** submenu (persisted in `TranscriptionPreferences`): **Parakeet**
-(always the default, even where Wispr is installed; on device, FluidAudio, raw —
-no fix-up, no custom words, never falls back to Wispr) or **Wispr Flow** (only
-when chosen in the menu). The same submenu can turn on a **shadow**
-provider: fed the same audio, never pastes, its result filed on the history entry
-for comparison, and it never touches `StreamHealth` (which follows the primary
-only). The arbiter and phone dictation know only `TranscriptionProvider` /
-`TranscriptionLeg`; each provider owns its encoding, credentials and fallback. See
-DESIGN.md, "Transcription providers (2026-10-11)". Live-test any provider's live
-path with `--provider-test <wispr-flow|parakeet> [text]`.
-
-**Clean Up Transcripts** (a top-level menu checkbox) runs the primary's text through Fluid-1 Mini on a
+**Clean Up Transcripts** (a top-level menu checkbox) runs Parakeet's text through Fluid-1 Mini on a
 local llama.cpp launchd agent (`CleanedUpProvider`, `CleanupServer`); a failure pastes the
 raw text. See DESIGN.md "Dictation clean-up". The prompt
 (`Resources/dictation-cleanup.md`) is clean-room: **never paste FluidVoice's own prompt
 text into this public repo.** Live-test with `--cleanup-test [text]`.
 
-`WisprFlowProvider` transcribes over Wispr's primary **gRPC** path
-(`flow_api.v1.TranscriptionService` on Baseten), which returns **formatted** text
-with the user's dictionary — see DESIGN.md Milestone C and `proto/flow_api_v1.proto`.
-
-**Use `TranscribeStream`, not `Transcribe`.** The unary RPC is Wispr's *fallback*;
-its primary is the duplex stream, opened on key-down and fed opus packets while
-the user is still speaking (`FlowSession`, fed by `WisprFlowSession` from
-`AudioArbiter.pumpAudio`), so
-only the tail remains at key-up. Do not "simplify" this back to a single unary
-call — that was the old design and it cost 5–10 s per dictation. The connection is
-process-wide and keepalive'd (`FlowChannel`); never build a channel per call.
-Every dictation logs one `trace …` line with the full phase timeline.
-
-Client is **grpc-swift 1.x**. The app targets the latest macOS release / Apple Silicon (arm64).
-It needs Wispr's Baseten `Api-Key`, read at
-runtime from `$VOICEOP_BASETEN_KEY` or
-`~/Library/Application Support/VoiceOperator/baseten-key` (**never commit it**).
-Without the key, it falls back to `WisprTranscriber` (raw `/llm/asr`). Regenerate
-the gRPC/protobuf Swift with `scripts/gen-proto.sh`. Live-test either path with
-`--flow-grpc-test` / `--asr-test`.
-
-**The fallback is loud by design** (`StreamHealth`): while dictation is on the
-slow path the menu carries a `⚠︎ Dictation is slow…` line naming the reason
-(`⚠︎ Parakeet is failing…` when Parakeet is the primary), the
-icon wears an amber dot even at idle, the key-up cue gains a low tail, the log
-gets a `stream health: WARNING degraded` line, `/v1/status` reports
+**Failures are loud** (`StreamHealth`): when Parakeet fails to load or a
+dictation fails, the menu carries a `⚠︎ Parakeet is failing…` line naming the
+reason, the icon wears an amber dot even at idle, the log gets a
+`stream health: WARNING degraded` line, `/v1/status` reports
 `"stream":"degraded"` + `stream_reason`, and `restart-app.sh` prints a WARNING
-after every restart. The key is checked at launch, so a fresh Mac shows all of
-this before the first dictation. If you see any of it, fix the cause (usually
-the key file above) rather than the symptom; "no Baseten key" is never normal.
-
-**Incognito mode.** Every network call and every write of user content (audio,
-transcripts, spoken text) must go through `Incognito.check`/`refusal` at the
-lowest level it owns, and get a case in `IncognitoTests`. See DESIGN.md
-"Incognito mode".
+after every restart. The model is loaded at launch, so a broken Mac shows this
+before the first dictation. Fix the cause rather than the symptom.
 
 **Kokoro server (`kokoro/`).** The default TTS backend is a Python service in
 `kokoro/`, installed and managed by Voice Operator (Text to Speech menu). Read

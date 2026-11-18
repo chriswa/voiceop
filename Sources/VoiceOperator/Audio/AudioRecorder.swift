@@ -1,11 +1,11 @@
 import Accelerate
 import AVFoundation
 
-/// Captures the default input device to 16 kHz mono s16le — the format Wispr's
-/// ASR expects. Audio is converted *live* in the tap (AVAudioConverter from the
+/// Captures the default input device to 16 kHz mono s16le — the format
+/// recognition expects. Audio is converted *live* in the tap (AVAudioConverter from the
 /// hardware format) and accumulated in memory, so callers can read partial audio
 /// mid-recording: that is what lets the arbiter upload packets while the user is
-/// still talking, the way Wispr Flow does. `stop()` hands back the accumulated
+/// still talking. `stop()` hands back the accumulated
 /// samples; the arbiter decides whether they are kept for history/retry.
 ///
 /// `onFirstAudio` fires the moment the first buffer with real frames arrives.
@@ -973,7 +973,7 @@ final class AudioRecorder: @unchecked Sendable {
     /// Stops recording and returns the finished clip as 16 kHz mono PCM16, so
     /// callers needing the samples do not have to race a subsequent `start()`
     /// for them. Nothing is written to disk: keeping the clip is the caller's
-    /// decision (and in incognito mode, never made).
+    /// decision.
     func stop() throws -> Data {
         guard isRecording else { throw RecorderError.notRecording }
         isRecording = false

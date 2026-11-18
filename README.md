@@ -113,43 +113,13 @@ Entry", say), which withholds key events from every event tap. Voice Operator
 detects this: the menu names the app holding it, and the log says
 `secure input: ON (held by …)`.
 
-## Transcription backends
+## Transcription
 
-Dictation goes through a **transcription provider**, chosen from the menu bar's
-**Transcription** submenu (the choice survives restarts):
-
-- **Wispr Flow** — described below. Used only when chosen in the menu; greyed
-  out on a Mac without a Wispr sign-in.
-- **Parakeet (on this Mac)** — the default, on every Mac. NVIDIA Parakeet TDT
-  v2 (English) via FluidAudio, entirely on device. Raw recognition with its own punctuation and casing: no clean-up
-  and no custom vocabulary. The model (a few hundred MB) downloads from Hugging
-  Face the first time it is chosen and loads at every launch. If it fails, the
-  dictation fails — it never falls back to Wispr.
-
-The same submenu can turn on a **shadow** provider: it gets the same audio,
-never pastes, and its transcript is filed beside the real one in **Recent
-Dictations** (each entry's submenu shows it and can copy it). **Copy Last Shadow
-Transcript** copies the most recent one.
-
-`WisprFlowProvider` uses Wispr's gRPC path, which returns
-**formatted** text honouring your Wispr dictionary. It needs Wispr's Baseten
-API key, read at runtime from `$VOICEOP_BASETEN_KEY` or
-`~/Library/Application Support/VoiceOperator/baseten-key`. **Never commit it.**
-
-Without the key the app silently falls back to `WisprTranscriber` (raw
-`/llm/asr`). That fallback is plain Whisper: still punctuated and capitalized,
-but with **no dictionary biasing and no formatting pass**, so proper nouns and
-jargon come back misspelled ("kubectl", "Coda" and friends).
-
-Since both paths return plausible-looking text, check the log to see which one
-actually ran:
-
-```bash
-grep "flow:" ~/Library/Logs/VoiceOperator.log | tail
-```
-
-`flow: gRPC ok — N chars` is the formatted path. `flow: no Baseten key` or
-`flow: gRPC failed (…)` means you're on the raw fallback.
+Dictation is transcribed on this Mac by NVIDIA Parakeet TDT v2 (English) via
+FluidAudio: raw recognition with its own punctuation and casing, no custom
+vocabulary. The model (a few hundred MB) downloads from Hugging Face the first
+time and loads at every launch. If it fails, the dictation fails, and the menu
+says why.
 
 ## Transcript clean-up
 
@@ -299,15 +269,6 @@ with Voice Operator, so update both together.
 
 **Trying a checkout instead:** `claude --plugin-dir ~/voiceop/claude-plugin/handsfree`.
 
-## Incognito mode
-
-**Incognito Mode** in the menu turns the menu-bar megaphone into sunglasses and
-keeps everything you say or hear on this Mac, and off its disk: no history, no
-saved clips, no TTS cache, no words in the log, no Wispr Flow, no clipboard
-summaries, nothing to or from Spaceterm. Dictation works through Parakeet and
-speech through the local Kokoro. It stays on across restarts. See DESIGN.md,
-"Incognito mode".
-
 ## For developers: the local API
 
 At launch Voice Operator writes
@@ -372,10 +333,6 @@ If `xcode-select -p` reports `/Library/Developer/CommandLineTools`:
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ```
 
-Optional: `protoc` (`brew install protobuf`) — only needed to regenerate the
-gRPC/protobuf Swift via `scripts/gen-proto.sh`. The generated sources are
-checked in, so a normal build doesn't need it.
-
 ### Troubleshooting
 
 - **`xcrun: error: unable to lookup item 'PlatformPath' … in SDK
@@ -425,15 +382,9 @@ Each makes at most one transcription or synthesis; none needs the microphone.
 
 ```bash
 B=.build/debug/VoiceOperator
-$B --provider-test parakeet "some text"   # a provider's live path, with say-made speech
+$B --provider-test "some text"            # Parakeet's live path, with say-made speech
 $B --cleanup-test "um so send it friday"  # Parakeet plus the on-device clean-up
 $B --hands-free-test "what is Kevin doing" # hands-free end to end, against the running app
-$B --flow-grpc-test "kubectl and Coda"    # Wispr Flow's formatted gRPC path
-$B --asr-test "your test phrase"          # Wispr's raw /llm/asr fallback
-$B --transcribe-file clip.wav             # a stored clip through Wispr
+$B --transcribe-file clip.wav             # a stored clip through Parakeet
 $B --tts-test                             # speech through the local Kokoro
 ```
-
-## spike/
-
-`spike/asr_spike.py` — the original Phase 0 proof (Python). One request per run.

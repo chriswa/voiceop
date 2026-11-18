@@ -6,19 +6,9 @@ if let problem = ServiceMode.configure(CommandLine.arguments) {
     exit(2)
 }
 
-// Dev self-test: `swift run VoiceOperator --asr-test [text]` synthesizes speech
-// locally with `say`, transcodes to the ASR WAV format, and runs exactly one
-// WisprTranscriber call. Mic-free and deterministic — validates the Swift STT
-// path without the menu-bar app or microphone permission.
-if CommandLine.arguments.contains("--asr-test") {
-    await DebugCLI.runASRTest(
-        text: CommandLine.arguments.last.flatMap { $0 == "--asr-test" ? nil : $0 }
-            ?? "The quick brown fox jumps over the lazy dog.")
-    exit(0)
-}
 // Transcribe an existing WAV (e.g. a stored dictation clip from
-// ~/Library/Application Support/VoiceOperator/stt-history) through the real
-// chunked WisprTranscriber path and print the transcript.
+// ~/Library/Application Support/VoiceOperator/stt-history) through Parakeet
+// and print the transcript.
 if let i = CommandLine.arguments.firstIndex(of: "--transcribe-file"),
    let path = CommandLine.arguments.dropFirst(i + 1).first {
     await DebugCLI.runTranscribeFile(path: path)
@@ -30,21 +20,10 @@ if let i = CommandLine.arguments.firstIndex(of: "--hands-free-test") {
     exit(await HandsFreeTestClient.run(text: CommandLine.arguments.dropFirst(i + 1).first
                                        ?? "what is Kevin working on?"))
 }
-// Fetch the user's Wispr custom dictionary and print the words that would be
-// sent as `dictionary_context`. One network request (personal + team).
-if CommandLine.arguments.contains("--dict-test") {
-    await DebugCLI.runDictTest()
-    exit(0)
-}
-// Dictate `say`-synthesized speech through a provider's live path, the way a
-// held key does: `--provider-test <wispr-flow|…> [text]`.
+// Dictate `say`-synthesized speech through Parakeet's live path, the way a
+// held key does: `--provider-test [text]`.
 if let i = CommandLine.arguments.firstIndex(of: "--provider-test") {
-    let rest = CommandLine.arguments.dropFirst(i + 1)
-    guard let name = rest.first, let id = TranscriptionProviderID(rawValue: name) else {
-        FileHandle.standardError.write(Data("usage: --provider-test <\(TranscriptionProviderID.allCases.map(\.rawValue).joined(separator: "|"))> [text]\n".utf8))
-        exit(2)
-    }
-    await DebugCLI.runProviderTest(provider: id, text: rest.dropFirst().first
+    await DebugCLI.runProviderTest(text: CommandLine.arguments.dropFirst(i + 1).first
                                    ?? "Claude and kubectl and Coda are proper nouns.")
     exit(0)
 }
@@ -60,18 +39,8 @@ if let i = CommandLine.arguments.firstIndex(of: "--cleanup-test") {
         FileHandle.standardError.write(Data("cleanup-test: server not ready: \(phase)\n".utf8))
         exit(1)
     }
-    await DebugCLI.runProviderTest(provider: .parakeet,
-                                   text: CommandLine.arguments.dropFirst(i + 1).first
+    await DebugCLI.runProviderTest(text: CommandLine.arguments.dropFirst(i + 1).first
                                        ?? "um so send the the invoice to Sam by friday no wait thursday", cleanUp: true)
-    exit(0)
-}
-// Transcribe `say`-synthesized speech through the gRPC flow path
-// (WisprFlowProvider) — the formatted Wispr-parity path. Needs
-// VOICEOP_BASETEN_KEY; otherwise exercises the /llm/asr fallback.
-if CommandLine.arguments.contains("--flow-grpc-test") {
-    await DebugCLI.runFlowGRPCTest(
-        text: CommandLine.arguments.last.flatMap { $0 == "--flow-grpc-test" ? nil : $0 }
-            ?? "Claude and kubectl and Coda are proper nouns.")
     exit(0)
 }
 // Manual microphone check for the barge-in capture race: `--duck-race-test

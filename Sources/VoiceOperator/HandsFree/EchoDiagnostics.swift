@@ -18,7 +18,7 @@ import Foundation
 ///   not hear what the reference says was played.
 ///
 /// Recorded only while the echo experiment is on, the Mac's speakers are the
-/// output and our voice plays; incognito writes none of it (`HandsFreeRecord`).
+/// output and our voice plays (`HandsFreeRecord`).
 final class EchoDiagnostics {
     static let maxSeconds = 60.0
     static let frame = 320

@@ -40,8 +40,6 @@ enum VoiceModeRoutes {
                     if let before, before.sessionID != a.sessionID { o["replaced"] = before.project }
                     if before?.sessionID == a.sessionID { o["already"] = true }
                     return Answer(status: 200, object: o)
-                } catch VoiceMode.AttachError.incognito(let detail) {
-                    return Answer(status: 403, object: ["error": "incognito", "detail": detail])
                 } catch VoiceMode.AttachError.refused(let refusal) {
                     return Answer(status: 409, object: ["error": refusal.error, "detail": refusal.detail])
                 } catch {

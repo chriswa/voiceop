@@ -89,16 +89,6 @@ final class VoiceModeTests: XCTestCase {
     private var saved: [VoiceMode.Attachment?] = []
     private var alive: Set<Int32> = [100, 200]
     private var refuse: HandsFreeService.Refusal?
-    private var wasIncognito = false
-
-    override func setUp() async throws {
-        wasIncognito = Incognito.isOn
-        Incognito.isOn = false
-    }
-
-    override func tearDown() async throws {
-        Incognito.isOn = wasIncognito
-    }
 
     private func make() -> VoiceMode {
         VoiceMode(deps: .init(
@@ -138,14 +128,6 @@ final class VoiceModeTests: XCTestCase {
         XCTAssertEqual(handsFree, [true])
         XCTAssertEqual(saved.last??.sessionID, "s1")
         XCTAssertEqual(mode.menuTitle, "Claude Hands-Free: game — say “Claude”")
-    }
-
-    func testIncognitoRefusesToAttach() {
-        Incognito.isOn = true
-        XCTAssertThrowsError(try make().attach(sessionID: "s1", claudePID: 1, cwd: "/", trigger: nil, voice: nil)) {
-            guard case VoiceMode.AttachError.incognito = $0 else { return XCTFail("\($0)") }
-        }
-        XCTAssertTrue(registered.isEmpty)
     }
 
     func testATakenTriggerWordIsRefused() {
@@ -426,9 +408,6 @@ final class HandsFreeHandoverTests: XCTestCase {
     }
 
     func testStartingOnTheMacTakesItFromWhoeverHadIt() {
-        let wasIncognito = Incognito.isOn
-        Incognito.isOn = false
-        defer { Incognito.isOn = wasIncognito }
         let service = HandsFreeService()
         let spaceterm = Recorder(), claude = Recorder()
         XCTAssertNil(service.registerLocal("spaceterm", trigger: "control", link: spaceterm))
@@ -454,9 +433,6 @@ final class HandsFreeHandoverTests: XCTestCase {
         XCTAssertEqual(service.snapshot()["clients"] as? [String], [])
     }
     func testTurnedOffWithNothingDictatedEndsAtOnce() {
-        let wasIncognito = Incognito.isOn
-        Incognito.isOn = false
-        defer { Incognito.isOn = wasIncognito }
         let service = HandsFreeService()
         let client = Recorder()
         XCTAssertNil(service.registerLocal("spaceterm", trigger: "control", link: client))

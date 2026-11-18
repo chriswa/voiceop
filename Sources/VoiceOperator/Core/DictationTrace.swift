@@ -17,7 +17,7 @@ import Foundation
 ///     network, and the earlier marks say where.
 ///
 /// Marks are taken from threads that have no business synchronising with each
-/// other (the CoreAudio tap thread, the gRPC event loop, the main actor), so the
+/// other (the CoreAudio tap thread, the model's tasks, the main actor), so the
 /// storage is lock-guarded and the clock is `DispatchTime` — monotonic, so a
 /// clock adjustment mid-dictation cannot produce a negative duration.
 final class DictationTrace: @unchecked Sendable {

@@ -53,7 +53,6 @@ cat >"$TMP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-cp Sources/COpus/COPYING "$TMP/Contents/Resources/libopus-COPYING.txt"
 cp Resources/models/silero_vad_16k_op15.onnx "$TMP/Contents/Resources/"
 cp Resources/models/SILERO_LICENSE "$TMP/Contents/Resources/silero-LICENSE.txt"
 copy_kokoro_resources "$TMP"

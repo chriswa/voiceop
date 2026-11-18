@@ -75,12 +75,10 @@ final class CleanedUpProviderTests: XCTestCase {
     private struct Fixed: TranscriptionProvider {
         let text: String
         var id: TranscriptionProviderID { .parakeet }
-        var fallbackLabel: String { "fixed" }
         func openSession(target: DictationTarget, trace: DictationTrace?) async throws -> any TranscriptionSession {
             Session(text: text)
         }
         func transcribe(wavData: Data) async throws -> Transcript { Transcript(text: text) }
-        func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript { Transcript(text: text) }
         func prewarm() async -> String? { nil }
 
         struct Session: TranscriptionSession {

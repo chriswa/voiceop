@@ -30,8 +30,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("Voice Operator launching — \(BuildInfo.summary)")
-        // No HTTP cache on disk for anything still on `URLSession.shared` (Wispr):
-        // it would keep request and response bodies in ~/Library/Caches.
+        // No HTTP cache on disk for anything on `URLSession.shared`: it would keep
+        // request and response bodies (spoken text, audio) in ~/Library/Caches.
         URLCache.shared = URLCache(memoryCapacity: 0, diskCapacity: 0)
         TerminationSignal.routeSIGTERMToGracefulQuit()
         LaunchAtLogin.enableByDefaultOnce()
@@ -57,9 +57,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             .init(status: currentStatus, dictating: arbiter.isDictating,
                   speaking: arbiter.isSpeaking || DeviceSpeech.shared.isSpeaking, restart: restart.state,
                   stream: arbiter.streamHealth,
-                  remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active,
-                  provider: TranscriptionPreferences.primary, shadow: TranscriptionPreferences.shadow,
-                  incognito: Incognito.isOn)
+                  remoteTranscriptions: RemoteTranscriptionManager.shared.activity.active)
         }
         // The last remote transcription finishing is a third way to become idle.
         RemoteTranscriptionManager.shared.activity.onIdle = { [weak self] in
@@ -103,31 +101,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar.onCopySTT = { [weak self] in self?.arbiter.copySTT(id: $0) }
         menuBar.onRetryCommand = { [weak self] in self?.arbiter.retryCommand(id: $0) }
         menuBar.onCopyCommand = { [weak self] in self?.arbiter.copyCommand(id: $0) }
-        menuBar.transcriptionState = { (TranscriptionPreferences.primary, TranscriptionPreferences.shadow) }
-        menuBar.lastShadow = { [weak self] in self?.arbiter.lastShadow }
-        menuBar.onCopyLastShadow = { [weak self] in self?.arbiter.copyLastShadow() }
-        menuBar.onCopyShadowSTT = { [weak self] in self?.arbiter.copyShadowSTT(id: $0) }
-        menuBar.onCopyShadowCommand = { [weak self] in self?.arbiter.copyShadowCommand(id: $0) }
         menuBar.onCopyRawSTT = { [weak self] in self?.arbiter.copyRawSTT(id: $0) }
         menuBar.onCopyRawCommand = { [weak self] in self?.arbiter.copyRawCommand(id: $0) }
-        menuBar.onSelectProvider = { [weak self] id in
-            guard id != TranscriptionPreferences.primary else { return }
-            Log.log("transcription: provider set to \(id.displayName)")
-            TranscriptionPreferences.primary = id
-            self?.arbiter.providersChanged()
-        }
-        menuBar.onSelectShadow = { [weak self] id in
-            Log.log("transcription: shadow set to \(id?.displayName ?? "none")")
-            TranscriptionPreferences.shadow = id
-            self?.arbiter.providersChanged()
-        }
-        menuBar.incognitoState = { Incognito.isOn }
-        menuBar.onToggleIncognito = { [weak self] in
-            self?.setIncognito(!Incognito.isOn)
-            return Incognito.isOn
-        }
-        menuBar.update(incognito: Incognito.isOn)
-        if Incognito.isOn { Log.log("incognito: on — nothing is saved or leaves this Mac") }
         menuBar.onMenuOpenChanged = { [weak self] open in
             self?.hotkey.chordsSuppressed = open
             if open, TranscriptionPreferences.cleanup, let server = self?.cleanupServer {
@@ -273,28 +248,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         watchSecureInput()
         do { try speechService.start() } catch { Log.log("speech HTTP start failed: \(error)") }
         startHandsFree()
-        // Dial the Baseten connection and fetch the token/dictionary now, so the
-        // first dictation of the session doesn't pay for any of it.
+        // Load Parakeet now, so the first dictation of the session doesn't pay for it.
         arbiter.prewarm()
         menuBar.update(status: .idle)
         // The mirror of the restart cue: after a cooperative restart the two play
         // back to back, so the gap between "going down" and "back up" is audible
         // rather than something you have to check the menu for.
         SoundEffect.launched.play()
-    }
-
-    /// Turn incognito mode on or off (see `Incognito`). Turning it on tells
-    /// Spaceterm no dictation is running first — its last message before the
-    /// sockets go quiet, so it is never left waiting on a dictation-ended — and
-    /// hangs up the warm connection to Wispr.
-    private func setIncognito(_ on: Bool) {
-        guard on != Incognito.isOn else { return }
-        if on { SubscriberSocket.dictation(active: false) }
-        Incognito.isOn = on
-        Log.log(on ? "incognito: on — nothing is saved or leaves this Mac" : "incognito: off")
-        if on { FlowChannel.shared.close() }
-        arbiter.incognitoChanged()
-        HandsFreeService.shared.incognitoChanged()
     }
 
     /// Hands-free (`HandsFreeService`): nothing listens until a client connects
@@ -431,10 +391,6 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     private func routeCommand(_ text: String, context: DictationContext) {
         Log.log("command: captured frontmost bundleID=\(context.bundleIdentifier ?? "(none)")")
-        // Commands only go to Spaceterm, so in incognito mode they go nowhere.
-        guard Incognito.refusal(SubscriberSocket.incognitoActivity) == nil else {
-            SoundEffect.unrecognized.play(); return
-        }
         SubscriberSocket.voiceCommand(text) { delivered, route in
             Log.log(route.map { "command: \(text.count)-char transcript to \($0) — \(delivered ? "delivered" : "unreachable")" }
                     ?? "command: no subscriber takes commands (PUT /v1/subscribers/<name>)")

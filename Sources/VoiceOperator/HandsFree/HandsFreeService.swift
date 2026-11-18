@@ -45,7 +45,6 @@ final class HandsFreeService: @unchecked Sendable {
     /// Voice Operator's own playback reaching the microphone on speakers: after
     /// it stops, hands-free stays deaf this much longer (the room's ring-out).
     static let playbackTailMs: Double = HandsFreeTuning.standard.playbackTailMs
-    static let incognitoActivity = Incognito.Activity.spaceterm("hands-free")
 
     let queue = DispatchQueue(label: "com.voiceop.hands-free")
 
@@ -178,16 +177,6 @@ final class HandsFreeService: @unchecked Sendable {
             listener = nil
         }
         try? FileManager.default.removeItem(at: Self.socketURL)
-    }
-
-    /// Incognito turned on ends every session: whatever hands-free hears goes to
-    /// a client, which incognito refuses.
-    func incognitoChanged() {
-        guard Incognito.isOn else { return }
-        queue.async { [self] in
-            for session in Array(streams.values) { end(session, why: "incognito") }
-            if let mac { for client in mac.engine.clients { stopMac(client, why: "incognito") } }
-        }
     }
 
     /// The Mac's microphone stopped delivering audio, or came back — the
@@ -462,10 +451,6 @@ final class HandsFreeService: @unchecked Sendable {
                                         "detail": "this is a headless service: stream audio instead"])
             return
         }
-        if let refusal = Incognito.refusal(Self.incognitoActivity) {
-            registered.connection.send(["type": "session-ended", "why": "incognito", "detail": refusal.description])
-            return
-        }
         // One session per client.
         for session in streams.values where session.client == client { end(session, why: "replaced") }
         if let mac {
@@ -588,10 +573,6 @@ final class HandsFreeService: @unchecked Sendable {
         let client = connection.client
         guard let registered = clients[client] else {
             connection.send(["type": "session-ended", "why": "no_client"])
-            return
-        }
-        if let refusal = Incognito.refusal(Self.incognitoActivity) {
-            connection.send(["type": "session-ended", "why": "incognito", "detail": refusal.description])
             return
         }
         let rate = message["sampleRate"] as? Int ?? HandsFreeAudio.sampleRate
@@ -967,7 +948,6 @@ final class HandsFreeTranscription: HandsFreeEngine.Dictation, @unchecked Sendab
         let completion = Unchecked(completion)
         Task {
             do {
-                try Incognito.check(HandsFreeService.incognitoActivity)
                 let outcome = try await leg.finish(tail: Data(), openGrace: Self.streamOpenGrace, clip: { clip })
                 leg.trace.note("\(outcome.text.count) chars")
                 leg.trace.flush()
@@ -976,7 +956,7 @@ final class HandsFreeTranscription: HandsFreeEngine.Dictation, @unchecked Sendab
                                                     mic: OutputDevice.defaultInputName), keeping: clip)
                 queue.async { completion.value(.success(outcome.transcript)) }
             } catch {
-                leg.trace.note("failed: \(TranscriberError.userMessage(for: error))")
+                leg.trace.note("failed: \(TranscriptionFailure.message(for: error))")
                 leg.trace.flush()
                 record.write("dictation", ["client": client, "error": "\(error)", "seconds": seconds])
                 queue.async { completion.value(.failure(error)) }

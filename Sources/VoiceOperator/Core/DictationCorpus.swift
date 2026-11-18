@@ -10,8 +10,6 @@ import Foundation
 ///
 /// History can't serve for this: it holds what was pasted, after shaping and
 /// clean-up, a retry overwrites it, and it has no phone or hands-free dictation.
-///
-/// Incognito mode writes none of it.
 final class DictationCorpus: @unchecked Sendable {
     static let shared: DictationCorpus = {
         // Under `swift test`, keep fake dictations out of the user's real corpus.
@@ -21,7 +19,6 @@ final class DictationCorpus: @unchecked Sendable {
         }
         return DictationCorpus(directory: HistoryStore.supportDir.appendingPathComponent("dictation-corpus"))
     }()
-    static let incognitoActivity = Incognito.Activity.persist("dictation corpus")
 
     enum Source: String, Codable, Sendable {
         case dictation, command, retry, phone
@@ -35,7 +32,8 @@ final class DictationCorpus: @unchecked Sendable {
         let provider: String
         /// `TranscriptionProvider.modelName`.
         let model: String
-        /// Whether the provider's fallback path produced this, not its live one.
+        /// Whether this came from the recorded clip because the live session
+        /// never opened.
         let fellBack: Bool
         /// What recognition produced, before clean-up and shaping.
         let recognized: String
@@ -120,8 +118,7 @@ final class DictationCorpus: @unchecked Sendable {
     }
 
     private func shouldKeep(_ recognition: Recognition) -> Bool {
-        Incognito.refusal(Self.incognitoActivity) == nil
-            && !recognition.recognized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !recognition.recognized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// **queue only.**

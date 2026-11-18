@@ -1,24 +1,20 @@
 import Foundation
 @testable import VoiceOperator
 
-/// A provider whose live session and fallback the test scripts.
+/// A provider whose live session and whole-clip transcription the test scripts.
 struct FakeProvider: TranscriptionProvider {
-    let id = TranscriptionProviderID.wisprFlow
-    let fallbackLabel = "fake fallback"
+    let id = TranscriptionProviderID.parakeet
     var session: FakeSession?
     var openError: Error?
     /// Holds the open until the test releases it, when set.
     var openGate: Gate?
     var fallback: @Sendable (Data) async throws -> String = { _ in "fallback" }
-    var retriesAfterLiveFailure = true
 
     init(session: FakeSession? = nil, openError: Error? = nil, openGate: Gate? = nil,
-         retriesAfterLiveFailure: Bool = true,
          fallback: @escaping @Sendable (Data) async throws -> String = { _ in "fallback" }) {
         self.session = session
         self.openError = openError
         self.openGate = openGate
-        self.retriesAfterLiveFailure = retriesAfterLiveFailure
         self.fallback = fallback
     }
 
@@ -28,7 +24,6 @@ struct FakeProvider: TranscriptionProvider {
         return session ?? FakeSession(result: .success(""))
     }
     func transcribe(wavData: Data) async throws -> Transcript { Transcript(text: try await fallback(wavData)) }
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript { Transcript(text: try await fallback(wavData)) }
     func prewarm() async -> String? { nil }
 }
 
@@ -64,6 +59,12 @@ actor FakeSession: TranscriptionSession {
         guard !cancelled else { return }
         await withCheckedContinuation { cancelWaiters.append($0) }
     }
+}
+
+/// A failure for the fakes to throw, shown as its `message`.
+struct FakeError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }
 
 /// A one-shot latch: `wait` suspends until `open`.

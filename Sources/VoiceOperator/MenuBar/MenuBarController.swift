@@ -8,15 +8,12 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let status = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
     /// Shown only while some app holds secure event input — see `update(secureInputHolder:)`.
     private let secureInputWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    /// Shown only while dictation is on the slow fallback path — see `update(streamHealth:)`.
+    /// Shown only while Parakeet is failing — see `update(streamHealth:)`.
     private let streamWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     /// Claude Code voice mode: what it is attached to, and a way out. Hidden while detached.
     private let voiceMode = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let voiceModeDetach = NSMenuItem(title: "Turn Off Claude Hands-Free", action: #selector(detachVoiceMode), keyEquivalent: "")
     private let mute = NSMenuItem(title: "Mute Speech", action: #selector(toggleMute), keyEquivalent: "")
-    private let incognitoItem = NSMenuItem(title: "Incognito Mode", action: #selector(toggleIncognito), keyEquivalent: "")
-    /// What incognito means, under its checkbox while it is on.
-    private let incognitoNote = NSMenuItem(title: "Nothing is saved or leaves this Mac", action: nil, keyEquivalent: "")
     private let tapToToggle = NSMenuItem(title: "Tap to Toggle Dictation", action: #selector(toggleTapToToggle), keyEquivalent: "")
     private let wordOverlay = NSMenuItem(title: "Word Overlay", action: nil, keyEquivalent: "")
     private let muteSystemAudio = NSMenuItem(title: "Mute System Audio While Dictating", action: #selector(toggleMuteSystemAudio), keyEquivalent: "")
@@ -29,8 +26,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let echoExperiment = NSMenuItem(title: "Echo Cancellation on Speakers (Experimental)", action: #selector(toggleEchoExperiment), keyEquivalent: "")
     private let stt = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
     private let commands = NSMenuItem(title: "Recent Commands", action: nil, keyEquivalent: "")
-    /// Which provider transcribes, and which shadows it — rebuilt on every open.
-    private let transcription = NSMenuItem(title: "Transcription", action: nil, keyEquivalent: "")
     private let cleanupToggle = NSMenuItem(title: "Clean Up Transcripts (Fluid-1 Mini)", action: #selector(toggleCleanup), keyEquivalent: "")
     private let cleanupStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let cleanupInstructions = NSMenuItem(title: "Clean-Up Setup Instructions…", action: #selector(showCleanupInstructions), keyEquivalent: "")
@@ -67,10 +62,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onShowKokoroLog: (() -> Void)?
     private var ttsActionsEnabled = true
     var onMuteSpeech: ((Bool) -> Void)?
-    /// Reads and flips incognito mode (see `Incognito`). The flip closure
-    /// returns the state afterwards, like the other preference toggles.
-    var incognitoState: (() -> Bool)?
-    var onToggleIncognito: (() -> Bool)?
     var onSpeakClipboard: (() -> Void)?
     var onSummarizeClipboard: (() -> Void)?
     var onRestart: (() -> Void)?
@@ -118,15 +109,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     var onCopySTT: ((UUID) -> Void)?
     var onRetryCommand: ((UUID) -> Void)?
     var onCopyCommand: ((UUID) -> Void)?
-    /// The provider that pastes, and the one shadowing it (nil for none).
-    var transcriptionState: (() -> (primary: TranscriptionProviderID, shadow: TranscriptionProviderID?))?
-    var onSelectProvider: ((TranscriptionProviderID) -> Void)?
-    var onSelectShadow: ((TranscriptionProviderID?) -> Void)?
-    /// The latest shadow transcript, for the copy item's title and enablement.
-    var lastShadow: (() -> ShadowTranscript?)?
-    var onCopyLastShadow: (() -> Void)?
-    var onCopyShadowSTT: ((UUID) -> Void)?
-    var onCopyShadowCommand: ((UUID) -> Void)?
     var onCopyRawSTT: ((UUID) -> Void)?
     var onCopyRawCommand: ((UUID) -> Void)?
     /// The on-device clean-up pass: its checkbox, status line and delete item.
@@ -143,7 +125,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private var currentStatus: OperatorStatus = .idle
     private var currentStyle: TranscriptStyle = .normal
     private var streamHealth: StreamHealth = .unverified
-    private var incognito = false
     private var handsFree: HandsFreeLook?
 
     override init() {
@@ -157,12 +138,8 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         menu.addItem(voiceModeDetach)
         mute.keyEquivalent = "b"; mute.keyEquivalentModifierMask = [.command, .control]
         mute.target = self; menu.addItem(mute)
-        incognitoItem.target = self; menu.addItem(incognitoItem)
-        incognitoNote.isEnabled = false; incognitoNote.indentationLevel = 1; incognitoNote.isHidden = true
-        menu.addItem(incognitoNote)
         menu.addItem(.separator())
         stt.submenu = NSMenu(); commands.submenu = NSMenu(); menu.addItem(stt); menu.addItem(commands)
-        transcription.submenu = NSMenu(); menu.addItem(transcription)
         cleanupToggle.target = self; menu.addItem(cleanupToggle)
         cleanupStatus.isEnabled = false; cleanupStatus.indentationLevel = 1; menu.addItem(cleanupStatus)
         for item in [cleanupInstructions, cleanupDelete] {
@@ -281,10 +258,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         secureInputWarning.title = "⚠︎ Secure Keyboard Entry is on in \(holder) — ⌘⌃ shortcuts disabled"
         secureInputWarning.isHidden = false
     }
-    /// Which transcription path dictation is getting. While it is the slow
-    /// fallback the menu carries a warning line naming the reason, and the icon
-    /// wears an amber badge in every state — including idle, so it is seen
-    /// *before* the next dictation rather than after waiting on it.
+    /// Whether dictation is working. While it is failing the menu carries a
+    /// warning line naming the reason, and the icon wears an amber badge in
+    /// every state — including idle, so it is seen *before* the next dictation.
     func update(streamHealth health: StreamHealth) {
         guard health != streamHealth else { return }
         streamHealth = health
@@ -302,14 +278,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         voiceModeDetach.isHidden = title == nil
     }
     @objc private func detachVoiceMode() { onDetachVoiceMode?() }
-    /// Incognito swaps the icon's megaphone for sunglasses, in every state, so
-    /// it is never on without showing.
-    func update(incognito on: Bool) {
-        incognito = on
-        incognitoItem.state = on ? .on : .off
-        incognitoNote.isHidden = !on
-        refreshIcon()
-    }
     /// Hands-free on the Mac's microphone, or nil while it is off: the icon's
     /// colour whenever the status itself has none.
     func update(handsFree look: HandsFreeLook?) {
@@ -337,10 +305,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
             item.state = item.representedObject as? Int == timeout ? .on : .off
         }
         rebuild(stt.submenu!, entries: sttHistoryProvider?() ?? [], retry: onRetrySTT, copy: onCopySTT,
-                copyRaw: onCopyRawSTT, copyShadow: onCopyShadowSTT)
+                copyRaw: onCopyRawSTT)
         rebuild(commands.submenu!, entries: commandHistoryProvider?() ?? [], retry: onRetryCommand, copy: onCopyCommand,
-                copyRaw: onCopyRawCommand, copyShadow: onCopyShadowCommand)
-        rebuildTranscriptionMenu()
+                copyRaw: onCopyRawCommand)
         refreshCleanupMenu()
         refreshTTSMenu()
         onTTSMenuOpened?()
@@ -365,13 +332,13 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         onMenuOpenChanged?(false)
     }
     private func rebuild<T>(_ menu: NSMenu, entries: [T], retry: ((UUID) -> Void)?, copy: ((UUID) -> Void)?,
-                            copyRaw: ((UUID) -> Void)?, copyShadow: ((UUID) -> Void)?) {
+                            copyRaw: ((UUID) -> Void)?) {
         menu.removeAllItems()
         if entries.isEmpty { menu.addItem(NSMenuItem(title: "None yet", action: nil, keyEquivalent: "")); return }
         for e in entries.prefix(10) {
-            let id: UUID; let title: String; let shadow: ShadowTranscript?; let raw: String?
-            if let x = e as? STTHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow; raw = x.raw }
-            else if let x = e as? CommandHistoryEntry { id = x.id; title = x.menuTitle; shadow = x.shadow; raw = x.raw }
+            let id: UUID; let title: String; let raw: String?
+            if let x = e as? STTHistoryEntry { id = x.id; title = x.menuTitle; raw = x.raw }
+            else if let x = e as? CommandHistoryEntry { id = x.id; title = x.menuTitle; raw = x.raw }
             else { continue }
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             let sub = NSMenu(); let retryItem = NSMenuItem(title: "Retry", action: #selector(runRetry(_:)), keyEquivalent: "")
@@ -383,53 +350,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
                 copyRawItem.target = self; copyRawItem.representedObject = Action(id: id, handler: copyRaw)
                 sub.addItem(copyRawItem)
             }
-            if let shadow {
-                sub.addItem(.separator())
-                let line = NSMenuItem(title: "Shadow — \(shadow.menuTitle)", action: nil, keyEquivalent: "")
-                line.isEnabled = false; sub.addItem(line)
-                if let text = shadow.text, !text.isEmpty {
-                    let copyShadowItem = NSMenuItem(title: "Copy shadow transcription", action: #selector(runCopy(_:)), keyEquivalent: "")
-                    copyShadowItem.target = self; copyShadowItem.representedObject = Action(id: id, handler: copyShadow)
-                    sub.addItem(copyShadowItem)
-                }
-            }
             item.submenu = sub; menu.addItem(item)
-        }
-    }
-    private func rebuildTranscriptionMenu() {
-        guard let state = transcriptionState?(), let menu = transcription.submenu else { return }
-        transcription.title = "Transcription: \(state.primary.displayName)"
-            + (state.shadow.map { " (shadow: \($0.displayName))" } ?? "")
-        menu.removeAllItems()
-        let providerHeader = NSMenuItem(title: "Provider", action: nil, keyEquivalent: "")
-        providerHeader.isEnabled = false; menu.addItem(providerHeader)
-        for id in TranscriptionProviderID.allCases {
-            let item = NSMenuItem(title: Self.title(for: id), action: #selector(selectProvider(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = id.rawValue; item.indentationLevel = 1
-            item.state = id == state.primary ? .on : .off
-            menu.addItem(item)
-        }
-        menu.addItem(.separator())
-        let shadowHeader = NSMenuItem(title: "Shadow (kept for comparison, never pasted)", action: nil, keyEquivalent: "")
-        shadowHeader.isEnabled = false; menu.addItem(shadowHeader)
-        let none = NSMenuItem(title: "None", action: #selector(selectShadow(_:)), keyEquivalent: "")
-        none.target = self; none.indentationLevel = 1; none.state = state.shadow == nil ? .on : .off
-        menu.addItem(none)
-        for id in TranscriptionProviderID.allCases where id != state.primary {
-            let item = NSMenuItem(title: Self.title(for: id), action: #selector(selectShadow(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = id.rawValue; item.indentationLevel = 1
-            item.state = id == state.shadow ? .on : .off
-            menu.addItem(item)
-        }
-        menu.addItem(.separator())
-        let last = lastShadow?()
-        let copyLast = NSMenuItem(title: "Copy Last Shadow Transcript", action: #selector(copyLastShadow), keyEquivalent: "")
-        copyLast.target = self
-        menu.addItem(copyLast)
-        if let last {
-            let preview = NSMenuItem(title: last.menuTitle, action: nil, keyEquivalent: "")
-            preview.isEnabled = false; preview.indentationLevel = 1
-            menu.addItem(preview)
         }
     }
     /// The clean-up checkbox and the lines under it, re-read whenever the menu
@@ -445,23 +366,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     @objc private func toggleCleanup() { onToggleCleanup?() }
     @objc private func deleteCleanupModel() { onDeleteCleanupModel?() }
     @objc private func showCleanupInstructions() { onShowCleanupInstructions?() }
-    @objc private func copyLastShadow() { onCopyLastShadow?() }
-    /// A provider this Mac cannot use is listed, but greyed out (see
-    /// `validateMenuItem`) and says why.
-    private static func title(for id: TranscriptionProviderID) -> String {
-        TranscriptionPreferences.isAvailable(id) ? id.displayName : "\(id.displayName) (not signed in)"
-    }
-    @objc private func selectProvider(_ sender: NSMenuItem) {
-        guard let id = (sender.representedObject as? String).flatMap(TranscriptionProviderID.init) else { return }
-        onSelectProvider?(id)
-    }
-    @objc private func selectShadow(_ sender: NSMenuItem) {
-        onSelectShadow?((sender.representedObject as? String).flatMap(TranscriptionProviderID.init))
-    }
     private final class Action: NSObject { let id: UUID; let handler: ((UUID) -> Void)?; init(id: UUID, handler: ((UUID) -> Void)?) { self.id = id; self.handler = handler } }
     @objc private func runRetry(_ sender: NSMenuItem) { (sender.representedObject as? Action)?.handler?((sender.representedObject as! Action).id) }
     @objc private func runCopy(_ sender: NSMenuItem) { (sender.representedObject as? Action)?.handler?((sender.representedObject as! Action).id) }
-    @objc private func toggleIncognito() { update(incognito: onToggleIncognito?() ?? false) }
     @objc private func toggleMute() { muted.toggle(); mute.title = muted ? "Unmute Speech" : "Mute Speech"; refreshIcon(); onMuteSpeech?(muted) }
     /// Toggle narration mute from outside the menu — the global ⌘⌃B chord. Goes
     /// through the menu item's own action so the title, the icon and the mute
@@ -526,12 +433,6 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
         // One Kokoro action at a time; Cancel Install stays live while one runs.
         if item === ttsUpdate || item === ttsRestart || item === ttsUninstall { return ttsActionsEnabled }
         if item === ttsInstall { return ttsActionsEnabled || item.title == "Cancel Install" }
-        if item.action == #selector(copyLastShadow) { return !(lastShadow?()?.text ?? "").isEmpty }
-        if item.action == #selector(selectProvider(_:)) || item.action == #selector(selectShadow(_:)),
-           let id = (item.representedObject as? String).flatMap(TranscriptionProviderID.init) {
-            // The current choice stays enabled so it can always be seen as chosen.
-            return TranscriptionPreferences.isAvailable(id) || item.state == .on
-        }
         guard item === keepMicOpen else { return true }
         return !(keepMicOpenForWirelessState?() ?? false)
     }
@@ -540,30 +441,28 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private func refreshIcon() {
         guard let button = statusItem.button else { return }
         button.image = Self.icon(status: currentStatus, muted: muted, style: currentStyle,
-                                 degraded: streamHealth.isDegraded, incognito: incognito, handsFree: handsFree)
+                                 degraded: streamHealth.isDegraded, handsFree: handsFree)
         let showsHandsFree = currentStatus.tint == nil && handsFree != nil
         button.image?.accessibilityDescription = currentStatus.accessibilityLabel
             + (showsHandsFree ? " — \(handsFree?.accessibilityLabel ?? "")" : "")
-            + (incognito ? " (incognito)" : "")
             + (Self.badgesVisible(status: currentStatus, style: currentStyle)
                ? " (\(currentStyle.accessibilityLabel))" : "")
-            + (streamHealth.isDegraded ? " — dictation on the slow path" : "")
+            + (streamHealth.isDegraded ? " — dictation is failing" : "")
     }
 
     /// Preserve the original megaphone and its red/magenta/yellow/cyan/green
     /// status palette. Idle remains a template image so macOS adapts it to the
-    /// menu-bar appearance. Incognito only changes the base symbol: the tints,
-    /// the mute ring and the badges all draw over it exactly as they do over
-    /// the megaphone, and a discarded dictation's trash can still wins.
+    /// menu-bar appearance. A discarded dictation swaps the megaphone for a
+    /// trash can.
     ///
     /// Hands-free (`handsFree`) colours the icon only while the status has no
     /// colour of its own — so speech (green) and a Fn dictation win over it.
     /// Listening, it is a rainbow: vivid in the conversation window, washed out
     /// while the trigger word is needed.
     static func icon(status: OperatorStatus, muted: Bool, style: TranscriptStyle = .normal,
-                     degraded: Bool = false, incognito: Bool = false, handsFree: HandsFreeLook? = nil) -> NSImage {
+                     degraded: Bool = false, handsFree: HandsFreeLook? = nil) -> NSImage {
         let showsDiscard = style.discard && (status == .listening || status == .commandListening)
-        let name = showsDiscard ? "trash.fill" : incognito ? "sunglasses.fill" : "megaphone.fill"
+        let name = showsDiscard ? "trash.fill" : "megaphone.fill"
         let base = NSImage(systemSymbolName: name, accessibilityDescription: "Voice Operator")
         let symbol = base?.withSymbolConfiguration(.init(pointSize: showsDiscard ? 18 : 15,
                                                           weight: showsDiscard ? .bold : .regular))

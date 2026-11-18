@@ -69,8 +69,8 @@ actor RemoteTranscriptionManager {
         case unknownSession
         case alreadyFinished
         case unsupportedSampleRate
-        /// Transcription failed upstream; `unavailable` means signed out (503)
-        /// rather than a failed request (502).
+        /// Transcription failed; `unavailable` means the model is still loading
+        /// (503) rather than a failed transcription (502).
         case upstream(message: String, unavailable: Bool)
     }
 
@@ -88,12 +88,7 @@ actor RemoteTranscriptionManager {
 
     // MARK: - Session lifecycle
 
-    /// The phone's audio and the transcript it gets back both pass through
-    /// Spaceterm, so incognito mode refuses remote dictation outright.
-    static let incognitoActivity = Incognito.Activity.spaceterm("phone dictation")
-
     func create(sampleRate: Int = PCM16Resampler.outputRate, now: Date = Date()) async throws -> String {
-        try Incognito.check(Self.incognitoActivity)
         guard let resampler = PCM16Resampler(inputRate: sampleRate) else { throw Failure.unsupportedSampleRate }
         let id = UUID().uuidString.lowercased()
         let trace = DictationTrace("remote")
@@ -155,13 +150,10 @@ actor RemoteTranscriptionManager {
             return RemoteTranscript(text: outcome.text, words: words, audioStartedAt: words == nil ? nil : session.firstSampleAt)
         } catch {
             guard session.phase == .finishing, !(error is CancellationError) else { throw Failure.alreadyFinished }
-            let message = TranscriberError.userMessage(for: error)
+            let message = TranscriptionFailure.message(for: error)
             session.trace.note("failed: \(message)")
-            let unavailable: Bool
-            switch error {
-            case TranscriberError.notSignedIn, TranscriberError.signInExpired: unavailable = true
-            default: unavailable = false
-            }
+            // A model still loading clears up on its own: worth a retry, so 503.
+            let unavailable = if case ParakeetEngine.EngineError.stillLoading = error { true } else { false }
             throw Failure.upstream(message: message, unavailable: unavailable)
         }
     }
@@ -201,9 +193,7 @@ actor RemoteTranscriptionManager {
 
     // MARK: - Plumbing
 
-    /// Also where a session opened before incognito was turned on stops.
     private func openSession(_ id: String) throws -> Session {
-        try Incognito.check(Self.incognitoActivity)
         guard let session = sessions[id] else { throw Failure.unknownSession }
         guard session.phase == .open else { throw Failure.alreadyFinished }
         return session

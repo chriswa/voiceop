@@ -34,18 +34,18 @@ final class TranscriptionLegTests: XCTestCase {
 
     func testOpenFailureIsReportedAtOnceAndFallsBackToTheClip() async throws {
         let reported = expectation(description: "open failure reported")
-        let leg = TranscriptionLeg(provider: FakeProvider(openError: TranscriberError.noBasetenKey,
+        let leg = TranscriptionLeg(provider: FakeProvider(openError: FakeError(message: "model missing"),
                                                           fallback: { clip in "fallback \(clip.count)" }),
                                    target: DictationTarget(), trace: DictationTrace("test"),
                                    onOpenFailed: { reason in
-            XCTAssertEqual(reason, "no Baseten key")
+            XCTAssertEqual(reason, "model missing")
             reported.fulfill()
         })
         await fulfillment(of: [reported], timeout: 1)
         XCTAssertTrue(leg.isBroken)
         let outcome = try await leg.finish(tail: Data(), openGrace: .seconds(2), clip: { Data(count: 3) })
         XCTAssertEqual(outcome.text, "fallback 3")
-        XCTAssertEqual(outcome.liveFailure, "no Baseten key")
+        XCTAssertEqual(outcome.liveFailure, "model missing")
     }
 
     func testAnOpenThatOutlastsTheGraceFallsBack() async throws {
@@ -53,30 +53,19 @@ final class TranscriptionLegTests: XCTestCase {
                                    target: DictationTarget(), trace: DictationTrace("test"))
         let outcome = try await leg.finish(tail: Data(), openGrace: .milliseconds(50), clip: { Data() })
         XCTAssertEqual(outcome.text, "clip")
-        XCTAssertEqual(outcome.liveFailure, "stream did not open in time")
+        XCTAssertEqual(outcome.liveFailure, "session did not open in time")
     }
 
-    func testAFailedCommitFallsBackAndReleasesTheSession() async throws {
-        let session = FakeSession(result: .failure(TranscriberError.streamTimeout))
-        let leg = TranscriptionLeg(provider: FakeProvider(session: session, fallback: { _ in "rescued" }),
-                                   target: DictationTarget(), trace: DictationTrace("test"))
-        leg.append(Data([1]))
-        let outcome = try await leg.finish(tail: Data(), openGrace: .seconds(2), clip: { Data() })
-        XCTAssertEqual(outcome.text, "rescued")
-        XCTAssertEqual(outcome.liveFailure, "no result after commit")
-        await session.waitUntilCancelled()
-    }
-
-    func testAProviderThatDoesNotRetryReportsItsOwnFailure() async {
-        let session = FakeSession(result: .failure(TranscriberError.serverError("model failed")))
-        let leg = TranscriptionLeg(provider: FakeProvider(session: session, retriesAfterLiveFailure: false,
+    func testAFailedCommitReportsItsOwnFailureWithoutARetry() async {
+        let session = FakeSession(result: .failure(FakeError(message: "model failed")))
+        let leg = TranscriptionLeg(provider: FakeProvider(session: session,
                                                           fallback: { _ in XCTFail("no retry"); return "" }),
                                    target: DictationTarget(), trace: DictationTrace("test"))
         do {
             _ = try await leg.finish(tail: Data([1]), openGrace: .seconds(2), clip: { Data() })
             XCTFail("expected the failure")
         } catch {
-            XCTAssertEqual(TranscriberError.userMessage(for: error), "model failed")
+            XCTAssertEqual(TranscriptionFailure.message(for: error), "model failed")
         }
     }
 
@@ -91,19 +80,6 @@ final class TranscriptionLegTests: XCTestCase {
         leg.append(Data([1]))
         let sent = await session.byteCounts.sent
         XCTAssertEqual(sent, 0)
-    }
-
-    // MARK: - Opus framing (Wispr Flow)
-
-    func testPacketizerHoldsPartialFramesUntilTheEnd() throws {
-        let packetizer = try OpusPacketizer()
-        let frame = OpusEncoder.frameBytes
-        var packets = try packetizer.append(Data(count: frame / 2))
-        XCTAssertEqual(packets.count, 0, "half a frame is held back")
-        packets += try packetizer.append(Data(count: frame + frame / 2 + 10))
-        XCTAssertEqual(packets.count, 2, "two whole frames once enough has arrived")
-        packets += try packetizer.finish(Data(count: 20))
-        XCTAssertEqual(packets.count, 3, "the remainder is padded into one last frame")
     }
 
     private static func until(_ condition: @Sendable () async -> Bool) async {

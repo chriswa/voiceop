@@ -37,7 +37,7 @@ struct DictationCleaner: Sendable {
     var endpoint = URL(string: "http://127.0.0.1:\(CleanupServer.port)/completion")!
 
     /// Loopback only, but the request carries the transcript, so nothing of it
-    /// may be cached on disk (see "Incognito mode" in DESIGN.md).
+    /// may be cached on disk.
     static let session = URLSession(configuration: .ephemeral)
 
     /// The prompt shipped in the bundle (`Contents/Resources/dictation-cleanup.md`).

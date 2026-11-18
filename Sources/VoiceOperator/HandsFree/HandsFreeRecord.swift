@@ -15,11 +15,9 @@ import Foundation
 /// "Control" heard as "patrol" can be found and listened to afterwards.
 /// Spaceterm kept the same record in `~/.spaceterm/voice-decisions.jsonl`
 /// before hands-free moved here.
-/// Incognito mode writes none of it.
 final class HandsFreeRecord: @unchecked Sendable {
     static let shared = HandsFreeRecord(directory: HistoryStore.supportDir.appendingPathComponent("hands-free"))
     static let maxClips = 400
-    static let incognitoActivity = Incognito.Activity.persist("hands-free record")
 
     private let directory: URL
     private var clips: URL { directory.appendingPathComponent("clips") }
@@ -31,7 +29,6 @@ final class HandsFreeRecord: @unchecked Sendable {
 
     /// One line, with `clip` (16 kHz s16le) kept beside it if given.
     func write(_ kind: String, _ detail: [String: Any], clip: Data? = nil, label: String? = nil, now: Date = Date()) {
-        guard Incognito.refusal(Self.incognitoActivity) == nil else { return }
         queue.async { [self] in
             var line = detail
             line["t"] = ISO8601DateFormatter.withFractions.string(from: now)

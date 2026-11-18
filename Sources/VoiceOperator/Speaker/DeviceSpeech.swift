@@ -25,7 +25,6 @@ import Foundation
 final class DeviceSpeech: @unchecked Sendable {
     static let shared = DeviceSpeech()
     static let idPrefix = "ds_"
-    static let incognitoActivity = Incognito.Activity.spaceterm("device speech")
     /// Finished jobs kept for a late status or stop; the oldest beyond this go.
     static let keepFinished = 32
 
@@ -49,7 +48,6 @@ final class DeviceSpeech: @unchecked Sendable {
         case accepted(SpeechJobManager.Result)
         /// No device by that client and name is connected.
         case unknownDevice
-        case refused(Incognito.Blocked)
     }
 
     typealias Result = SpeechJobManager.Result
@@ -192,7 +190,6 @@ final class DeviceSpeech: @unchecked Sendable {
     // MARK: - Jobs
 
     func speak(parts: [SpeechJobManager.Part], client: String, device: String) async -> Speak {
-        if let blocked = Incognito.refusal(Self.incognitoActivity) { return .refused(blocked) }
         let segments = SpeechJobManager.segments(parts)
         return await onQueue { [self] in
             let key = Self.key(client: client, device: device)
@@ -264,11 +261,6 @@ final class DeviceSpeech: @unchecked Sendable {
         guard let clip else {
             deps.log("device speech \(id): sentence \(index + 1)/\(job.segments.count) could not be made")
             end(job, .synthesisFailed)
-            return false
-        }
-        // The words leave this process for the device, through its client.
-        if Incognito.refusal(Self.incognitoActivity) != nil {
-            end(job, .synthesisFailed, why: "incognito")
             return false
         }
         guard let device = devices[job.key], device.token == job.token else {

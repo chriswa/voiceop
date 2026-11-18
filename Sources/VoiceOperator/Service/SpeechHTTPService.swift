@@ -30,8 +30,10 @@ final class SpeechHTTPService: @unchecked Sendable {
     /// 18 added Claude Code voice mode — `/v1/voice-mode/…` and `voice_mode`
     /// in `/v1/status` (see `VoiceMode`); 19 added word timings — `words` and
     /// `audio_started_at` on `/v1/transcriptions/{id}/finish`, and `words` and
-    /// `startedAt` on the hands-free `transcript`.
-    static let discoveryVersion = 19
+    /// `startedAt` on the hands-free `transcript`; 20 removed
+    /// `transcription_provider`, `shadow_provider` and `incognito` from
+    /// `/v1/status`, and the 403 `{"error": "incognito"}` refusals.
+    static let discoveryVersion = 20
     private var listener: NWListener?
 
     /// What `/v1/status` reports: which build this is and what it is doing.
@@ -43,18 +45,13 @@ final class SpeechHTTPService: @unchecked Sendable {
         /// `restart-app.sh` reads it to say which of the two it is waiting on.
         var speaking: Bool
         var restart: RestartCoordinator.State
-        /// Which transcription path dictation is on. `restart-app.sh` reads this
-        /// after every restart so a slow-path Mac is caught at build time, not
-        /// after a week of mysteriously slow dictation (see `StreamHealth`).
+        /// Whether dictation is working. `restart-app.sh` reads this after every
+        /// restart so a Mac whose Parakeet failed to load is caught at build time
+        /// (see `StreamHealth`).
         var stream: StreamHealth
         /// Remote transcriptions in flight. Like `dictating`, these hold off a
         /// restart — a phone mid-sentence would otherwise lose what it said.
         var remoteTranscriptions: Int
-        /// The provider that pastes, and the one shadowing it (nil for none).
-        var provider: TranscriptionProviderID = .wisprFlow
-        var shadow: TranscriptionProviderID?
-        /// Incognito mode (see `Incognito`): nothing saved, nothing sent.
-        var incognito = false
         /// Service mode only (`ServiceCoordinator`): its Kokoro's state, `installing`,
         /// `starting`, `ready` or `failed`, and what it is doing or why it failed.
         var kokoro: (state: String, detail: String?)?
@@ -69,9 +66,6 @@ final class SpeechHTTPService: @unchecked Sendable {
                  "stream": stream.wireName,
                  "remote_transcription": true, "remote_transcriptions": remoteTranscriptions]
             if let reason = stream.reason { o["stream_reason"] = reason }
-            o["transcription_provider"] = provider.rawValue
-            if let shadow { o["shadow_provider"] = shadow.rawValue }
-            o["incognito"] = incognito
             if ServiceMode.isService {
                 o["service"] = true
                 if let kokoro {
@@ -133,10 +127,6 @@ final class SpeechHTTPService: @unchecked Sendable {
     private struct Response {
         let status: Int; let object: [String: Any]?; var raw: (data: Data, contentType: String)? = nil
     }
-    /// 403 for anything incognito mode refuses (see `Incognito`).
-    private static func refused(_ blocked: Incognito.Blocked) -> Response {
-        .init(status: 403, object: ["error": "incognito", "detail": blocked.description])
-    }
     private static func parse(_ data: Data) -> Request? {
         guard let headEnd = data.range(of: Data("\r\n\r\n".utf8)),
               let head = String(data: data[..<headEnd.lowerBound], encoding: .utf8) else { return nil }
@@ -188,8 +178,7 @@ final class SpeechHTTPService: @unchecked Sendable {
         }
         // Hands-free: does this short clip start with the wake word (`match=start`)
         // or is it the word alone (`match=only`, the default)? Raw s16le mono
-        // PCM in, `?word=control&sample_rate=16000`. On-device only — see
-        // WakeWordCheck for why this never touches Wispr.
+        // PCM in, `?word=control&sample_rate=16000`. On-device only.
         if r.path == "/v1/wake-word" {
             guard r.method == "POST" else { return .init(status: 405, object: ["error": "method_not_allowed"]) }
             let word = r.query["word"] ?? "control"
@@ -201,8 +190,6 @@ final class SpeechHTTPService: @unchecked Sendable {
             do {
                 let result = try await WakeWordCheck.check(pcm: r.body, sampleRate: rate, word: word, match: mode)
                 return .init(status: 200, object: ["match": result.match, "heard": result.heard, "elapsed_ms": result.elapsedMs])
-            } catch let blocked as Incognito.Blocked {
-                return Self.refused(blocked)
             } catch WakeWordCheck.Failure.unavailable {
                 return .init(status: 501, object: ["error": "wake_word_unavailable", "detail": "needs macOS 26 (SpeechTranscriber)"])
             } catch {
@@ -227,9 +214,6 @@ final class SpeechHTTPService: @unchecked Sendable {
         // `character_offset` does for speech played here. `words` is absent
         // when the timings could not be had or aligned; the audio still is.
         if r.method == "POST", r.path == "/v1/synthesize" {
-            // Synthesis is local; the text and the audio are not — they travel
-            // through Spaceterm to the phone.
-            if let blocked = Incognito.refusal(.spaceterm("phone speech")) { return Self.refused(blocked) }
             guard let o = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any],
                   let text = o["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(status: 400, object: ["error": "text_required"]) }
             guard text.unicodeScalars.count <= 5_000 else { return .init(status: 422, object: ["error": "text_too_long"]) }
@@ -261,7 +245,6 @@ final class SpeechHTTPService: @unchecked Sendable {
                 switch await DeviceSpeech.shared.speak(parts: parts, client: device.client, device: device.device) {
                 case .accepted(let result): return .init(status: 202, object: object(result))
                 case .unknownDevice: return .init(status: 404, object: ["error": "unknown_device"])
-                case .refused(let blocked): return Self.refused(blocked)
                 }
             }
             // Service mode never plays on the Mac: speech is for a device only.
@@ -366,8 +349,6 @@ final class SpeechHTTPService: @unchecked Sendable {
             case .methodNotAllowed:
                 return .init(status: 405, object: ["error": "method_not_allowed"])
             }
-        } catch let blocked as Incognito.Blocked {
-            return Self.refused(blocked)
         } catch let failure as RemoteTranscriptionManager.Failure {
             switch failure {
             case .unknownSession: return .init(status: 404, object: ["error": "unknown_transcription"])

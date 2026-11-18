@@ -5,7 +5,7 @@ import Foundation
 public enum HandsFreeEvent: Equatable, Sendable {
     /// Hands-free is on, on this stream: the session's id.
     case session(String?)
-    /// Off: `off`, `replaced`, `lost`, `disconnected`, `incognito`, `unsupported_audio`, `no_client`.
+    /// Off: `off`, `replaced`, `lost`, `disconnected`, `unsupported_audio`, `no_client`.
     case ended(String)
     /// `standingAside`: while listening, why it is not listening to the microphone just now —
     /// `speech` (our own voice playing where the microphone hears it), `sound`, `dictation`.

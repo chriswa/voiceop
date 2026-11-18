@@ -26,8 +26,6 @@ cp Resources/*.svg "$APP/Contents/Resources/"
 cp Resources/*.png "$APP/Contents/Resources/"
 # The on-device clean-up prompt (DictationCleaner.bundled).
 cp Resources/dictation-cleanup.md "$APP/Contents/Resources/"
-# libopus is statically linked; its BSD license requires the notice ship with the binary.
-cp Sources/COpus/COPYING "$APP/Contents/Resources/libopus-COPYING.txt"
 # Hands-free's speech detector (Silero VAD, MIT) and its license.
 cp Resources/models/silero_vad_16k_op15.onnx "$APP/Contents/Resources/"
 cp Resources/models/SILERO_LICENSE "$APP/Contents/Resources/silero-LICENSE.txt"

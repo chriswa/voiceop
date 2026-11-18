@@ -110,9 +110,7 @@ the mod carries messages to it over Voice Operator's loopback API
 
 ## Privacy
 
-What you say goes to Claude, the same as anything you type. Voice Operator's
-**incognito mode** refuses to turn hands-free on, and turning incognito on ends
-it.
+What you say goes to Claude, the same as anything you type.
 
 ## Troubleshooting
 

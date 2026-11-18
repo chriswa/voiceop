@@ -15,16 +15,14 @@ enum PasteTechnique: String {
 
 /// Inserts text into the frontmost app by whichever technique is selected.
 ///
-/// The clipboard path works the way Wispr's does — save the pasteboard, write our
-/// text, synthesize ⌘V, then restore the original shortly after so the user's
-/// clipboard survives (DESIGN.md "Text insertion"). We use the straightforward
-/// save→set→paste→restore rather than Wispr's lazy `NSPasteboardItemDataProvider`;
-/// the restore delay covers the async paste.
+/// The clipboard path saves the pasteboard, writes our text, synthesizes ⌘V,
+/// then restores the original shortly after so the user's clipboard survives
+/// (DESIGN.md "Text insertion"). The restore delay covers the async paste.
 ///
 /// Both paths require the Accessibility grant (to post synthetic key events).
 @MainActor
 enum TextInserter {
-    /// Restore delay after ⌘V, matching Wispr's ~500 ms.
+    /// Restore delay after ⌘V.
     private static let restoreDelay: TimeInterval = 0.5
 
     static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
@@ -58,9 +56,7 @@ enum TextInserter {
         // The nspasteboard.org markers, on the same item: the transcript is only
         // passing through on its way to ⌘V, so clipboard managers should neither
         // record it (transient) nor show it (concealed). They are a convention
-        // that well-behaved tools honor, not an enforcement — and Universal
-        // Clipboard is not known to read them, so incognito still wants Handoff
-        // off in System Settings.
+        // that well-behaved tools honor, not an enforcement.
         let item = NSPasteboardItem()
         item.setString(text, forType: .string)
         item.setData(Data(), forType: Self.transientType)

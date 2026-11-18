@@ -25,8 +25,7 @@ struct KokoroSynthesizer: SpeechSynthesizer {
     static let defaultVoiceID = "af_heart"
     /// Ephemeral: nothing about a request reaches the disk. The shared session
     /// keeps an HTTP cache in ~/Library/Caches, which stored every request's text,
-    /// the word timings and the audio itself — found leaking an incognito
-    /// sentence, and never wanted in any mode (`AudioCache` is the TTS cache).
+    /// the word timings and the audio itself (`AudioCache` is the TTS cache).
     static let session = URLSession(configuration: .ephemeral)
 
     /// Kokoro's native output rate (s16le, mono). See `TTSEngine.streamFormat`.

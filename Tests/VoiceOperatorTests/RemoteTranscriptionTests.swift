@@ -127,10 +127,10 @@ final class RemoteTranscriptionTests: XCTestCase {
         XCTAssertEqual(committed, 0)
     }
 
-    func testFallsBackToTheClipWhenTheStreamCannotOpen() async throws {
+    func testTranscribesTheClipWhenTheSessionCannotOpen() async throws {
         let clips = ClipLog()
         let manager = RemoteTranscriptionManager(provider: {
-            FakeProvider(openError: TranscriberError.noBasetenKey,
+            FakeProvider(openError: FakeError(message: "model missing"),
                          fallback: { wav in await clips.add(wav); return "from fallback" })
         })
         let id = try await manager.create(sampleRate: 16_000)
@@ -142,21 +142,25 @@ final class RemoteTranscriptionTests: XCTestCase {
         XCTAssertEqual(wav.samples.count, 16_000)
     }
 
-    func testFallsBackWhenTheCommitFails() async throws {
+    func testAFailedCommitSurfacesAsAFailedTranscription() async throws {
         let manager = RemoteTranscriptionManager(provider: {
-            FakeProvider(session: FakeSession(result: .failure(TranscriberError.streamTimeout)),
-                         fallback: { _ in "rescued" })
+            FakeProvider(session: FakeSession(result: .failure(FakeError(message: "model failed"))),
+                         fallback: { _ in XCTFail("no retry"); return "" })
         })
         let id = try await manager.create()
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.3))
-        let text = try await manager.finish(id: id).text
-        XCTAssertEqual(text, "rescued")
+        do {
+            _ = try await manager.finish(id: id)
+            XCTFail("expected a failure")
+        } catch let RemoteTranscriptionManager.Failure.upstream(message, unavailable) {
+            XCTAssertEqual(message, "model failed")
+            XCTAssertFalse(unavailable)
+        }
     }
 
-    func testUpstreamFailureSurfaces() async throws {
+    func testAModelStillLoadingIsUnavailable() async throws {
         let manager = RemoteTranscriptionManager(provider: {
-            FakeProvider(openError: TranscriberError.noBasetenKey,
-                         fallback: { _ in throw TranscriberError.signInExpired })
+            FakeProvider(session: FakeSession(result: .failure(ParakeetEngine.EngineError.stillLoading)))
         })
         let id = try await manager.create()
         try await manager.append(id: id, pcm: sine(rate: 16_000, seconds: 0.1))

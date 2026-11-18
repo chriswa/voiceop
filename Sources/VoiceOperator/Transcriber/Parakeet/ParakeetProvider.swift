@@ -7,15 +7,9 @@ import Foundation
 ///
 /// It is fast enough (about 190× real time on an M4 Pro) that streaming would buy
 /// nothing: a session just collects the audio while the key is held and
-/// transcribes all of it at key-up. Failures are reported as failures — there is
-/// deliberately no fallback to another provider, which would hide how Parakeet
-/// actually behaves.
+/// transcribes all of it at key-up.
 struct ParakeetProvider: TranscriptionProvider {
     let id = TranscriptionProviderID.parakeet
-    let fallbackLabel = "Parakeet on the recorded clip"
-    /// The session only buffers audio; a failed commit is the model failing,
-    /// and running it again on the same audio would fail the same way.
-    let retriesAfterLiveFailure = false
     var modelName: String { "parakeet-tdt-0.6b-\(ParakeetEngine.version)" }
 
     func prewarm() async -> String? {
@@ -23,7 +17,7 @@ struct ParakeetProvider: TranscriptionProvider {
             _ = try await ParakeetEngine.shared.load()
             return nil
         } catch {
-            return TranscriberError.userMessage(for: error)
+            return TranscriptionFailure.message(for: error)
         }
     }
 
@@ -35,10 +29,6 @@ struct ParakeetProvider: TranscriptionProvider {
 
     func transcribe(wavData: Data) async throws -> Transcript {
         try await ParakeetEngine.shared.transcribe(pcm: WAVFile.parse(wavData).samples)
-    }
-
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript {
-        try await transcribe(wavData: wavData)
     }
 }
 
@@ -79,7 +69,7 @@ actor ParakeetEngine {
     static let knownVersions: [AsrModelVersion] = [.v2, .v3]
 
     /// How long a dictation waits for a load that is still under way — the app
-    /// was just launched, or Parakeet was just chosen. A normal load takes 0.2 s.
+    /// was just launched. A normal load takes 0.2 s.
     /// The CoreML compile (about 30 s) happens only when its cache is missing:
     /// the first load after a macOS update or a cleared cache, not after a
     /// rebuild. That and a first download take longer than this, and the

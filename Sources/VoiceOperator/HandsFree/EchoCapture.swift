@@ -25,11 +25,8 @@ import Foundation
 ///   trigger-word check would. Prints a table; writes the mixes to `mixes/`.
 ///
 /// Captures go to `~/Library/Application Support/VoiceOperator/echo-captures/`
-/// unless a directory is given. Recording the microphone to disk is refused
-/// in incognito (`save`).
+/// unless a directory is given.
 enum EchoCapture {
-    static let incognitoActivity = Incognito.Activity.persist("echo captures")
-
     /// Control-like replies, short to long. One says "Control", as a reply can.
     static let replies = [
         "First question: do you want me to merge it now, or wait for the tests?",
@@ -54,7 +51,6 @@ enum EchoCapture {
 
     /// The only way anything here reaches the disk.
     static func save(_ data: Data, to url: URL) throws {
-        try Incognito.check(incognitoActivity)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url)
     }
@@ -103,7 +99,6 @@ enum EchoCapture {
 
     @MainActor
     static func capture(into dir: URL?) async {
-        if let refusal = Incognito.refusal(incognitoActivity) { note("echo-capture: \(refusal)"); exit(1) }
         let out = dir ?? defaultRoot.appendingPathComponent(stamp())
         let route = OutputDevice.route
         note("echo-capture: playing \(replies.count) replies on \(OutputDevice.formatSummary) (route: \(route.rawValue)), "
@@ -167,7 +162,6 @@ enum EchoCapture {
 
     @MainActor
     static func capturePhrases(into dir: URL?) async {
-        if let refusal = Incognito.refusal(incognitoActivity) { note("echo-capture: \(refusal)"); exit(1) }
         let out = (dir ?? defaultRoot.appendingPathComponent("phrases-" + stamp()))
         note("echo-capture phrases: say each phrase when asked, as you would to cut Control off. Into \(out.path)")
         let recorder = AudioRecorder()

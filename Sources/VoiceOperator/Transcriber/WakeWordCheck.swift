@@ -7,12 +7,10 @@ import Speech
 /// Spaceterm's hands-free mode listens on whichever device is always-listening
 /// (the phone today) for speech that begins after a quiet spell. That device
 /// cuts out its first second or so and asks here, through spaceterm, whether
-/// it starts with "Control" — and only then opens a Wispr dictation, fed from
-/// the start of what was said.
+/// it starts with "Control" — and only then opens a dictation, fed from the
+/// start of what was said.
 ///
-/// Apple's on-device `SpeechTranscriber` (macOS 26), never Wispr: the clips are
-/// whatever was said in the room, and nothing of that may leave the Mac. The
-/// clip is held in memory for the length of the call and dropped; neither it
+/// Apple's on-device `SpeechTranscriber` (macOS 26). The clip is held in memory for the length of the call and dropped; neither it
 /// nor what it said is logged unless it matched.
 enum WakeWordCheck {
     /// `start`: the clip's first word is the wake word ("Control, what's…").
@@ -63,8 +61,6 @@ enum WakeWordCheck {
 
     /// Check 16-bit little-endian mono PCM at `sampleRate`.
     static func check(pcm: Data, sampleRate: Int, word: String, match mode: Match = .only) async throws -> Result {
-        // On-device, but the clip comes from Spaceterm's phone client.
-        try Incognito.check(.spaceterm("wake-word checks"))
         guard #available(macOS 26.0, *) else { throw Failure.unavailable }
         let started = Date()
         let heard = try await transcribe(pcm: pcm, sampleRate: sampleRate)

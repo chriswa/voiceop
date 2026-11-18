@@ -1,14 +1,13 @@
 import CoreAudio
 import Foundation
 
-/// Mutes the default system **output** device during dictation, the way Wispr
-/// does (DESIGN.md "Mute-during-dictation"): save the device's current mute
+/// Mutes the default system **output** device during dictation
+/// (DESIGN.md "Mute-during-dictation"): save the device's current mute
 /// state, set mute=true, and restore on stop — tracking `wasPreviouslyMuted` so
 /// we never unmute audio the user had already muted themselves.
 ///
-/// Wispr additionally gates this on MediaRemote now-playing state ("Skipping
-/// mute, media is not playing"); that uses a private framework, so v1 mutes
-/// unconditionally and restores. Refinement tracked in DESIGN.md.
+/// Gating this on MediaRemote now-playing state would need a private
+/// framework, so v1 mutes unconditionally and restores. Refinement tracked in DESIGN.md.
 final class OutputMuter {
     private var wasPreviouslyMuted: Bool?
 

@@ -25,15 +25,13 @@ import Foundation
 /// It detaches when asked (`/handsfree off`, the agent's `stop` tool, the menu),
 /// when the session ends (or its `claude` process is gone), when another session
 /// attaches, when hands-free ends under it (Spaceterm takes the microphone,
-/// "let me turn this off", incognito), but not when this app restarts: the
+/// "let me turn this off"), but not when this app restarts: the
 /// attachment is saved, and picked up again at launch.
 @MainActor
 final class VoiceMode {
     static let shared = VoiceMode()
     nonisolated static let clientName = "claude-code"
     nonisolated static let defaultTrigger = "claude"
-    /// What the user says goes to Claude, off this Mac.
-    static let incognitoActivity = Incognito.Activity.network("Claude Code voice mode")
     nonisolated static let stateURL = HistoryStore.supportDir.appendingPathComponent("voice-mode.json")
 
     struct Attachment: Codable, Equatable {
@@ -65,7 +63,6 @@ final class VoiceMode {
         case replaced(by: String)
         case taken(by: String)
         case shutdown
-        case incognito
         case handsFree(String)
 
         var description: String {
@@ -76,7 +73,6 @@ final class VoiceMode {
             case .replaced(let project): return "another Claude Code session (\(project)) took voice mode"
             case .taken(let by): return by == "spaceterm" ? "Spaceterm took hands-free back" : "\(by) took hands-free"
             case .shutdown: return "the user turned it off by voice"
-            case .incognito: return "incognito mode turned on"
             case .handsFree(let why): return "hands-free ended (\(why))"
             }
         }
@@ -228,7 +224,6 @@ final class VoiceMode {
     // MARK: - Attach and detach
 
     enum AttachError: Error, Equatable {
-        case incognito(String)
         case refused(HandsFreeService.Refusal)
     }
 
@@ -236,7 +231,6 @@ final class VoiceMode {
     /// The same session attaching again keeps its place (a new trigger word or
     /// voice takes effect); another session replaces it.
     func attach(sessionID: String, claudePID: Int32, cwd: String, trigger: String?, voice: String?) throws -> Attachment {
-        if let blocked = Incognito.refusal(Self.incognitoActivity) { throw AttachError.incognito(blocked.description) }
         let trigger = trigger.map { HandsFreePhrases.spokenWords($0).joined(separator: " ") }
             .flatMap { $0.isEmpty ? nil : $0 } ?? attachment?.trigger ?? Self.defaultTrigger
         if let current = attachment, current.sessionID != sessionID {
@@ -531,10 +525,6 @@ final class VoiceMode {
 
     private func takeInbox(whileWorking: Bool) -> String? {
         guard !inbox.isEmpty else { return nil }
-        if Incognito.refusal(Self.incognitoActivity) != nil {
-            inbox = []
-            return nil
-        }
         defer { inbox = [] }
         return inbox.map { $0.message(whileWorking: whileWorking) }.joined(separator: "\n\n")
     }
@@ -641,7 +631,6 @@ final class VoiceMode {
             case "restarting", "off": return   // this app quitting; or asked by us
             case "taken": detach(.taken(by: message["by"] as? String ?? "another app"))
             case "shutdown": detach(.shutdown)
-            case "incognito": detach(.incognito)
             default: detach(.handsFree(why))
             }
         default:

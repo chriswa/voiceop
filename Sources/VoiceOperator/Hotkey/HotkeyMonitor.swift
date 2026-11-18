@@ -1,8 +1,8 @@
 import AppKit
 import IOKit.hid
 
-/// Global trigger-key monitor. The trigger is the **Fn (Globe) key** — Wispr Flow
-/// has been retired, so we take over its key (DESIGN.md "Trigger key").
+/// Global trigger-key monitor. The trigger is the **Fn (Globe) key** (DESIGN.md
+/// "Trigger key").
 ///
 /// Fn is not an ordinary modifier: its flagsChanged event reports keycode 63
 /// (kVK_Function) with the kCGEventFlagMaskSecondaryFn bit (0x800000), rather
@@ -33,9 +33,8 @@ import IOKit.hid
 /// Other ways of ending a dictation (the `lockWindow` timer, a tap that was
 /// disabled mid-gesture, anything outside this class) stop immediately.
 ///
-/// `lockWindow` matches Wispr Flow's `DICTATION_DEBOUNCE_DELAY` (500 ms), which
-/// it likewise uses only to recognise a second quick press — never to delay the
-/// start of capture.
+/// `lockWindow` (500 ms) is used only to recognise a second quick press — never
+/// to delay the start of capture.
 ///
 /// ## Tap-to-toggle: a simpler alternative
 ///
@@ -273,7 +272,6 @@ final class HotkeyMonitor: @unchecked Sendable {
     private var shiftArmFlags: UInt64 = 0
 
     /// How long after key-down a second press still counts as "lock this on".
-    /// Wispr Flow's `DICTATION_DEBOUNCE_DELAY`.
     private let lockWindow: TimeInterval = 0.5
     /// How long recording keeps going after the key asks it to stop, so the last
     /// word is not clipped by a release or press that lands a little early.

@@ -10,7 +10,7 @@ import Foundation
 /// whole stream in order and be drained once with `flush()` at the end. At
 /// 16 kHz it is a pass-through. Not thread-safe; the owner confines it.
 final class PCM16Resampler {
-    static let outputRate = Int(OpusEncoder.sampleRate)
+    static let outputRate = 16_000
     static let supportedInputRates = 8_000...192_000
 
     let inputRate: Int

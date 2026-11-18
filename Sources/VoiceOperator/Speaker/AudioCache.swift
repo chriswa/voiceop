@@ -5,9 +5,6 @@ import CryptoKit
 /// replay any past utterance for free and re-cue instantly after a dictation
 /// barge-in (DESIGN.md). Entries older than `ttl` are reaped.
 struct AudioCache {
-    /// Speech audio is what was said, so incognito mode keeps it off the disk.
-    static let incognitoActivity = Incognito.Activity.persist("speech audio")
-
     let directory: URL
     let ttl: TimeInterval
     /// Folded into every key. The name the cache has always used, so entries
@@ -50,7 +47,6 @@ struct AudioCache {
     /// Store WAV bytes and return the file URL.
     @discardableResult
     func store(_ data: Data, text: String, voiceID: String) throws -> URL {
-        try Incognito.check(Self.incognitoActivity)
         let u = url(text: text, voiceID: voiceID)
         try data.write(to: u, options: .atomic)
         return u

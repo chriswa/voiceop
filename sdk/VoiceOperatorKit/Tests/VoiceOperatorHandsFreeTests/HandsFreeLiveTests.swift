@@ -75,7 +75,6 @@ final class HandsFreeLiveTests: XCTestCase {
             while !done(), let line = socket.readLine() { stream.receive(line: line) }
         }
         pump { stream.sessionID != nil || events.contains { if case .ended = $0 { true } else { false } } }
-        if case .ended("incognito") = events.last { throw XCTSkip("Voice Operator is in incognito mode") }
         XCTAssertNotNil(stream.sessionID, "no session: \(events)")
 
         // One second of silence, a tenth at a time.

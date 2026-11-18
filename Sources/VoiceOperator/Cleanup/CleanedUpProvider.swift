@@ -22,8 +22,6 @@ struct CleanedUpProvider: TranscriptionProvider {
 
     var id: TranscriptionProviderID { base.id }
     var modelName: String { base.modelName }
-    var fallbackLabel: String { base.fallbackLabel }
-    var retriesAfterLiveFailure: Bool { base.retriesAfterLiveFailure }
 
     func openSession(target: DictationTarget, trace: DictationTrace?) async throws -> any TranscriptionSession {
         Session(base: try await base.openSession(target: target, trace: trace), provider: self, trace: trace)
@@ -31,10 +29,6 @@ struct CleanedUpProvider: TranscriptionProvider {
 
     func transcribe(wavData: Data) async throws -> Transcript {
         await cleanUp(try await base.transcribe(wavData: wavData), trace: nil)
-    }
-
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript {
-        await cleanUp(try await base.transcribeAfterLiveFailure(wavData: wavData), trace: nil)
     }
 
     func prewarm() async -> String? { await base.prewarm() }

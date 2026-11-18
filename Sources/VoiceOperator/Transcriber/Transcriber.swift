@@ -1,60 +1,19 @@
 import Foundation
 
-/// Which transcription provider. A hard-coded list: adding one is a code change,
-/// and the menu offers exactly these.
+/// Which transcription provider, filed with what it recognizes.
 enum TranscriptionProviderID: String, CaseIterable, Codable, Sendable {
-    case wisprFlow = "wispr-flow"
     case parakeet = "parakeet"
 
     var displayName: String {
         switch self {
-        case .wisprFlow: return "Wispr Flow"
         case .parakeet: return "Parakeet (on this Mac)"
         }
     }
 }
 
-/// Which provider pastes, and which (if any) shadows it. Persisted in
-/// `UserDefaults` alongside the other preferences, so the choice survives
-/// relaunches.
+/// Dictation preferences, persisted in `UserDefaults` alongside the others.
 enum TranscriptionPreferences {
-    private static let primaryKey = "vo.transcriptionProvider"
-    private static let shadowKey = "vo.shadowTranscriptionProvider"
     private static let cleanupKey = "vo.dictationCleanup"
-
-    /// What dictation uses until the menu says otherwise: always Parakeet, even
-    /// on a Mac signed in to Wispr Flow. Wispr is only ever a deliberate choice.
-    static let defaultPrimary = TranscriptionProviderID.parakeet
-
-    /// The provider whose transcript is pasted.
-    static var primary: TranscriptionProviderID {
-        get {
-            // Service mode is on-device only, whatever a defaults domain says.
-            if ServiceMode.isService { return .parakeet }
-            return UserDefaults.standard.string(forKey: primaryKey).flatMap(TranscriptionProviderID.init) ?? defaultPrimary
-        }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: primaryKey) }
-    }
-
-    /// Whether a provider can be chosen at all on this Mac: Wispr Flow needs a
-    /// Wispr sign-in to borrow; Parakeet needs nothing.
-    static func isAvailable(_ id: TranscriptionProviderID) -> Bool {
-        switch id {
-        case .wisprFlow: return WisprToken.hasSession
-        case .parakeet: return true
-        }
-    }
-
-    /// A second provider fed the same audio, whose transcript is only kept for
-    /// comparison. Never the primary: choosing the shadow as primary clears it.
-    static var shadow: TranscriptionProviderID? {
-        get {
-            if ServiceMode.isService { return nil }
-            let id = UserDefaults.standard.string(forKey: shadowKey).flatMap(TranscriptionProviderID.init)
-            return id == primary ? nil : id
-        }
-        set { UserDefaults.standard.set(newValue?.rawValue, forKey: shadowKey) }
-    }
 
     /// Whether the primary's transcripts go through the on-device clean-up pass
     /// (`CleanedUpProvider`) before they are pasted. Off until chosen.
@@ -81,15 +40,15 @@ struct Transcript: Sendable, Equatable {
     var raw: String? = nil
     /// `text` word by word, punctuation attached as it is there, timed against
     /// the dictation's whole audio (every sample the session or the clip was
-    /// given, trimmed of nothing). Nil from a provider that gives no timings
-    /// (Wispr), and after a clean-up pass, whose text they would not describe.
+    /// given, trimmed of nothing). Nil when the model gives no timings, and after
+    /// a clean-up pass, whose text they would not describe.
     var words: [TranscribedWord]? = nil
 }
 
 /// Everything from the user's audio to the text that gets pasted — recognition
 /// and any clean-up pass behind it are one provider, not two stages the arbiter
 /// stitches together. `AudioArbiter` and `RemoteTranscriptionManager` only ever
-/// talk to this; each provider owns its own encoding, credentials and fallback.
+/// talk to this.
 protocol TranscriptionProvider: Sendable {
     var id: TranscriptionProviderID { get }
 
@@ -105,27 +64,13 @@ protocol TranscriptionProvider: Sendable {
     /// the debug CLI, and dictations whose live session never opened.
     func transcribe(wavData: Data) async throws -> Transcript
 
-    /// Transcribe a clip whose live session has just failed, *without* opening
-    /// another one: a fresh session would spend its whole hang guard again, so one
-    /// bad network moment would cost two timeouts back to back.
-    func transcribeAfterLiveFailure(wavData: Data) async throws -> Transcript
-
-    /// What `transcribeAfterLiveFailure` is called in traces ("raw /llm/asr").
-    var fallbackLabel: String { get }
-
-    /// Whether a failed live session is worth retrying on the recorded clip at
-    /// all. False for a provider whose live session *is* its only path, where a
-    /// retry would just fail the same way after the same wait.
-    var retriesAfterLiveFailure: Bool { get }
-
-    /// Warm connections, credentials and models so the first dictation is as
-    /// quick as the tenth. Returns why the provider cannot work at all, when that
-    /// is known before anyone dictates (no key, no model), else nil.
+    /// Load models so the first dictation is as quick as the tenth. Returns why
+    /// the provider cannot work at all, when that is known before anyone
+    /// dictates, else nil.
     func prewarm() async -> String?
 }
 
 extension TranscriptionProvider {
-    var retriesAfterLiveFailure: Bool { true }
     var modelName: String { id.rawValue }
 
     func transcribe(wavURL: URL) async throws -> Transcript {
@@ -135,25 +80,13 @@ extension TranscriptionProvider {
 
 /// The providers themselves, one instance each for the life of the process.
 enum TranscriptionProviders {
-    static let wisprFlow = WisprFlowProvider()
     static let parakeet = ParakeetProvider()
-
-    static func provider(_ id: TranscriptionProviderID) -> any TranscriptionProvider {
-        switch id {
-        case .wisprFlow: return wisprFlow
-        case .parakeet: return parakeet
-        }
-    }
 
     /// The provider whose transcript gets pasted, with the clean-up pass behind
     /// it when that is on.
     static var primary: any TranscriptionProvider {
-        let base = provider(TranscriptionPreferences.primary)
-        return TranscriptionPreferences.cleanup ? CleanedUpProvider(base: base) : base
+        TranscriptionPreferences.cleanup ? CleanedUpProvider(base: parakeet) : parakeet
     }
-
-    /// The provider shadowing it, if one is chosen.
-    static var shadow: (any TranscriptionProvider)? { TranscriptionPreferences.shadow.map(provider) }
 }
 
 /// One live dictation inside a provider. Fed audio while the user is still
@@ -162,8 +95,7 @@ protocol TranscriptionSession: Sendable {
     /// Newly captured 16 kHz mono PCM16, any length. Callers send in capture
     /// order and never concurrently (`TranscriptionLeg` chains them).
     func send(pcm: Data) async
-    /// The last of the audio, then the final text. Bounded by the provider's own
-    /// hang guard, after which it throws.
+    /// The last of the audio, then the final text.
     func commit(pcm: Data) async throws -> Transcript
     /// Abandon the session. Safe to call more than once.
     func cancel() async
@@ -175,59 +107,12 @@ struct DictationTarget: Sendable {
     var name: String?
 }
 
-enum TranscriberError: Error {
-    case notSignedIn
-    /// Every refresh token we hold has been spent or revoked, so only a fresh
-    /// sign-in in the Wispr Flow app can restore the chain.
-    case signInExpired
-    case http(status: Int, body: String)
-    case badResponse
-    /// No Baseten key, so the streaming path is unavailable.
-    case noBasetenKey
-    /// The server closed the stream without ever sending a result.
-    case streamEnded
-    /// Committed, but no result came back inside the hang guard.
-    case streamTimeout
-    /// The server answered with RESULT_STATUS_ERROR.
-    case serverError(String)
-}
-
-extension TranscriberError {
-    /// Short human-readable reason, shown in the history menu after a failure.
-    var userMessage: String {
-        switch self {
-        case .notSignedIn:
-            return "not signed in to Wispr Flow"
-        case .signInExpired:
-            return "Wispr sign-in expired — open Wispr Flow and sign in"
-        case .http(let status, let body):
-            // The API's error bodies look like {"detail": "Request timed out"}.
-            if let obj = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any],
-               let detail = obj["detail"] as? String, !detail.isEmpty {
-                return "HTTP \(status) — \(detail)"
-            }
-            return "HTTP \(status)"
-        case .badResponse:
-            return "bad server response"
-        case .noBasetenKey:
-            return "no Baseten key"
-        case .streamEnded:
-            return "stream closed with no result"
-        case .streamTimeout:
-            return "no result after commit"
-        case .serverError(let detail):
-            return detail
-        }
-    }
-
+/// Short human-readable reasons for transcription failures.
+enum TranscriptionFailure {
     /// A short display message for any error a transcription attempt can throw
-    /// (TranscriberError, URLError, WAV parse failures, …).
-    static func userMessage(for error: Error) -> String {
+    /// (model load failures, WAV parse failures, …), shown in the history menu.
+    static func message(for error: Error) -> String {
         switch error {
-        case let e as TranscriberError: return e.userMessage
-        case let e as Incognito.Blocked: return e.description
-        case let e as URLError where e.code == .timedOut: return "network timeout"
-        case let e as URLError where e.code == .notConnectedToInternet: return "no internet connection"
         case is WAVFile.WAVError: return "unreadable audio file"
         default: return error.localizedDescription
         }

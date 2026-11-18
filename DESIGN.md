@@ -26,15 +26,15 @@ reachable instance. `version` is the API generation: 2 added `/v1/status` and
 
 | Method | Path | Meaning |
 | --- | --- | --- |
-| `POST` | `/v1/speech` | Queue `{text, voice?}` — or `{parts: [{text, voice?}, …]}` for one job in several voices — and return `202` + job id. With `client` and `device` it is spoken on that device instead (see "Speech on a device"): `404 unknown_device` when none by that name is connected, `403 incognito` in incognito mode. `400` for a body with both or neither of `text`/`parts`, an empty `parts` (`parts_empty`), or a part with blank text (`part_text_required` + `index`); `422 text_too_long` past 50 000 scalars of the joined text; `503 speech_muted`. |
+| `POST` | `/v1/speech` | Queue `{text, voice?}` — or `{parts: [{text, voice?}, …]}` for one job in several voices — and return `202` + job id. With `client` and `device` it is spoken on that device instead (see "Speech on a device"): `404 unknown_device` when none by that name is connected. `400` for a body with both or neither of `text`/`parts`, an empty `parts` (`parts_empty`), or a part with blank text (`part_text_required` + `index`); `422 text_too_long` past 50 000 scalars of the joined text; `503 speech_muted`. |
 | `GET` | `/v1/speech/{id}?wait=0..30[&since=N]` | Inspect or long-poll a job. Pending is `202`; complete is `200`; a dictation barge-in is `409`; cancellation/mute flush is `410`; synthesis failure is `500`. |
 | `DELETE` | `/v1/speech/{id}` | Halt immediately if audible, otherwise retract it. |
 | `GET` | `/v1/voices` | Return the currently available external Kokoro voices. |
-| `GET` | `/v1/status` | `{version, build, commit, pid, status, dictating, restart}` — which build is running and what it is doing. `status` is the menu-bar state (`idle`, `listening`, `transcribing`, `speaking`, …); `restart` is `none`, `pending`, or `restarting`. |
+| `GET` | `/v1/status` | `{version, build, commit, pid, status, dictating, restart, stream}` — which build is running and what it is doing. `status` is the menu-bar state (`idle`, `listening`, `transcribing`, `speaking`, …); `restart` is `none`, `pending`, or `restarting`. |
 | `POST` | `/v1/restart` | Ask the app to relaunch itself. `200 {"restart":"restarting"}` when idle; `202 {"restart":"pending","reason":"dictating"}` when a dictation is in flight — it fires once that dictation has been pasted. Idempotent. |
-| `POST` | `/v1/transcriptions` | Open a remote dictation. Optional body `{"sample_rate": N}` (default 16000; any rate 8000–192000 is resampled to 16 kHz). Opens the Flow stream immediately, as key-down does. `201 {"id"}`; `400` bad body; `422` unsupported rate. |
-| `POST` | `/v1/transcriptions/{id}/audio` | Raw s16le mono PCM at the session's rate (`application/octet-stream`, chunks may split samples). Encoded to opus and streamed up as it arrives. `204`; `404` unknown id; `409` already finished. |
-| `POST` | `/v1/transcriptions/{id}/finish` | Commit and wait for the formatted transcript: `200 {"text", "words"?, "audio_started_at"?}` (`""` for no audio). `words` is `[{"word","start_ms","end_ms"}]`, in ms from the first sample of the audio sent; `audio_started_at` is the wall-clock ms that sample was made, as well as the chunks' arrival can tell (see "Word timings"), so a word's wall time is `audio_started_at + start_ms`. Both are absent when the provider gives no timings (Wispr) or a clean-up pass rewrote the text. `502`/`503` `{"error":"transcription_failed","detail"}` on upstream failure (503 = signed out); `404`/`409` as above. |
+| `POST` | `/v1/transcriptions` | Open a remote dictation. Optional body `{"sample_rate": N}` (default 16000; any rate 8000–192000 is resampled to 16 kHz). Opens the provider's session immediately, as key-down does. `201 {"id"}`; `400` bad body; `422` unsupported rate. |
+| `POST` | `/v1/transcriptions/{id}/audio` | Raw s16le mono PCM at the session's rate (`application/octet-stream`, chunks may split samples). Resampled and handed to the session as it arrives. `204`; `404` unknown id; `409` already finished. |
+| `POST` | `/v1/transcriptions/{id}/finish` | Commit and wait for the transcript: `200 {"text", "words"?, "audio_started_at"?}` (`""` for no audio). `words` is `[{"word","start_ms","end_ms"}]`, in ms from the first sample of the audio sent; `audio_started_at` is the wall-clock ms that sample was made, as well as the chunks' arrival can tell (see "Word timings"), so a word's wall time is `audio_started_at + start_ms`. Both are absent when a clean-up pass rewrote the text. `502`/`503` `{"error":"transcription_failed","detail"}` when transcription fails (503 = the model is still loading); `404`/`409` as above. |
 | `DELETE` | `/v1/transcriptions/{id}` | Discard a session in any state. `204`; `404` unknown id. |
 
 **Word timings.** Parakeet's words come back on both paths: `words` on the
@@ -58,12 +58,9 @@ starts after a long silence 200–440 ms early, and the ends of sentence-final
 words up to 0.6 s late. Good enough for "the frame when they said this".
 
 Remote transcription (`RemoteTranscriptionManager`) exists for the Spaceterm
-phone client, relayed by the Spaceterm server: browsers cannot speak Wispr's
-gRPC, and Supabase's rotating refresh tokens mean only one process may own the
-Wispr session. Each session takes the same path as a local dictation — a
-`FlowSession` on the shared `FlowChannel` with the user's dictionary, falling
-back to raw `/llm/asr` on the whole clip when there is no Baseten key or the
-stream fails — but touches none of the local dictation machinery (no paste,
+phone client, relayed by the Spaceterm server. Each session takes the same path
+as a local dictation — a `TranscriptionLeg` on the primary provider, which
+transcribes the whole clip if its session never opened — but touches none of the local dictation machinery (no paste,
 cues, overlay or muting), so it can run alongside one. Each logs one
 `trace remote#N` line. Sessions idle over 120 s are cancelled, finished ones are
 forgotten after the same interval, and open or finishing sessions defer a
@@ -193,7 +190,7 @@ key-down while audio already flows:
 
 Once resolved the mode is latched for the whole dictation; releasing Control
 mid-dictation does not downgrade it, and the second press of a double-tap lock
-does not re-open it. Nothing on the capture path (mic, gRPC stream, upload pump)
+does not re-open it. Nothing on the capture path (mic, provider session, upload pump)
 consults the mode, so the window costs no recording latency. The only consumers
 are the start cue, menu-bar tint, end cue, and paste-vs-route, and the earliest of
 those — the "safe to talk" chirp — waits for CoreAudio's first buffer, which has
@@ -202,46 +199,13 @@ The window is therefore all but free; widening it would start delaying that chir
 Every dictation's trace records `mode=<paste|command>@<ms>` so a mis-read chord
 is diagnosable from one log line.
 
-### English transcription preference (2026-07-27, reversed 2026-08-02)
-
-The current Wispr Flow bundle's `transcribeOpenAIAudio` derives a single
-selected language and sends it as the string `language` in `/llm/asr` (for
-English, `"en"`). Voice Operator supplies `"en"` for dictation. Its gRPC replica
-has an unresolved protobuf `Language` enum and therefore cannot reliably send
-that preference.
-
-**Original (2026-07-27):** when a language was requested, `WisprFlowTranscriber`
-used the confirmed raw `/llm/asr` path rather than silently language-detecting —
-trading server formatting for correct language selection.
-
-**Reversed (2026-08-02):** that gate made the formatted path *unreachable*.
-`AudioArbiter` passes `"en"` at every call site, so `!language.isEmpty` was
-always true and the Baseten-key branch below it never ran — the app silently
-served raw Whisper no matter how it was configured. Voice Operator is
-single-user and English-only, so server-side language detection is reliable
-here and the formatted result is worth more than the explicit preference. The
-gate is gone; `language` now applies to the fallback path only.
-
-Confirm which path a dictation took with `grep "flow:" ~/Library/Logs/VoiceOperator.log`
-— `flow: gRPC ok — N chars` is the formatted path.
-
 The historical design notes below describe the retired agent-narration system;
 they are retained only as reverse-engineering history and are superseded by this
 section.
 
-FEATURE: A native macOS menu-bar app that unifies dictation (replacing Wispr Flow) and
+FEATURE: A native macOS menu-bar app that unifies dictation and
 spoken Claude Code updates (replacing `transcript-reader.py`) under one audio coordinator,
 so dictation always mutes/halts TTS and no spoken update is ever missed.
-
-CAVEATS:
-- STT depends on a valid Wispr Flow account/subscription. We lift the Supabase token Wispr
-  already stored; Wispr must stay installed + logged-in at least once to seed the refresh
-  token. This is deliberate for now (chosen over reimplementing their login).
-- We are consuming Wispr's private, unversioned HTTP/WebSocket endpoints. They can change
-  without notice. Everything Wispr-specific is quarantined behind the `Transcriber` protocol
-  so a future local/on-device engine (or a vendor swap) is a drop-in replacement.
-- Lifting/using a live auth token is inherent to approach "A". The token is read at runtime
-  from Wispr's `session.json` and never copied into this repo, logs, or committed files.
 
 ---
 
@@ -261,83 +225,43 @@ In:
   quick **Pause** toggle (for meetings).
 
 Out (deferred):
-- Historical replay UI. On-device STT/TTS. Reimplementing Wispr login.
+- Historical replay UI.
   (Command mode — including addressing an agent by call-sign and asking the summarizer about
   its work — has since shipped; see [Voice commands](#voice-commands-command-mode).)
-- Formatting note: v1 **does** match Wispr's text formatting via their `/llm` endpoints
-  (chosen over shipping raw ASR first).
 
 ---
 
-## Reverse-engineering findings (Wispr Flow 2026-07, `com.electron.wispr-flow`)
+## Dictation pipeline
 
-### Auth — Supabase JWT (approach A: lift the stored token)
-- `~/Library/Application Support/Wispr Flow/session.json` holds
-  `sb-dodjkfqhwrzqjwkfnthl-auth-token` = `{access_token, refresh_token, expires_at,
-  expires_in(=604800, 1wk), token_type, user}`.
-- `access_token` is a Supabase HS256 JWT: `iss=https://dodjkfqhwrzqjwkfnthl.supabase.co/auth/v1`,
-  `aud=authenticated`. Sent as `Authorization: Bearer <jwt>` to `api.wisprflow.ai`.
-- Refresh ourselves (no Wispr app needed at refresh time) via the standard Supabase endpoint:
-  `POST https://dodjkfqhwrzqjwkfnthl.supabase.co/auth/v1/token?grant_type=refresh_token`
-  with the `apikey` (the Supabase anon key is embedded in the bundle) + `{refresh_token}`.
-
-### STT — HTTP + WebSocket (NOT gRPC)
-The `application/grpc+proto` / `loadPackageDefinition` strings in the bundle are grpc-js's
-internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/WebSocket.
-- Hosts (bundle constants): `https://api.wisprflow.ai` (primary), `https://api-east.wisprflow.ai`
-  (failover), `wss://api.wisprflow.ai/` + `wss://api-east.wisprflow.ai/`, local dev
-  `http://127.0.0.1:8000` / `ws://127.0.0.1:8300/`.
-- **Streaming (primary)**: WebSocket under `wss://api.wisprflow.ai/…/ws`. Sends opus
-  `audio_chunks`; receives `partial_transcript` (and final). Mic audio is Opus-encoded
-  (`opusEncoder.worker.js`), ~16 kHz mono (`sample_rate`).
-- **Fallback (simplest to replicate first)**: `POST /llm/asr` and `POST /llm/asr_audio_chunks`
-  (`transcribeOpenAIAudio` / `transcribeOpenAIAudioChunks`, 20 s timeout) — Whisper-based.
-- **Chunking (confirmed from Flow 1.5.1095)**: `/llm/asr` enforces a hard ~20 s server-side
-  budget — it answers `408 {"detail":"Request timed out"}` beyond it — so it can only handle a
-  short clip per request. Flow never sends long audio in one call: it cuts dictations into
-  **28-second chunks** (`basetenChunkSizeSeconds = 28`), transcribes each chunk as it
-  accumulates mid-dictation (sequentially, one in flight), and joins per-chunk transcripts
-  with a single space (`prevAsrText()`, empty chunks dropped). Cuts are fixed-length — no
-  silence detection. Flow also caps a dictation at 20 min (warning at 19).
-  **This 28 s chunking applies only to the raw `/llm/asr` HTTP path** — it exists to dodge that
-  endpoint's 20 s server budget. The primary gRPC stream has no such limit and is never
-  re-cut; see "Streaming dictation" below. `WisprTranscriber.transcribe` still chunks any
-  >28 s WAV it is handed, because that is the endpoint with the budget.
-- **Silence never drops audio (decoded 2026-07-15).** Flow's send loop pushes *every*
-  captured packet through transcription — there is no per-chunk volume/silence gate in the
-  send path. Its silence tracking (`silentStreamStreakMs`, `longestSilentStreakMs`,
-  `silenceAccruedMs`, `numConsecutiveSilentFrames`) drives only (a) **auto-stop** — a 30 s
-  silent streak / 10 min accrued-silence "arm" ends the recording (`RecordingStoppedSilence`,
-  `noteAutoStop("silence")`) — and (b) **dead-mic watchdogs** (`firstFrameWatchdog`,
-  `silentWatchdog`). Audio quality (`SNR<5dB`, `volume<-70dB`, `alignment<0.15`) is judged
-  *after* transcription and only raises a `poorAudioQuality` user notice; it never discards
-  text. We mirror this: the upload pump sends every encoded packet, and the single silence
-  decision is the whole-clip peak/RMS gate in `endDictation` (i.e. skip only when the entire
-  recording was silent). An earlier per-chunk gate that dropped individual 28 s slices judged
-  in isolation lost soft words and boundary-split words and was removed.
-- **Transcription providers (2026-10-11).** Everything from captured audio to pasted text —
+- **Transcription providers.** Everything from captured audio to pasted text —
   recognition plus any clean-up pass — is one `TranscriptionProvider`
-  (`Transcriber/Transcriber.swift`); the arbiter and the remote (phone) path know nothing
-  else. A provider opens a `TranscriptionSession` that takes plain 16 kHz PCM16 while the key
-  is held and commits at key-up; it owns its own encoding, credentials, fallback
-  (`transcribeAfterLiveFailure`) and health reason. `TranscriptionLeg` is one provider's share
-  of one dictation — open-while-the-mic-starts, buffer until open, chained in-order sends,
-  open-grace, commit, fallback — shared by `AudioArbiter` and `RemoteTranscriptionManager`.
-  The primary is Parakeet until the menu says otherwise, on every Mac — Wispr Flow is only
-  ever a deliberate choice, greyed out in the menu without a Wispr sign-in to borrow
-  (`WisprToken.hasSession`), and nothing Wispr runs unless it is chosen.
-  Providers are a hard-coded list (`TranscriptionProviderID`): **Wispr Flow**
-  (`Transcriber/WisprFlow/`, opus-encoded inside `WisprFlowSession`) and **Parakeet**
-  (`Transcriber/Parakeet/`, FluidAudio, buffers and transcribes at key-up, never retries and
-  never falls back to Wispr). The menu picks the primary and an optional **shadow**: a second
-  leg fed the same audio whose result is filed on the history entry (`ShadowTranscript`) for
-  comparison. The shadow never pastes, never delays anything, and never touches
-  `StreamHealth`, which follows the primary only. Remote dictation uses the primary, without
-  a shadow (it has no history entry to file one on).
+  (`Transcriber/Transcriber.swift`); the arbiter, hands-free and the remote (phone) path know
+  nothing else. A provider opens a `TranscriptionSession` that takes plain 16 kHz PCM16 while
+  the key is held and commits at key-up. `TranscriptionLeg` is one provider's share of one
+  dictation — open-while-the-mic-starts, buffer until open, chained in-order sends,
+  open-grace, commit — shared by `AudioArbiter`, `HandsFreeService` and
+  `RemoteTranscriptionManager`. If the session never opened (or not within the grace), the
+  leg transcribes the recorded clip whole; a failed commit throws, since running the model
+  again on the same audio would fail the same way. The only provider is **Parakeet**
+  (`Transcriber/Parakeet/`, FluidAudio, on device), which buffers the audio and transcribes
+  all of it at key-up; `TranscriptionProviders.primary` wraps it in `CleanedUpProvider`
+  when clean-up is on.
+- **Provider health (`StreamHealth`).** A Parakeet model that failed to load, or a dictation
+  that failed, would otherwise only show as nothing pasted. The model is loaded at launch
+  (`AudioArbiter.prewarm`), and any failure turns `StreamHealth` to `degraded`: the menu
+  carries `⚠︎ Parakeet is failing: <reason>`, the icon wears an amber badge in every state,
+  the log gets one `stream health: WARNING degraded` line per transition, `/v1/status`
+  reports `"stream":"degraded"` + `stream_reason`, and `restart-app.sh` prints a WARNING. The
+  next successful dictation clears it.
+- **Silence never drops audio.** The upload pump sends every captured slice, and the single
+  silence decision is the whole-clip peak/RMS gate in `endDictation` (skip only when the
+  entire recording was silent). Judging slices in isolation would lose soft words and
+  words split across a boundary.
 - **Dictation corpus (2026-10-31).** `DictationCorpus` appends one line to
   `dictation-corpus/entries.jsonl` for every recognition from local dictation, command mode,
-  history retries, phone and hands-free dictation: source, provider, model, whether the
-  fallback ran, the recognized text before shaping and clean-up, the cleaned text, length,
+  history retries, phone and hands-free dictation: source, provider, model, whether it came
+  from the recorded clip because the session never opened (`fellBack`), the recognized text
+  before shaping and clean-up, the cleaned text, length,
   input device, app version and the clip's path. Phone and hands-free clips live in
   `dictation-corpus/clips/`, since nothing else keeps them. It exists to score recognition
   and to train on this user's voice, so it is never pruned.
@@ -374,42 +298,29 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
     the raw transcript, marks `cleanup-failed` in the dictation's `trace` line and logs why;
     a status line under the checkbox warns while the server is not answering. Warm, a clean-up adds
     about 0.4–0.6 s after Parakeet's result. Live-test with `--cleanup-test [text]`.
-- **Streaming dictation (2026-08-04).** The trigger key going down starts three things at
-  once: the microphone, the duplex gRPC stream, and a 100 ms upload pump
-  (`AudioArbiter.pumpAudio`) that hands each new slice of captured PCM to the provider's
-  session (for Wispr, `WisprFlowSession` opus-encodes it and pushes it up the open stream). Key-up sends the tail with `commit: TRUE` and closes the request stream, so
-  the only latency the user sees is the tail plus the server's formatting pass — flat
-  regardless of dictation length. This replaced a post-hoc unary call that uploaded nothing
-  until the key came up (and dialled a fresh TLS connection per call, and cut anything over
-  28 s into sequential round trips), which is why a 25 s dictation used to take ~5 s and a 50 s
-  one ~10 s. Timings for every phase land in one `trace …` line per dictation
+- **Streaming dictation.** The trigger key going down starts three things at
+  once: the microphone, the provider's session, and a 100 ms upload pump
+  (`AudioArbiter.pumpAudio`) that hands each new slice of captured PCM to the session.
+  Key-up commits the tail, so the user waits only for the tail plus recognition (and
+  clean-up, when on). Timings for every phase land in one `trace …` line per dictation
   (`DictationTrace`); the numbers that matter are `audio` (when the mic actually went live) and
   `result - commit` (everything the user waits for).
 - **Trigger-key timing.** Recording begins on key-**down**, never after a hold threshold. The
   hold-vs-tap-vs-double-tap ambiguity is resolved on the *stop* side instead: a release inside
-  `lockWindow` (500 ms, Wispr's `DICTATION_DEBOUNCE_DELAY`) keeps recording until the window
+  `lockWindow` (500 ms) keeps recording until the window
   closes, and a second press inside it sets transcribe lock. Audio we turn out not to need is free;
   audio we failed to capture is gone. The old 250 ms `holdThreshold` was the main cause of
   dropped opening words. Consequently the start cue now fires on the first real microphone
   buffer (`AudioRecorder.onFirstAudio`) rather than on key-down — it means "safe to talk", so
   it has to be true — and since the mic therefore hears the cue,
   `AudioRecorder.meteringLeadInSeconds` keeps it out of the silence gate's measurement.
-- **Formatting / cleanup**: other `/llm/*` REST endpoints, e.g. `/llm/extract_asr_words`,
-  `/llm/flow_state_2025`. Proper-noun/punctuation/formatting live here (client dictionary +
-  server LLM). Exact request bodies still to be decoded in the spike.
 
-### Text insertion — Swift helper, clipboard + ⌘V + restore
-- A native Swift helper receives a `PasteText` IPC request (~35–41 ms). It:
-  1. Registers a **lazy** `NSPasteboard` data provider (renders `public.utf8-plain-text` only
-     when the target requests it).
-  2. Synthesizes ⌘V.
-  3. Schedules **clipboard restoration ~500 ms later**, restoring all saved types (observed 3).
-- `AXManualAccessibility` is set on the target app only to *read* context (focused textbox,
-  `AXWebArea` URL, Cursor/Electron special-casing). Insertion is clipboard-based because
-  `AXValue` setting is unreliable across apps (routine `-25205` failures, e.g. Sublime).
-- Post-paste async **insertion verification** reads the textbox back; a trailing-boundary NBSP
-  trick is applied by the paste policy.
-- Ours offers a second technique, switchable from the menu's **Type Text Instead of Pasting**
+### Text insertion — clipboard + ⌘V + restore
+- `TextInserter` saves the pasteboard, writes the text (marked transient and concealed for
+  clipboard managers), synthesizes ⌘V, and **restores the saved clipboard ~500 ms later**.
+  Insertion is clipboard-based because setting `AXValue` is unreliable across apps (routine
+  `-25205` failures, e.g. Sublime).
+- It offers a second technique, switchable from the menu's **Type Text Instead of Pasting**
   checkbox (`PastePreferences`, default off): `KeystrokeTyper` synthesizes one key event per
   grapheme, off the main thread. It never touches the pasteboard, and a newline
   goes out as ⇧↩ so a chat box or Claude Code does not read it as "send". It exists because some
@@ -432,13 +343,12 @@ internal channelz/xds plumbing — a red herring. The ASR path is plain HTTP/Web
   than ignoring it, which is what lets ⌘⌃V and ⌘⌃⇧V share a keycode — and stops a stray Shift
   aliasing any other chord onto its handler.
 
-### Mute-during-dictation — CoreAudio device mute, gated on now-playing
-- On `RecordingStarted`: `shouldMuteAudio: 1` → Volume Manager checks now-playing; if media is
-  playing it saves state and `Set system mute state to true for device <id>` (the default
-  output device, `kAudioDevicePropertyMute`). If nothing is playing: `Skipping mute`.
-- On stop: restores, tracking `wasPreviouslyMuted` so we never unmute audio the user had muted.
+### Mute-during-dictation — CoreAudio device mute
+- At dictation start `OutputMuter` saves the default output device's mute state and sets
+  `kAudioDevicePropertyMute`; on stop it restores, tracking `wasPreviouslyMuted` so we never
+  unmute audio the user had muted.
 - It is a **system output-device mute**, not a Spotify-specific pause.
-- Ours mutes unconditionally (no now-playing gate), but it is switchable: the menu's
+- It mutes unconditionally (no now-playing gate), but it is switchable: the menu's
   **Mute System Audio While Dictating** checkbox (`AudioPreferences`, default on) sets
   `OutputMuter.isEnabled`. `restore()` stays ungated, so turning it off mid-dictation
   still unmutes an output we had already muted.
@@ -620,10 +530,8 @@ stop listening), starts it again when audio resumes, and ends the session on
 give-up (`session-ended`, why `microphone`).
 
 ### Trigger key
-- Wispr uses Fn (keycode 63) via a "Keyboard Service" push-to-talk (`Ptt action down`).
-- **Ours**: default to **Right Shift (keycode 60)** during development via a `CGEventTap` on
-  `flagsChanged`, configurable, so Wispr Flow (still on Fn) keeps working in parallel until we
-  retire it. Migrate to Fn later. (macOS "double-tap Fn" dictation already disabled by user.)
+- The trigger is **Fn (Globe, keycode 63)**, read by a `CGEventTap` on `flagsChanged`
+  (`HotkeyMonitor`). (macOS "double-tap Fn" dictation is disabled by the user.)
 
 #### Two invariants the key path must keep (2026-08-12)
 
@@ -694,7 +602,7 @@ recovery, phone or API dictation — stop immediately. The key-up cue and the
 
 #### Transcript style — left Shift while recording (2026-08-14)
 
-Wispr returns a finished *sentence*: first word capitalised, terminal full stop.
+Recognition returns a finished *sentence*: first word capitalised, terminal full stop.
 That is wrong when the transcript is being injected into the middle of a line
 already written, and hand-editing after every such paste is what this removes.
 
@@ -754,7 +662,7 @@ Core/
   AudioArbiter        the brain: mute + halt + TTS queue + coordination invariant
   NameVoiceRegistry   gender-aligned name allowlist; sticky (claudeSessionId, spaceTermId)->(name,voice); idle TTL
   AudioCache          TTS PCM cached by (text, voiceId) hash, >=1 day, free replay
-Transcriber/  (protocol Transcriber)   WisprTranscriber today (WS + /llm HTTP); LocalWhisper later
+Transcriber/  (protocol TranscriptionProvider)  ParakeetProvider (on device, FluidAudio)
 Speaker/      (protocol SpeechSynthesizer)  KokoroSynthesizer (local kokoro-82m HTTP, streaming)
 Inserter/                              Swift paste helper (lazy clipboard + Cmd-V + restore + AX ctx)
 ClaudeWatcher/                         ports transcript-reader.py: tail, Haiku-summarize, spaceterm sock
@@ -792,8 +700,7 @@ old `tts` repo with its history, 2026-10-07; see `kokoro/CLAUDE.md`).
 **Service (2026-10-07; local only since 2026-10-13).** Speech always goes to the local
 Kokoro at `KokoroSynthesizer.baseURL` (`127.0.0.1:56841`). The custom-server option
 (`TTSProvider.custom`, `config.json` `tts.url`/`tts.headers`, `$VOICEOP_KOKORO_URL`) was
-removed with incognito mode so that what is spoken cannot leave the Mac; recover it from
-git history if a remote server is ever needed again. The local server is installed and run by `KokoroService`: the
+removed; recover it from git history if a remote server is ever needed again. The local server is installed and run by `KokoroService`: the
 server files ship in `Contents/Resources/kokoro`, Install builds a venv on a private
 uv-managed Python 3.13 in Application Support (using the Mac's `uv`, or a pinned, checksummed
 download) and bootstraps one launchd agent (`com.chriswa.voiceoperator.kokoro`, `KeepAlive`,
@@ -991,8 +898,7 @@ microphone (`aec.wav`) and `capture.json` with levels per reply;
 `--echo-capture phrases [dir]` records the user's cut-in phrases; `--echo-replay
 <capture> [phrases]` runs the speech detector over each reply raw and
 cancelled, lays each phrase over each reply, and asks the trigger-word check
-what it hears. Captures go to `echo-captures/` in Application Support, and are
-refused in incognito.
+what it hears. Captures go to `echo-captures/` in Application Support.
 
 **Speech waits for the user** while hands-free on the Mac takes a dictation
 down or sends it (`SpeechJobManager.setHandsFreeHearing`), as it does for a
@@ -1004,11 +910,8 @@ status has no colour of its own (`HandsFreeLook`): a washed-out rainbow while
 the trigger word is needed, a full rainbow in the conversation window, red
 while it takes a dictation down and yellow while it sends it — as a Fn
 dictation and transcribing are. Speech (green, cyan) and anything a Fn
-dictation does win over it. (Incognito ends hands-free, so the sunglasses never wear it.)
+dictation does win over it.
 `--icon-preview` draws them all.
-
-**Incognito** ends every session and refuses new ones: what hands-free hears
-goes to a client.
 
 **Debugging it.** `hands-free/decisions.jsonl` in Application Support has a
 line per decision, with the clip it was made on in `clips/`: `check` (what
@@ -1092,7 +995,7 @@ too: Voice Operator sends it as an ordinary transcript.
 | Message | Meaning |
 | --- | --- |
 | `session {source, session?, conversationMs}` | On. `conversationMs`: the menu's Hands-Free Listening Timeout, a suggestion for how long the client keeps attention engaged through quiet. |
-| `session-ended {why}` | Off: `off`, `shutdown` (said by voice), `replaced`, `lost`, `restarting` (Voice Operator is quitting — a client may keep hands-free on and start it again when it is back), `incognito`, `unsupported_audio`. |
+| `session-ended {why}` | Off: `off`, `shutdown` (said by voice), `replaced`, `lost`, `restarting` (Voice Operator is quitting — a client may keep hands-free on and start it again when it is back), `unsupported_audio`. |
 | `state {phase, conversation, closesAt, checking, pending, standingAside, quiet, attention}` | `phase`: `off`, `listening`, `hearing` (the user is being dictated — hold your own voice), `sending`. `attention`: as the client last set it; `conversation`: it is `engaged`. `closesAt` (wall ms) when the client said the window closes if nobody speaks; null while held open. `quiet`: nobody is speaking on the source, and nothing is checked, dictated or stood aside for — what a client times attention by. `pending`: speech that needs the trigger word is undecided — play a "deciding" beep while true. `standingAside`: while `listening`, why it is not listening to the microphone just now (see "When it does not listen"): `speech` (our own voice is playing where the microphone hears it — Voice Operator on the Mac's speakers, the client's voice on a device without echo cancellation — and its tail), `sound` (the client's other sound, a cue), `dictation` (a Fn dictation has the Mac's microphone); null otherwise. Sent on change. |
 | `gauge {quietSince, patienceMs, mini, miniPeak, miniThreshold}` | While dictating: the quiet since `quietSince` (wall ms; null while they talk) ends it at `patienceMs`. `mini` is turn-1-mini's latest answer and `miniPeak` its highest since the pause began (null while they talk), against `miniThreshold` (0.5 on trial; the model card's points are 0.06–0.17): it ends the dictation, 0.5 s after it first reaches the threshold in a silence unless speech comes back first. Data points, sent on change — animate between them. |
 | `cue {name, haptic?}` | `ready`, `dictationStart` (tap), `dictationEnd` (double), `notWakeWord` (the alarm: speech without the trigger word while attention has lapsed — every time; the client counts them and dismisses attention when it has played enough), `conversationClosed` (triple; attention stopped being engaged), `shutdown`, `error`. The client decides how each sounds or feels. |
@@ -1217,15 +1120,11 @@ detaches on:
 - `session.end`
 - its `claude` pid gone (checked every 5 s)
 - another session attaching
-- hands-free ending under it: `taken`, `shutdown` by voice, incognito, the
+- hands-free ending under it: `taken`, `shutdown` by voice, the
   microphone giving up
 
 A session it detached from for any reason it did not ask for is told on its
 next typed prompt.
-
-**Incognito.** Attaching refuses (`.network("Claude Code voice mode")`, 403),
-and nothing waiting in `inbox` is handed out. Hands-free's own incognito
-handling ends the session.
 
 **Testing.** `POST /v1/voice-mode/simulate {text}` acts as if hands-free heard
 `text`. Before pushing a change to the mod, load it for real:
@@ -1256,8 +1155,8 @@ beside the app, sharing nothing at runtime (vibeagame runs one for its phone app
   speaker devices, remote transcription), Parakeet (forced, whatever any defaults say), and Kokoro.
   Nothing else: no menu bar, hotkeys, Mac microphone (a `start source:mac` is ended with
   `why: no-microphone`), Mac playback (`POST /v1/speech` without `device` is 400 `device_required`),
-  cues, Wispr, clean-up, voice mode, launch at login or restart. Incognito, the echo experiment and
-  the conversation timeout are fixed at off/off/15 s. The bundle has its own id
+  cues, clean-up, voice mode, launch at login or restart. The echo experiment and
+  the conversation timeout are fixed at off and 15 s. The bundle has its own id
   (`com.chriswa.voiceoperator.service`), so no UserDefaults are shared with the app.
 - **Kokoro** is the service's child process on its own port (default 56851, never 56841), installed
   into `<home>/kokoro` on first run as the app installs its own (`KokoroService` with
@@ -1309,167 +1208,9 @@ A speaker connection that closes ends its jobs where they got to
 (`cancelled_by_client`); there is no resume — the next job goes to whichever
 connection is the device's then.
 
-## Incognito mode (2026-10-13)
-
-A menu checkbox (`Incognito`, persisted in `UserDefaults` as `vo.incognito`, so a restart
-cannot drop it) under which nothing the user says or hears leaves the Mac or is written to
-disk. The menu-bar icon's base symbol becomes `sunglasses.fill`; every tint, ring and badge
-draws over it unchanged, and the discard trash can still wins. `/v1/status` reports
-`"incognito"`.
-
-**Where it is enforced.** Not at one switch near the UI: every network client and every
-content-bearing writer calls `Incognito.check`/`refusal` itself, at the lowest level it owns,
-so a new caller cannot get round it by forgetting. Higher-level checks exist only for a clean
-error. `IncognitoTests` asks each gate directly.
-
-| Refused | Gate |
-|---|---|
-| Wispr Flow (gRPC stream, `/llm/asr`, token refresh, dictionary sync) | `FlowChannel.sharedChannel`, `WisprTranscriber`, `WisprToken.refresh`, `WisprDictionary.fetchEntries`; `WisprFlowProvider` fails first so the error names Wispr. As primary that is a loud `StreamHealth` ("Dictation is off … choose Parakeet"); a Wispr shadow is skipped (a shadow's only product is a history entry). Turning incognito on also closes the keepalive'd channel. |
-| Clipboard summaries (Claude via `claude-print-daemon`) | `ClaudeSummarizer.askHaiku`, before the prompt file is written |
-| Dictation corpus | `DictationCorpus.record` |
-| Dictation history and clips | `AudioArbiter.record`/`persist`, `HistoryStore.save`. Nothing is filed, not even in memory, and re-paste forgets the last transcript. The recorder no longer writes a temp WAV at all (in either mode): the clip stays in memory and is only written when history keeps it. |
-| TTS audio cache | `AudioCache.store`. `TTSEngine` keeps lookahead clips in memory instead, each dropped once played and all of them (and the word timings) on `stop()` |
-| Words in the log | `Log.clip` logs only the length |
-| HTTP cache (`~/Library/Caches/com.chriswa.voiceoperator`) | Not incognito-specific: Kokoro requests use an ephemeral `URLSession` and `URLCache.shared` has no disk capacity, in every mode. `URLSession.shared` had been caching TTS request text, `/timestamps` words and the audio itself — the first incognito test found a sentence there. |
-| Spaceterm and other clients: `/v1/transcriptions`, `/v1/synthesize`, speech on a device, `/v1/wake-word`, subscriber sockets (commands and dictation events) | `RemoteTranscriptionManager`, `WakeWordCheck.check`, the `/v1/synthesize` handler, `DeviceSpeech` (refuses the job, and each sentence as it is about to be sent), `SubscriberSocket`; HTTP refusals are 403 `{"error":"incognito"}`. Spaceterm is local, so this is policy rather than necessity: it has its own switch, `Incognito.blocksSpaceterm`. |
-
-Still allowed: Parakeet (on device; FluidAudio only touches the network to download model
-weights), the local Kokoro, dictation clean-up (loopback llama.cpp; its `URLSession` is
-ephemeral and its log carries no text), `/v1/speech` (text coming *in* to be spoken here), and reading
-the existing caches. The clipboard paste marks its item `org.nspasteboard.TransientType` and
-`ConcealedType` (in both modes) so clipboard managers skip it; Universal Clipboard is not
-known to honour those, so Handoff should be off in System Settings for incognito to hold.
-
 ## Voice commands (command mode)
 
 Superseded (2026-10-09). The name-first grammar, call-signs, `repeat`/`focus`/`skip`
 and Haiku "asides" left with transcript tracking; Voice Operator no longer interprets
 commands at all. Ctrl+Fn hands the verbatim transcription to the registered command
 client; see **Dictation and command mode** above.
-
----
-
-## Phased plan
-
-- **Phase 0 — STT spike (Node/TS, static-decode only).** Prove `mic → opus → transcript →
-  /llm format → formatted text` standalone, reading the token from `session.json` at runtime.
-  Milestone A (easy): record a short WAV → opus → `POST /llm/asr` → raw transcript.
-  Milestone B: `wss://…/ws` streaming with partial transcripts.
-  Milestone C: decode + call the `/llm` formatting endpoint; confirm output matches Wispr.
-  Also verify Supabase refresh works headless. Node chosen to mirror Wispr's own JS client
-  (grpc-js is irrelevant; `ws` + `fetch` + an opus encoder suffice).
-- **Phase 1 — Swift app skeleton.** Menu bar, Hotkey (Right Shift), CoreAudio mute, SFX,
-  Inserter (paste helper), wired to a stub Transcriber. End-to-end dictation → paste.
-- **Phase 2 — Port the proven STT** into `WisprTranscriber` (Swift), behind the protocol.
-- **Phase 3 — Speaker + ClaudeWatcher + AudioArbiter.** Streaming TTS with cache, transcript
-  watching/summarization, name/voice registry, spaceterm forwarding, full arbitration.
-- **Phase 4 — Retire** Wispr Flow (move trigger to Fn) and `transcript-reader.py`.
-
-## Spike results (Phase 0)
-
-**Milestone A — PROVEN (2026-07-02).** One real call validated the whole approach-A keystone:
-- Token: read `session.json` → 1309-char JWT; usable directly, no Wispr app interaction.
-- Auth header is the **raw** access token (`Authorization: <jwt>`, NOT `Bearer <jwt>`).
-- `POST https://api.wisprflow.ai/llm/asr`, `Content-Type: application/json`,
-  body `{ audio: base64(16 kHz mono s16le WAV), language: "en", prompt: "" }`.
-- Response `HTTP 200` → `{ "content": "<transcript>", "detected_language": "en" }`.
-  Output is already punctuated/capitalized (Whisper). Code: `spike/asr_spike.py`.
-- Supabase anon key (public, role=anon) extracted for headless refresh: in `spike/wispr_token.py`.
-
-**Endpoint etiquette:** the spike issues exactly one request per run (no polling/retries).
-
-## Build status (as of this checkpoint)
-
-- **Phase 0 (STT spike):** ✅ done + ported to Swift (`WisprTranscriber`, validated).
-- **Phase 1 (Swift app skeleton):** ✅ builds clean, dictation pipeline wired end to end:
-  `HotkeyMonitor` (Right Shift) → `OutputMuter` (CoreAudio mute) → `AudioRecorder`
-  (AVAudioEngine→WAV) → `WisprTranscriber` (`/llm/asr`) → `TextInserter` (clipboard+⌘V+restore),
-  with `SoundEffect` cues and the `MenuBarController` bullhorn (red=recording, green=playing).
-  `AudioArbiter` coordinates. App bundle via `scripts/make-app.sh`.
-- **Name/voice registry:** ✅ `NameVoiceTable` (81 gender-aligned call-signs mapped onto the
-  27 English Kokoro voices, ~3 names/voice; call-sign gender matches the voice's reported
-  gender) + `NameVoiceRegistry` (sticky, no active name reuse, prefers a distinct voice per
-  concurrent session until the 27-voice pool is exhausted, idle TTL) with passing unit tests.
-- **Phase 3 (TTS half):** ✅ built + validated. `KokoroSynthesizer` (local `/synthesize`, streaming),
-  `AudioCache` (≥1-day WAV cache, free replay), `SpeechPlayer` (haltable/awaitable),
-  `TTSEngine`, and the `AudioArbiter` TTS queue with **barge-in re-cue** (dictation halts +
-  re-queues the interrupted utterance from the start). `ClaudeWatcher` = `TranscriptParser`
-  (unit-tested) + `ClaudeSummarizer` (Keychain OAuth → Haiku) + `TranscriptWatcher` (tail,
-  mute headless/bg — orphaned Bash tasks whose completion notification the harness never
-  persisted are resolved by probing whether anything still holds the task's `.output` file
-  open — sticky name/voice, idle TTL) + `SpacetermSocket` (tts-speaking events, and
-  a `session-names` event: the full Claude-session→call-sign map, broadcast whole on
-  every registry change and once on startup).
-  All three external integrations validated with one live call each:
-  `--asr-test`, `--tts-test`, `--summarize-test`.
-- **Phase 4 (retire Wispr + transcript-reader.py, move to Fn):** ⏳ pending live use.
-- **Blocked on user:** macOS Accessibility + Microphone grants to verify the full live loop
-  (dictation paste + Claude narration) in the real app bundle.
-
-## Open items (remaining spike milestones)
-- **Milestone B** — `wss://api.wisprflow.ai/…/ws` streaming: exact path + handshake (auth via
-  header vs query param) + per-message JSON schema (opus `audio_chunks` up, `partial_transcript`
-  down). Lower priority now that HTTP `/llm/asr` is proven sufficient for v1.
-- **Dictionary prompt-biasing — REVERTED (2026-07-08).** The 2026-07-07 change that passed the
-  dictionary as the `/llm/asr` `prompt` degraded transcription: Whisper's `prompt` is
-  autoregressive *previous-transcript* context, not a spelling dictionary, so it regurgitated the
-  word list on quiet chunks, injected unspoken words, and over-corrected. Reverted to an empty
-  prompt (`WisprTranscriber`). `WisprDictionary` is kept as infrastructure for the flow-request
-  `dictionary_context` path below (the correct biasing channel). **Read the app, don't probe the
-  live API** (see `CLAUDE.md`).
-
-- **Milestone C — SHIPPED: formatted gRPC dictation (Wispr parity) (2026-07-08; client
-  on grpc-swift 1.x as of 2026-08-02 for the latest macOS release / universal).**
-  Full ground-truth decode from the Wispr Flow app bundle (`serializeFlowRequest` + the
-  `flow_api.v1` protobuf), captured in `spike/flow_request.md`, `spike/flow_spike.py`, and
-  `proto/flow_api_v1.proto`. Three transports Wispr uses, in fallback order:
-  1. **gRPC (PRIMARY, formatted) — IMPLEMENTED (`WisprFlowProvider` + `FlowSession`).**
-     Bidirectional `flow_api.v1.TranscriptionService/**TranscribeStream**` on
-     `model-v31pl413.grpc.api.baseten.co:443` (TLS, grpc-swift **1.x** — 2.x floors the
-     generated clients), over one process-wide keepalive'd connection
-     (`FlowChannel`, mirroring Wispr's `ensureClient` + 4 s/2 s/permit-without-calls pings).
-     Note the **unary** `Transcribe` RPC is Wispr's *fallback* (`makeHttpRequest`), not its
-     primary — using it as the primary is what made dictation slow, see "Streaming dictation".
-     Sends a protobuf
-     `Request {init{metadata,preferences.vocabulary=dictionary}, context,
-     payload.audio_packets=opus, commit}` — `init`+`context` once at open, then packets with
-     `commit: COMMIT_FALSE` as they are encoded, then the tail with `COMMIT_TRUE`; metadata
-     headers `authorization: Bearer <jwt>`,
-     `baseten-authorization: Api-Key <key>`, `baseten-model-id`, `x-baseten-environment: production`,
-     `disable-formatting: false`. Returns **formatted** `result.output.plaintext` (→ we use
-     `llm_text || asr_text`). **Validated live end to end** — "kubectl"/"Coda" correctly spelled/cased.
-     Opus via the vendored universal `COpus`/`OpusEncoder` (16 kHz mono, 20 ms / 320-sample frames).
-     The Baseten `Api-Key` is read at runtime from `VOICEOP_BASETEN_KEY` or
-     `~/Library/Application Support/VoiceOperator/baseten-key` and is **not committed**.
-     **Where the key comes from (bundle, 2026-09-02):** it is *not* per-user and Wispr does
-     not fetch it at login — it is a static constant compiled into the Wispr Flow app
-     (`.webpack/main/index.js`, the config module that also holds `RT="v31pl413"`, the
-     Supabase URL/anon key, and the `api.wisprflow.ai` hosts; `getRpcOptions` sends it as
-     `"baseten-authorization": \`Api-Key ${Rt.Fo}\``). The per-user credential is the
-     Supabase JWT in `authorization: Bearer`. On a fresh Mac, extract the bundle (see
-     `CLAUDE.md`), grep for `baseten-authorization`, follow the `Fo` export to its string
-     constant, and write it to `baseten-key`. Without it every dictation logs
-     `stream open failed: no Baseten key … fell back to raw /llm/asr` and takes 5–10 s.
-     **Surfacing the fallback (2026-09-02).** That log line was the only symptom, and a
-     fresh Mac ran on the slow path for an evening before anyone read it. `StreamHealth`
-     (`Core/StreamHealth.swift`) now tracks the path — `.degraded(reason:)` on a stream
-     open failure, open timeout, post-commit failure, or missing key/encoder, `.streaming`
-     on every successful commit — and `AudioArbiter` publishes each transition to: the
-     log; a persistent menu warning line (the Secure Keyboard Entry pattern); an amber
-     top-right dot on the icon in *every* state so it is seen before the next dictation;
-     the key-up cue (`listeningFinishedSlow`: the normal two-tone plus a low tail, so the
-     mode stays audible); `/v1/status` (`stream`, `stream_reason`); and a WARNING from
-     `restart-app.sh` after each restart. The key check runs in `prewarm()` at launch.
-  2. **Baseten `run_remote` HTTP (msgpack)** — decoded but rejected `input is malformed` (server
-     schema not in the bundle); superseded by the gRPC path, not implemented.
-  3. **`/llm/asr_audio_chunks` / `/llm/asr` (raw fallback)** — `WisprTranscriber`. gRPC falls back
-     here when the Baseten key is absent or the call fails. Raw Whisper; never formats for English.
-- **Why HTTP never replaces gRPC for formatted English (bundle, 2026-08-02).**
-  Decoded from Wispr's `getFinalTranscriptionResult`: `/llm/asr_audio_chunks` returns
-  `status: "raw_transcript"`. For English that branch falls through to raw `asrText`; the only
-  follow-up formatting call is `formatNonEnglish` → `/llm/format_non_english`. Two endpoints that
-  would transcribe-and-format over plain HTTP (`transcribeAndFormat` → `POST /llm/api`,
-  `formatEnglish` → `POST /llm/formatting`) are **dead code** in the shipped app (definition only,
-  zero call sites) — do not build on them without new bundle evidence. Formatted `llm_text` only
-  arrives from the Baseten gRPC response. See `COMPATIBILITY-PLAN.md`.
-- Opus params (frame size 320 / 20 ms, `OPUS_APPLICATION_VOIP`) confirmed for the chunks/gRPC paths.

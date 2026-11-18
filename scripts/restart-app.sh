@@ -127,22 +127,13 @@ start_and_verify() {   # $1 old pid (may be empty)
         echo "WARNING: running from $bundle, not /Applications — Ice 2 will hide the menu-bar icon" >&2
         echo "         see: grep 'relocate:' ~/Library/Logs/VoiceOperator.log | tail -1" >&2
     fi
-    # The app checks its transcription provider at launch and reports the path
-    # dictation will take. For Wispr Flow without the Baseten key, every
-    # dictation uploads *after* key-up to raw /llm/asr — 5–10 s and unformatted —
-    # and nothing else in the build flow would say so (see StreamHealth.swift and
-    # CLAUDE.md). For Parakeet, degraded means dictations are failing.
-    local stream reason provider
+    # The app loads Parakeet at launch; degraded means it failed to load or the
+    # last dictation failed (see StreamHealth.swift).
+    local stream reason
     stream="$(printf '%s' "$HTTP_BODY" | json_field stream -)" || stream=""
-    provider="$(printf '%s' "$HTTP_BODY" | json_field transcription_provider -)" || provider=""
     if [ "$stream" = "degraded" ]; then
         reason="$(printf '%s' "$HTTP_BODY" | json_field stream_reason -)" || reason="unknown reason"
-        if [ "$provider" = "parakeet" ]; then
-            echo "WARNING: Parakeet dictation is failing ($reason)" >&2
-        else
-            echo "WARNING: dictation is on the SLOW path — live stream unavailable ($reason)" >&2
-            echo "         see CLAUDE.md 'Dictation transcription paths' for the baseten-key file" >&2
-        fi
+        echo "WARNING: Parakeet dictation is failing ($reason)" >&2
     fi
 }
 

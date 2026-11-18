@@ -5,65 +5,10 @@ import AVFoundation
 /// Developer self-tests, invoked from `main.swift` via CLI flags. Not part of
 /// the shipping menu-bar app.
 enum DebugCLI {
-    /// Synthesize `text` with `say`, transcode to the ASR WAV format, and run a
-    /// single WisprTranscriber call. Prints the transcript. Makes exactly one
-    /// network request (endpoint etiquette).
-    static func runASRTest(text: String) async {
-        do {
-            let tmp = FileManager.default.temporaryDirectory
-            let aiff = tmp.appendingPathComponent("vo-say-\(UUID().uuidString).aiff")
-            let wav = aiff.deletingPathExtension().appendingPathExtension("wav")
-            defer { try? FileManager.default.removeItem(at: aiff)
-                    try? FileManager.default.removeItem(at: wav) }
-
-            let say = Process()
-            say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-            say.arguments = ["-o", aiff.path, text]
-            try say.run(); say.waitUntilExit()
-
-            try AudioRecorder.convertToASRWav(from: aiff, to: wav)
-            let bytes = (try? Data(contentsOf: wav).count) ?? 0
-            FileHandle.standardError.write(Data("said \(text.count) chars -> WAV \(bytes) B\n".utf8))
-
-            let transcript = try await WisprTranscriber().transcribe(wavData: Data(contentsOf: wav), language: "en")
-            print("transcript: \(transcript)")
-        } catch {
-            FileHandle.standardError.write(Data("asr-test failed: \(error)\n".utf8))
-        }
-    }
-
-    /// Synthesize `text` with `say` and transcribe it through the gRPC flow path
-    /// (`WisprFlowProvider`) — the formatted Wispr-parity path, streamed over
-    /// `TranscribeStream` exactly as live dictation is. Requires
-    /// `VOICEOP_BASETEN_KEY`; otherwise it exercises the `/llm/asr` fallback.
-    /// One stream (endpoint etiquette). The `trace …` line it logs shows the
-    /// phase-by-phase timing.
-    static func runFlowGRPCTest(text: String) async {
-        do {
-            let tmp = FileManager.default.temporaryDirectory
-            let aiff = tmp.appendingPathComponent("vo-say-\(UUID().uuidString).aiff")
-            let wav = aiff.deletingPathExtension().appendingPathExtension("wav")
-            defer { try? FileManager.default.removeItem(at: aiff)
-                    try? FileManager.default.removeItem(at: wav) }
-            let say = Process()
-            say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-            say.arguments = ["-o", aiff.path, text]
-            try say.run(); say.waitUntilExit()
-            try AudioRecorder.convertToASRWav(from: aiff, to: wav)
-            let haveKey = WisprBasetenKey.value != nil
-            FileHandle.standardError.write(Data("flow-grpc-test: said \(text.count) chars; baseten key \(haveKey ? "present" : "ABSENT → /llm fallback")\n".utf8))
-            let transcript = try await WisprFlowProvider().transcribe(wavURL: wav)
-            print("transcript: \(transcript.text)")
-        } catch {
-            FileHandle.standardError.write(Data("flow-grpc-test failed: \(error)\n".utf8))
-            exit(1)
-        }
-    }
-
-    /// Synthesize `text` with `say` and dictate it through a provider's *live*
+    /// Synthesize `text` with `say` and dictate it through Parakeet's *live*
     /// path — a `TranscriptionLeg` fed 100 ms slices in real time, then finished,
     /// exactly as a held key does. The `trace …` line shows the timing.
-    static func runProviderTest(provider id: TranscriptionProviderID, text: String, cleanUp: Bool = false) async {
+    static func runProviderTest(text: String, cleanUp: Bool = false) async {
         do {
             let tmp = FileManager.default.temporaryDirectory
             let aiff = tmp.appendingPathComponent("vo-say-\(UUID().uuidString).aiff")
@@ -78,10 +23,10 @@ enum DebugCLI {
             let clip = try Data(contentsOf: wavURL)
             let wav = try WAVFile.parse(clip)
 
-            let base = TranscriptionProviders.provider(id)
+            let base = TranscriptionProviders.parakeet
             let provider: any TranscriptionProvider = cleanUp ? CleanedUpProvider(base: base) : base
             if let problem = await provider.prewarm() {
-                FileHandle.standardError.write(Data("provider-test: \(id.rawValue) not ready: \(problem)\n".utf8))
+                FileHandle.standardError.write(Data("provider-test: \(base.id.rawValue) not ready: \(problem)\n".utf8))
             }
             let trace = DictationTrace("provider-test")
             let leg = TranscriptionLeg(provider: provider, target: DictationTarget(), trace: trace)
@@ -98,7 +43,7 @@ enum DebugCLI {
             trace.mark("done")
             trace.flush()
             if let failure = outcome.liveFailure {
-                FileHandle.standardError.write(Data("provider-test: live path failed (\(failure)), fell back\n".utf8))
+                FileHandle.standardError.write(Data("provider-test: live session failed (\(failure)), transcribed the clip\n".utf8))
             }
             if let raw = outcome.transcript.raw { print("raw:        \(raw)") }
             print("transcript: \(outcome.text)")
@@ -108,49 +53,19 @@ enum DebugCLI {
         }
     }
 
-    /// Transcribe an existing WAV file through the real chunked transcriber
-    /// path (one network request per 28 s chunk). Prints the transcript.
+    /// Transcribe an existing WAV file through Parakeet. Prints the transcript.
     static func runTranscribeFile(path: String) async {
         do {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             let wav = try WAVFile(contentsOf: url)
             FileHandle.standardError.write(Data(String(format: "clip: %.1fs @ %d Hz\n",
                                                        wav.duration, wav.sampleRate).utf8))
-            let transcript = try await WisprTranscriber().transcribe(wavData: Data(contentsOf: url), language: "en")
-            print(transcript)
+            let transcript = try await TranscriptionProviders.parakeet.transcribe(wavURL: url)
+            print(transcript.text)
         } catch {
             FileHandle.standardError.write(Data("transcribe-file failed: \(error)\n".utf8))
             exit(1)
         }
-    }
-
-    /// Fetch the user's live Wispr dictionary and print the words that would ride
-    /// along as `dictionary_context`. Bypasses the cache (fresh fetch each run).
-    static func runDictTest() async {
-        do {
-            let token = try await WisprToken.shared.accessToken()
-            async let personal = fetchDictJSON(path: "/api/v1/dictionary/personal", token: token)
-            async let team = fetchDictJSON(path: "/api/v1/dictionary/team", token: token)
-            let words = WisprDictionary.contextWords(personal: try await personal,
-                                                     team: (try? await team) ?? [])
-            print("dictionary_context (\(words.count) words):")
-            for w in words { print("  • \(w)") }
-        } catch {
-            FileHandle.standardError.write(Data("dict-test failed: \(error)\n".utf8))
-            exit(1)
-        }
-    }
-
-    private static func fetchDictJSON(path: String, token: String) async throws -> [WisprDictionary.Entry] {
-        var req = URLRequest(url: URL(string: "https://api.wisprflow.ai" + path)!)
-        req.setValue(token, forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw TranscriberError.http(status: (resp as? HTTPURLResponse)?.statusCode ?? -1,
-                                        body: String(decoding: data, as: UTF8.self))
-        }
-        return try JSONDecoder().decode([WisprDictionary.Entry].self, from: data)
     }
 
     /// Play the three dictation chirps in sequence (no network).
@@ -181,13 +96,13 @@ enum DebugCLI {
         ]
         let statuses: [OperatorStatus] = [.listening, .commandListening]
         // Each status across the styles, then hands-free's looks: waiting for the trigger word, the
-        // conversation window, hearing, sending, and the window in incognito.
+        // conversation window, hearing, sending, and the window with dictation failing.
         var icons: [[NSImage]] = statuses.map { status in
             styles.map { MenuBarController.icon(status: status, muted: false, style: $0) }
         }
         icons.append([(HandsFreeLook.waiting, false), (.conversation, false), (.hearing, false), (.sending, false),
-                      (.conversation, true)].map { look, incognito in
-            MenuBarController.icon(status: .idle, muted: false, incognito: incognito, handsFree: look)
+                      (.conversation, true)].map { look, degraded in
+            MenuBarController.icon(status: .idle, muted: false, degraded: degraded, handsFree: look)
         })
         let scale: CGFloat = 2, zoom: CGFloat = 8, pad: CGFloat = 4
         let cell = MenuBarController.icon(status: .listening, muted: false).size
@@ -245,7 +160,7 @@ enum DebugCLI {
         do {
             try png.write(to: url)
             print("icon preview → \(url.path)  (rows: listening dark/light, command dark/light, hands-free dark/light; "
-                  + "cols: normal, a, a+x, x, trash — hands-free: trigger word needed, window, hearing, sending, incognito)")
+                  + "cols: normal, a, a+x, x, trash — hands-free: trigger word needed, window, hearing, sending, degraded)")
         } catch {
             FileHandle.standardError.write(Data("icon-preview failed: \(error)\n".utf8))
         }

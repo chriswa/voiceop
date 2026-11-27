@@ -149,6 +149,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             Log.log("paste technique: \(PastePreferences.technique.rawValue)")
             return typing
         }
+        menuBar.retypeClipboardState = { [unowned self] in arbiter.retypeClipboardNext }
+        menuBar.onToggleRetypeClipboard = { [unowned self] in
+            arbiter.retypeClipboardNext.toggle()
+            Log.log("retype-clipboard: \(arbiter.retypeClipboardNext ? "armed" : "disarmed") (menu)")
+            return arbiter.retypeClipboardNext
+        }
         menuBar.keepMicOpenState = { [unowned self] in shouldKeepMicrophoneOpen }
         menuBar.onToggleKeepMicOpen = { [unowned self] in
             AudioPreferences.keepMicrophoneOpen.toggle()
@@ -220,7 +226,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         hotkey.onCycleStyle = { [weak self] in self?.arbiter.cycleTranscriptStyle() }
         hotkey.onRepaste = { [weak self] in self?.arbiter.repasteLast(using: .clipboard) }
-        hotkey.onRetype = { [weak self] in self?.arbiter.repasteLast(using: .keystrokes) }
+        hotkey.onRetype = { [weak self] in self?.arbiter.retypeLast() }
         hotkey.onToggleMute = { [weak self] in self?.menuBar.toggleNarrationMute() }
         hotkey.onSpeakClipboard = { [weak self] in self?.arbiter.speakClipboard() }
         hotkey.onSummarizeClipboard = { [weak self] in self?.arbiter.summarizeClipboard() }

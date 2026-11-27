@@ -342,6 +342,9 @@ Out (deferred):
   modifier state instead would see each character as a ⌘⌃ shortcut. `Chord` matches Shift rather
   than ignoring it, which is what lets ⌘⌃V and ⌘⌃⇧V share a keycode — and stops a stray Shift
   aliasing any other chord onto its handler.
+- **Use Clipboard for Next Re-type** (a menu checkbox under the re-type hint) arms a one-shot:
+  the next ⌘⌃⇧V types the clipboard's text instead of the last insertion, then unchecks itself.
+  An empty clipboard leaves it armed. It lives in memory only, so a relaunch disarms it.
 
 ### Mute-during-dictation — CoreAudio device mute
 - At dictation start `OutputMuter` saves the default output device's mute state and sets

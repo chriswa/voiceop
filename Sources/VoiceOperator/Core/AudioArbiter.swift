@@ -722,6 +722,23 @@ final class AudioArbiter {
         guard let lastInsertion else { return }
         TextInserter.insert(lastInsertion, using: technique, afterModifiersClear: true) { SoundEffect.pasted.play() }
     }
+
+    /// One shot, armed from the menu: the next ⌘⌃⇧V types the clipboard rather
+    /// than the last transcript, then disarms. Not persisted across launches.
+    var retypeClipboardNext = false
+
+    /// ⌘⌃⇧V: type the last transcript, or the clipboard when `retypeClipboardNext`
+    /// is armed. An empty clipboard leaves it armed so the user can copy and retry.
+    func retypeLast() {
+        guard retypeClipboardNext else { return repasteLast(using: .keystrokes) }
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            Log.log("retype-clipboard: clipboard has no text — still armed")
+            SoundEffect.transcriptionFailed.play(); return
+        }
+        retypeClipboardNext = false
+        Log.log("retype-clipboard: typing \(text.count) char(s) from the clipboard")
+        TextInserter.insert(text, using: .keystrokes, afterModifiersClear: true) { SoundEffect.pasted.play() }
+    }
     func retrySTT(id: UUID) { guard let e = sttHistory.first(where: { $0.id == id }), let url = e.wavURL else { return }; retry(url, id: id, command: false, seconds: e.duration) }
     func retryCommand(id: UUID) { guard let e = commandHistory.first(where: { $0.id == id }), let url = e.wavURL else { return }; retry(url, id: id, command: true, seconds: e.duration) }
     func copySTT(id: UUID) { if let e = sttHistory.first(where: { $0.id == id }) { copy(e.transcript) } }
